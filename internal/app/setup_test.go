@@ -202,6 +202,39 @@ func TestSetupWithoutDetectedImageRequiresExplicitInput(t *testing.T) {
 	}
 }
 
+func TestSetupIgnoresNestedImageRecipesWhenSuggestingProjectImage(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "fixtures", "example", ".devcontainer"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "fixtures", "example", "Containerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	devcontainer := []byte(`{"build":{"context":"..","dockerfile":"../Containerfile"}}`)
+	if err := os.WriteFile(filepath.Join(root, "fixtures", "example", ".devcontainer", "devcontainer.json"), devcontainer, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(root, "release-artifact")
+	if err := os.WriteFile(artifact, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(artifact, projectinspect.MaxFileBytes+1); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewSetupServiceWithDependencies(SetupDependencies{})
+	preview, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Config.Image.Ref != "" || preview.Config.Image.Build != nil {
+		t.Fatalf("nested container recipe selected as project image: %#v", preview.Config.Image)
+	}
+	if len(preview.Diagnostics) != 1 || preview.Diagnostics[0].Code != "image_required" {
+		t.Fatalf("diagnostics = %#v", preview.Diagnostics)
+	}
+}
+
 func TestSetupFinalConfirmationWritesConfigAndApproval(t *testing.T) {
 	root := t.TempDir()
 	repository := &setupApprovalRepository{}

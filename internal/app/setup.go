@@ -460,11 +460,17 @@ func suggestConfig(facts projectinspect.Facts) config.ConfigDocument {
 		Workspace:     config.WorkspaceConfig{Root: "."},
 		Agents:        config.AgentConfig{Default: "codex", Allowed: []string{"codex"}},
 	}
-	if len(facts.Containerfiles) > 0 {
-		document.Image = config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: facts.Containerfiles[0]}}
+	for _, candidate := range facts.Containerfiles {
+		if candidate != "Containerfile" && candidate != "Dockerfile" {
+			continue
+		}
+		document.Image = config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: candidate}}
 		return document
 	}
 	for _, devcontainer := range facts.DevContainers {
+		if devcontainer.Path != ".devcontainer/devcontainer.json" {
+			continue
+		}
 		switch {
 		case devcontainer.Image != "":
 			document.Image = config.ImageConfig{Ref: devcontainer.Image}
