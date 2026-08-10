@@ -1,0 +1,11 @@
+{
+  // Only explicitly allowlisted fields become facts.
+  "name": "composite",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+  },
+  "workspaceFolder": "/workspace",
+  "forwardPorts": [3000, "localhost:8080"],
+  "customizations": {"vscode": {}},
+}

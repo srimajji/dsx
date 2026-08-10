@@ -1,0 +1,96 @@
+name: Physical Apple compatibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  physical-apple:
+    if: >-
+      github.ref_protected == true &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))))
+    environment: dsx-physical-apple
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_major: '26'
+            runner_label: dsx-physical-macos-26-arm64
+          - os_major: '27'
+            runner_label: dsx-physical-macos-27-arm64
+    runs-on:
+      group: dsx-physical-apple
+      labels: ${{ matrix.runner_label }}
+    concurrency:
+      group: dsx-physical-${{ matrix.os_major }}
+      cancel-in-progress: false
+    timeout-minutes: 120
+    env:
+      DSX_CI_STATE_ROOT: ${{ vars.DSX_CI_STATE_ROOT }}
+      DSX_CI_EXPECTED_OS_MAJOR: ${{ matrix.os_major }}
+      DSX_CI_EVIDENCE_DIR: ${{ runner.temp }}/dsx-evidence/${{ github.run_id }}-${{ github.run_attempt }}-macos-${{ matrix.os_major }}
+    steps:
+      - name: Check out trusted revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Select pinned Go toolchain
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: false
+
+      - name: Acquire lock, sweep, attest, ledger, and create sentinels
+        id: runner_ops
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/runner-ops/physical-lane.sh begin
+
+      - name: Run Apple 1.2.2 canary
+        env:
+          DSX_RUN_APPLE_TESTS: '1'
+          DSX_CI_RUN_ID: ${{ github.run_id }}
+          DSX_CI_RUN_LABEL: ${{ steps.runner_ops.outputs.run_label }}
+          DSX_CI_LEDGER: ${{ steps.runner_ops.outputs.ledger }}
+        run: >-
+          bash scripts/runner-ops/record-command.sh canary
+          go test ./tests/apple
+          -run '^TestCoreP0B1ProbeVersionGateAndPinnedImageAvailability$'
+          -count=1
+
+      - name: Run physical Apple suites
+        env:
+          DSX_RUN_APPLE_TESTS: '1'
+          DSX_RUN_APPLE_FAULT_CLEANUP: '1'
+          DSX_RUN_APPLE_PERFORMANCE: '1'
+          DSX_PERFORMANCE_EVIDENCE: ${{ env.DSX_CI_EVIDENCE_DIR }}/performance.json
+          DSX_CI_RUN_ID: ${{ github.run_id }}
+          DSX_CI_RUN_LABEL: ${{ steps.runner_ops.outputs.run_label }}
+          DSX_CI_LEDGER: ${{ steps.runner_ops.outputs.ledger }}
+        run: >-
+          bash scripts/runner-ops/record-command.sh apple-suites
+          go test ./tests/apple -count=1
+
+      - name: Always clean exact ownership and compare sentinels
+        if: ${{ always() }}
+        run: bash scripts/runner-ops/physical-lane.sh finish
+
+      - name: Retain runner evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dsx-physical-macos-${{ matrix.os_major }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DSX_CI_EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6

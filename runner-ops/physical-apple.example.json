@@ -1,0 +1,65 @@
+{
+  "schema": "dsx.physical-runner/v1",
+  "provisioned": false,
+  "runner_group": "dsx-physical-apple",
+  "protected_environment": "dsx-physical-apple",
+  "repository_variable": {
+    "name": "DSX_CI_STATE_ROOT",
+    "example": "/Users/dsx-runner/Library/Application Support/dsx-ci"
+  },
+  "state_layout": {
+    "owner": "dedicated runner account",
+    "mode": "0700",
+    "required_directories": [
+      "ledgers",
+      "quarantine"
+    ],
+    "quarantine_marker": "QUARANTINED.json",
+    "host_lock": "host.lock"
+  },
+  "lanes": [
+    {
+      "os_major": 26,
+      "architecture": "arm64",
+      "labels": [
+        "self-hosted",
+        "macOS",
+        "ARM64",
+        "dsx-physical-macos-26-arm64"
+      ]
+    },
+    {
+      "os_major": 27,
+      "architecture": "arm64",
+      "labels": [
+        "self-hosted",
+        "macOS",
+        "ARM64",
+        "dsx-physical-macos-27-arm64"
+      ]
+    }
+  ],
+  "runtime": {
+    "container_cli": "1.2.2",
+    "container_api_server": "1.2.2",
+    "service_status": "running"
+  },
+  "required_programs": [
+    "bash",
+    "container",
+    "curl",
+    "go",
+    "jq",
+    "shasum"
+  ],
+  "github": {
+    "allowed_events": [
+      "workflow_dispatch",
+      "push"
+    ],
+    "protected_refs_only": true,
+    "pull_request_event_enabled": false,
+    "runner_group_repository_scope_required": true,
+    "environment_protection_required": true
+  }
+}

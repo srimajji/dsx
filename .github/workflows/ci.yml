@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Ordinary CI must never opt into even the read-only installed-runtime probe.
+env:
+  DSX_APPLE_CONTAINER: ""
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Unit tests
+        run: go test ./...
+      - name: Cross-compile Linux ARM64 guest helper (not executed)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/dsx-guest-linux-arm64 ./cmd/dsx-guest
+      - name: Guest import closure
+        run: go test ./tests/contract -run '^TestGuestImportClosure$'
+
+  host-race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Focused host state race tests
+        run: go test -race -count=1 ./internal/app ./internal/state ./internal/ownership ./internal/runtime/apple ./internal/ports ./internal/bridge ./internal/hostopen
+
+  guest-linux-arm64-race:
+    # Native ARM64 executes the race-enabled guest tests; this is not a cross-run.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Execute Linux ARM64 guest race tests
+        run: go test -race -count=1 ./internal/guest ./internal/guestproto ./cmd/dsx-guest
+      - name: Build Linux ARM64 guest helper natively
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/dsx-guest-linux-arm64 ./cmd/dsx-guest
+
+  smoke-fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: ./internal/config
+            target: FuzzConfigJSONC
+          - package: ./internal/guestproto
+            target: FuzzGuestProtocol
+          - package: ./internal/guestproto
+            target: FuzzGuestFrame
+          - package: ./internal/terminal
+            target: FuzzTerminalSanitizer
+          - package: ./internal/ownership
+            target: FuzzOwnershipFailsClosed
+          - package: ./internal/runtime/apple
+            target: FuzzRuntimeInspectJSON
+          - package: ./internal/runtime/apple
+            target: FuzzRuntimeAmbiguousIP
+          - package: ./internal/bridge
+            target: FuzzTCPDestinationValidation
+          - package: ./internal/hostopen
+            target: FuzzCallbackValidation
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Finite fuzz smoke
+        run: go test "${{ matrix.package }}" -run '^$' -fuzz "^${{ matrix.target }}$" -fuzztime=10s
+
+  darwin-build:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath ./cmd/dsx

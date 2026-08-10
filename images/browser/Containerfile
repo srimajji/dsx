@@ -1,0 +1,12 @@
+FROM mcr.microsoft.com/playwright@sha256:5361940f845a5077926d54746122f7b68a121cc2aa27df6241087b774203fc44
+
+WORKDIR /app
+COPY package.json package-lock.json entrypoint.mjs ./
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && ./node_modules/.bin/playwright install chromium \
+    && test -x /ms-playwright/chromium-1237/chrome-linux/chrome \
+    && rm -rf /root/.npm
+
+USER pwuser
+WORKDIR /home/pwuser
+ENTRYPOINT ["/usr/bin/node", "/app/entrypoint.mjs"]

@@ -1,15 +1,35 @@
 # DSX MVP implementation plan
 
-- **Status:** implementation-ready plan; no production implementation included
-- **Date:** 2026-08-09
+- **Status:** MVP implementation complete in source; external acceptance and release gates remain
+- **Original plan date:** 2026-08-09
+- **Completion snapshot:** 2026-08-10
 - **Authority:** [PRD v0.3](./PRD.md) and [ADR 0001](./adr/0001-dsx-implementation-architecture.md)
 - **Historical evidence only:** [PRD/ADR pressure test](./review-2026-08-09-prd-adr-pressure-test.md)
+- **Closeout backlog:** [Missed, skipped, and post-MVP work](./post-mvp-backlog.md)
 
-## 1. Evidence baseline
+## Implementation outcome
 
-### 1.1 Repository state
+The numbered slices and issue-sized tasks below are retained as the execution record. DSX-001 through DSX-085 are implemented in source, tests, workflows, release tooling, or documentation. The implementation is not a signed public release: unavailable credentials, immutable reference fixtures, physical runner lanes, registry/signing identities, and external integration evidence remain tracked in the [post-MVP backlog](./post-mvp-backlog.md).
 
-The repository contains the PRD, ADR 0001, and historical review only. It has no Go source, `go.mod`, `go.sum`, image recipe, schema, test fixture, CI workflow, or implementation source. `.git/config` has no remote, so the canonical Go module path is not yet knowable.
+| Slice | Source implementation | Closeout qualification |
+|---|---|---|
+| 1 — Foundation | Complete | Go 1.26.5 is pinned; the canonical module is `github.com/srimajji/dsx`; Darwin/arm64 host and Linux/arm64 guest builds pass. |
+| 2 — Inspect and TUI | Complete | Inspect/approval, deterministic CLI behavior, setup/launcher/dashboard state selection, non-TTY help, accessibility, and terminal sanitization are implemented and tested. |
+| 3 — Live lifecycle | Complete and locally Apple-tested | Lifecycle, ownership, rollback, PTY, cleanup, and compatibility behavior were exercised on macOS 27 with Apple `container` 1.2.2. The macOS 26 physical lane remains external. |
+| 4 — Guest and services | Complete in source | Supervisor, protocol, health, logs, ports, and integrated-service contracts pass focused tests. Complete immutable `devenv` reference-workspace acceptance remains external. |
+| 5 — Harness and auth | Complete in source | Four pinned adapters, isolated auth generations, login orchestration, MCP contracts, PTY behavior, and fail-closed attestation are implemented. Full real-provider authentication evidence remains external. |
+| 6 — Clone and Git | Complete and locally Apple-tested | Named-clone creation, modification, status, diff, fetch, apply, unfetched protection, and cleanup were exercised end to end. |
+| 7 — Browser | Complete and locally Apple-tested | The zero-mount private browser path, owner connectivity, cross-network/host denial, and exact cleanup passed locally; physical-lane release evidence remains external. |
+| 8 — Host bridges | Complete in source; partial external evidence | Leapp atomic generation switching passed locally. Private-route abuse/isolation proof and provider-supported OAuth callback wiring remain external. |
+| 9 — Release hardening | Tooling complete; release blocked | Static/race suites, Apple fault/performance support, packaging, SBOM, signing/notarization verification, CI protocols, and docs exist. Published images, identities, physical lanes, and a complete signed evidence bundle are absent. |
+
+At closeout, project-wide formatting, `go vet ./...`, `go test -race ./...`, and `make build` passed. Local Apple acceptance covered lifecycle/fault cleanup, fallback dynamic loopback ports, named-clone Git workflows, real PTY launcher/dashboard paths, browser isolation, Leapp generation switching, and the available OpenCode one-shot path. See the linked backlog for claims that were not proven.
+
+## 1. Historical evidence baseline
+
+### 1.1 Pre-implementation repository state
+
+The following paragraph records the state before implementation began; it is not the current repository inventory. At that time, the repository contained only the PRD, ADR 0001, and historical review, with no Go source, module files, image recipes, schema, test fixtures, workflows, or implementation. The current repository now contains those artifacts. The original lack of a Git remote was resolved by selecting `github.com/srimajji/dsx` as the canonical Go module path.
 
 ### 1.2 Observed workstation toolchains
 
@@ -46,7 +66,7 @@ Deliver one signed macOS ARM64 `dsx` executable plus one cgo-free Linux ARM64 `d
 
 The PRD exclusions remain unchanged: no Docker Engine/Compose/Testcontainers, nested containers, Kubernetes, Rosetta/amd64, arbitrary Nix or shell interpretation, sibling service topology, process-level isolation inside a workspace, general VPN, generic proxy, task scheduler, prompt coordinator, merge engine, host dependency adoption, permanent DSX daemon, GUI/web app, remote execution, or deletion of non-DSX/Apple-builder resources.
 
-The implementation must not add `dsx logs`, `dsx ps`, or a general-purpose `dsx exec` in the MVP. Apple `container logs`/`exec` remain available; DSX owns only the promised command surface.
+The frozen command surface now includes read-only `dsx status` and bounded `dsx logs PROCESS` for the integrated live workspace. It must not add `dsx ps`, a general-purpose `dsx exec`, log-following, or a named-clone process selector without an explicit contract change; Apple `container logs`/`exec` are outside DSX-owned behavior.
 
 ### 2.3 Locked architecture
 
@@ -96,7 +116,7 @@ These are code-review blockers, not preferences.
 
 ## 4. Go module and package layout
 
-`<module>` is resolved from the future canonical repository remote in DSX-001; repository-relative paths below are fixed.
+The canonical module path selected in DSX-001 is `github.com/srimajji/dsx`; repository-relative paths below are fixed.
 
 ```text
 cmd/dsx/main.go                       composition + build metadata + exit code
@@ -692,7 +712,7 @@ A pre-job/boot sweeper handles trap-invisible SIGKILL/power loss by combining le
 | DSX-084 Self-hosted CI operations | 025,080 | macOS 26/27 lanes, host lock/ledger/sentinels/sweeper/quarantine, trusted refs only | workflows, runner ops | No—infra/security owner | manual canary plus evidence JSON review |
 | DSX-085 User/operator docs | all behavior frozen | command/config/security/auth/cleanup/quarantine docs match observed behavior and no unsupported claims | `docs`, schema descriptions | Yes | doc examples executed against release candidate |
 
-## 11. Risk register, open questions, and ADR-change evidence
+## 11. Risk register, blocker closeout, and ADR-change evidence
 
 ### 11.1 Risks
 
@@ -711,18 +731,22 @@ A pre-job/boot sweeper handles trap-invisible SIGKILL/power loss by combining le
 | Persistent self-hosted runner compromise/state | Secrets and unrelated resource damage | dedicated restricted physical hosts, trusted refs, host lock, sentinels, quarantine, no job sudo/version switching. |
 | Performance misses warm budgets | MVP value | phase timing from first lifecycle slice; reject abstractions/extra VMs; revisit ADR on measured evidence. |
 
-### 11.2 Open questions/blockers
+### 11.2 Closeout status of original open questions
 
-1. **Canonical repository/module path:** no Git remote exists. Resolve before DSX-001; package layout is unaffected.
-2. **Local Go installation:** Go is absent. Install pinned 1.26.5 before implementation verification.
-3. **Reference workspaces:** `course-intelligence-agency` and `devenv` are not in this repository. CI needs access to pinned, nonsecret fixture snapshots or dedicated reference checkouts before Slices 3/4 acceptance.
-4. **Dynamic Apple publication:** determine whether `127.0.0.1:0:<guest>` works and is inspectable in 1.2.2.
-5. **macOS support inventory:** PRD requires 26+. Provision physical macOS 26 and 27 lanes; do not narrow to 26 without changing the PRD.
-6. **Harness vendor behavior:** OMP credential-only export, Codex keyring-to-file portability/MCP overrides, Claude subscription credential copying, and OpenCode/OMP project-config suppression require experiments or vendor confirmation. Fail closed rather than invent an API.
-7. **Auth conflict UX:** the safe storage policy preserves conflict candidates. Decide the minimal doctor/TUI resolution wording before Slice 5; no new broad auth command is required.
-8. **Apple private network/host interface semantics:** prove owner browser connectivity, cross-network denial, service-name DNS, and an interface on which a host relay can bind without LAN/tailnet exposure.
-9. **Leapp update mechanism:** official docs establish rotation but not atomic filesystem mechanics. Observe the shipped client plus Apple bind behavior.
-10. **Standard image registry/signing identity:** choose registry/release ownership before publishing Slice 5 artifacts.
+The original implementation blockers were resolved or transferred to the [post-MVP backlog](./post-mvp-backlog.md); they are no longer prerequisites for editing this completed plan.
+
+| Original question | Closeout status |
+|---|---|
+| Canonical repository/module path | Resolved: `github.com/srimajji/dsx`. |
+| Local Go installation | Resolved: Go 1.26.5 installed and pinned; module language floor remains 1.25.8. |
+| Reference workspaces | Open as MVP-GAP-001 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence): immutable nonsecret snapshots and complete repeatable acceptance were not supplied. |
+| Dynamic Apple publication | Resolved safely: Apple 1.2.2 native `:0` publication remains unsupported; DSX uses the tested loopback reservation/handoff fallback and inspect-derived bindings. |
+| macOS support inventory | Open as MVP-GAP-002 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence): macOS 26/27 dedicated physical lanes are not provisioned. |
+| Harness vendor behavior | Partially resolved in implementation; real provider authentication, refresh, callback, and PTY evidence remains MVP-GAP-003 and MVP-GAP-004 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
+| Auth conflict UX | Resolved for MVP: preserve and report the conflict candidate, keep the active seed unchanged, and require a fresh explicit login; no generic merge command. |
+| Browser/private-network and host-interface semantics | Browser isolation passed locally. Private relay/interface proof remains MVP-GAP-005 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
+| Leapp update mechanism | Resolved locally on macOS 27/Apple 1.2.2 through the production mirror and read-only directory mount; supported-lane repetition remains part of MVP-GAP-002. |
+| Standard image registry/signing identity | Open as MVP-GAP-006 and MVP-GAP-007 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
 
 ### 11.3 Evidence that would change ADR 0001
 
@@ -785,8 +809,8 @@ Record the experiment, host/runtime/harness versions, raw sanitized evidence, fa
 - [Tailscale policy syntax](https://tailscale.com/docs/reference/syntax/policy-file)
 - [Apple `NSWorkspace.open` API](https://developer.apple.com/documentation/appkit/nsworkspace/open(_:configuration:completionhandler:))
 
-## 13. Recommended execution order and first safe slice
+## 13. Historical execution order
 
-Execution order is the numbered slices. Within Slice 1: resolve module path -> install/pin Go -> create the two minimal version entrypoints and common model contract -> cross-build/import-closure tests -> ordinary CI. Then freeze configuration/runtime/state contracts before parallel writing begins.
+The completed implementation followed the numbered slices. Slice 1 resolved the module path, pinned Go, created the two version entrypoints and common model contract, enforced the cross-build/import closure, and established ordinary CI before the configuration/runtime/state contracts and dependent slices proceeded.
 
-The **first safe vertical slice is Slice 1 only**. It creates reproducible artifacts and test seams without touching Apple runtime state, project configuration, credentials, or source workspaces. Do not begin lifecycle scaffolding in parallel with it: the module path, shared IDs/errors, guest import closure, and subprocess result contract are prerequisites for every later package.
+The original first-safe-slice rule is retained as historical sequencing guidance: repository/toolchain foundations had to land before any lifecycle work could safely begin. Future work should start from the [post-MVP backlog](./post-mvp-backlog.md), not replay this implementation sequence.

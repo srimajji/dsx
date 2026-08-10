@@ -1,0 +1,30 @@
+[
+  {
+    "id": "dsx-abcdefghijklmnopqrst-main-workspace",
+    "configuration": {
+      "id": "dsx-abcdefghijklmnopqrst-main-workspace",
+      "labels": {
+        "dev.dsx.managed": "true",
+        "dev.dsx.contract": "dsx.ownership/v1",
+        "dev.dsx.project": "abcdefghijklmnopqrst",
+        "dev.dsx.sandbox": "main",
+        "dev.dsx.run": "01890f5c-7b00-7000-8000-000000000001",
+        "dev.dsx.kind": "workspace",
+        "dev.dsx.role": "workspace"
+      },
+      "image": {
+        "descriptor": {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "reference": "image:tag"
+      },
+      "mounts": [
+        {"type":"virtiofs","source":"/Volumes/Dev/project","destination":"/workspace","options":["ro"]},
+        {"type":{"volume":{"name":"cache","format":"ext4","cache":"on","sync":"fsync"}},"source":"/var/lib/container/volumes/cache","destination":"/cache","options":[]}
+      ],
+      "networks": [{"network":"dsx-abcdefghijklmnopqrst-main-network","options":{"hostname":"workspace"}}],
+      "publishedPorts": [{"hostAddress":"127.0.0.1","hostPort":8080,"containerPort":3000,"proto":"tcp","count":1}]
+    },
+    "status": {"state":"running","networks":[{"hostname":"workspace","ipv4Address":"192.168.64.4/24","ipv4Gateway":"192.168.64.1","ipv6Address":"fdb1:370c:1cb4:c412::4/64","macAddress":"f2:9c:cd:b7:61:1c","network":"dsx-abcdefghijklmnopqrst-main-network","variant":"reserved"}]}
+  }
+]

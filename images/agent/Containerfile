@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1.7
+FROM docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9 AS artifacts
+
+ADD --checksum=sha256:f176edf8174db252abe1aa6e84df284e1b83b8dd7ef34ac7faf7884a5e172a4c https://github.com/can1357/oh-my-pi/releases/download/v17.2.12/omp-linux-arm64 /artifacts/omp
+ADD --checksum=sha256:89cbf79bd5ae6f9c58da47e8079f311c84219350c9c43c070d42f3e9b2a81401 https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-package-aarch64-unknown-linux-musl.tar.gz /artifacts/codex.tar.gz
+ADD --checksum=sha256:fbbb2610daff70d118c8dda8aeffee92b38f20aa464e758c3d09e3c83ab6ef56 https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.226.tgz /artifacts/claude.tar.gz
+ADD --checksum=sha256:65991c16d1afac6eb9a6af8ea7551ffc98cad9bf3af51211f5a172436335fefa https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.18.15.tgz /artifacts/opencode.tar.gz
+
+RUN mkdir -p /opt/codex /opt/claude /opt/opencode \
+    && tar -xzf /artifacts/codex.tar.gz -C /opt/codex \
+    && tar -xzf /artifacts/claude.tar.gz -C /opt/claude --strip-components=1 \
+    && tar -xzf /artifacts/opencode.tar.gz -C /opt/opencode --strip-components=1 \
+    && install -m 0755 /artifacts/omp /usr/local/bin/omp \
+    && install -m 0755 /opt/claude/claude /usr/local/bin/claude \
+    && install -m 0755 /opt/opencode/bin/opencode /usr/local/bin/opencode \
+    && ln -s /opt/codex/bin/codex /usr/local/bin/codex
+
+FROM docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 501 --gid 20 --create-home --shell /bin/bash dsx
+
+COPY --from=artifacts /usr/local/bin/omp /usr/local/bin/omp
+COPY --from=artifacts /usr/local/bin/claude /usr/local/bin/claude
+COPY --from=artifacts /usr/local/bin/opencode /usr/local/bin/opencode
+COPY --from=artifacts /usr/local/bin/codex /usr/local/bin/codex
+COPY --from=artifacts /opt/codex /opt/codex
+RUN install -d -m 0755 /usr/local/share/dsx
+COPY --chmod=0444 harnesses.lock.json /usr/local/share/dsx/harnesses.lock.json
+LABEL io.dsx.harness-lock.sha256="219209eda5f77b364f8270de14e6c5deffe1573f63edcf02b46dd16c00bdbda6"
+
+USER 501:20
+WORKDIR /workspace
+ENTRYPOINT ["/bin/sh", "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]

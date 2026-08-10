@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "workspace": {
+    "root": ".",
+    "root": "services/api"
+  },
+  "image": { "ref": "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+}

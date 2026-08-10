@@ -1,0 +1,41 @@
+{
+  "$schema": "https://dsx.dev/schema/config-v1.json",
+  "schemaVersion": 1,
+  // Only explicitly supported fields may be imported.
+  "imports": {
+    "devcontainer": {
+      "path": ".devcontainer/devcontainer.json",
+      "fields": ["image", "build", "containerEnv", "mounts", "forwardPorts", "postCreateCommand"],
+    },
+  },
+  "workspace": {
+    "root": ".",
+    "members": [{ "name": "api", "path": "services/api" }],
+  },
+  "image": { "ref": "ghcr.io/example/dev@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+  "setup": [{ "argv": ["pnpm", "install", "--frozen-lockfile"], "cwd": "/workspace" }],
+  "processes": {
+    "db": { "argv": ["postgres"], "cwd": "/workspace" },
+    "web": {
+      "argv": ["pnpm", "dev"],
+      "cwd": "/workspace",
+      "dependsOn": ["db"],
+      "required": true,
+      "health": {
+        "http": { "url": "http://127.0.0.1:3000/health" },
+        "interval": "1s",
+        "timeout": "2s",
+        "retries": 10,
+      },
+    },
+  },
+  "volumes": { "node_modules": { "target": "/workspace/node_modules", "scope": "sandbox" } },
+  "mounts": [{ "source": { "type": "volume", "volume": "node_modules" }, "target": "/workspace/node_modules" }],
+  "agents": { "default": "codex", "allowed": ["omp", "codex", "claude", "opencode"] },
+  "authProfiles": { "codex-main": { "harness": "codex", "persistence": "global" } },
+  "ports": [{ "name": "web", "guest": 3000, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" }],
+  "browser": { "enabled": false },
+  "aws": { "mode": "none" },
+  "network": { "internet": true, "hostGrants": [] },
+  "resources": { "cpus": 4, "memory": "8GiB", "maxConcurrentClones": 2 },
+}

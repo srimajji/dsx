@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "workspace": { "root": ".", "initializeCommand": "touch /tmp/pwned" },
+  "image": { "ref": "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+}

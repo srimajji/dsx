@@ -1,0 +1,6 @@
+FROM docker.io/library/alpine@sha256:2c9d26f410d032d5b1525aa8a873e238b05b90c4ae8618743d4311f0cc827e37
+
+RUN apk add --no-cache caddy mariadb mariadb-client nodejs redis
+
+COPY app.js Caddyfile health-mariadb.sh health-redis.sh initialize-mariadb.sh redis.conf start-caddy.sh /opt/dsx-composite/
+RUN chmod 0755 /opt/dsx-composite/*.sh

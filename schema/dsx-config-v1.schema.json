@@ -1,0 +1,669 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dsx.dev/schema/config-v1.json",
+  "title": "DSX project configuration v1",
+  "description": "Strict, reviewable project configuration for one DSX Linux ARM64 workspace. CLI flags override these values; selected supported imports and defaults have lower precedence.",
+  "examples": [
+    {
+      "$schema": "https://dsx.dev/schema/config-v1.json",
+      "schemaVersion": 1,
+      "workspace": { "root": "." },
+      "image": { "ref": "ghcr.io/example/project@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      "agents": { "default": "codex", "allowed": ["codex"] },
+      "ports": [{ "name": "web", "guest": 3000, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" }]
+    }
+  ],
+  "additionalProperties": false,
+  "required": ["schemaVersion", "workspace", "image"],
+  "properties": {
+    "$schema": {
+      "description": "Editor schema URI for DSX configuration v1.",
+      "const": "https://dsx.dev/schema/config-v1.json"
+    },
+    "schemaVersion": {
+      "description": "Configuration format version. Version 1 is the only accepted value.",
+      "const": 1
+    },
+    "imports": {
+      "description": "Explicit allowlist of supported fields imported from existing project declarations.",
+      "$ref": "#/$defs/imports"
+    },
+    "workspace": {
+      "description": "Workspace root and optional composite repository members.",
+      "$ref": "#/$defs/workspace"
+    },
+    "image": {
+      "description": "Pinned Linux ARM64 image reference or reviewed build definition.",
+      "$ref": "#/$defs/image"
+    },
+    "setup": {
+      "description": "Approved setup commands, executed in order when relevant inputs invalidate setup state.",
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/command" }
+    },
+    "processes": {
+      "description": "Named processes and services supervised inside the integrated workspace.",
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "additionalProperties": { "$ref": "#/$defs/process" }
+    },
+    "volumes": {
+      "description": "Named DSX-owned writable volumes; host paths are not volumes.",
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "additionalProperties": { "$ref": "#/$defs/volume" }
+    },
+    "mounts": {
+      "description": "Explicit workspace, DSX volume, or reviewed host-directory mounts.",
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/mount" }
+    },
+    "agents": {
+      "description": "Default and allowed harness selection.",
+      "$ref": "#/$defs/agents"
+    },
+    "authProfiles": {
+      "description": "Named harness authentication profiles and their persistence scope.",
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "additionalProperties": { "$ref": "#/$defs/authProfile" }
+    },
+    "browser": {
+      "description": "Opt-in isolated browser request; release support remains evidence-gated.",
+      "$ref": "#/$defs/browser"
+    },
+    "aws": {
+      "description": "Opt-in standard AWS/Leapp directory grant; never contains credential values.",
+      "$ref": "#/$defs/aws"
+    },
+    "network": {
+      "description": "Internet access and destination-specific host TCP grants.",
+      "$ref": "#/$defs/network"
+    },
+    "ports": {
+      "description": "Host publications for guest TCP ports; omitted bind defaults to loopback and non-loopback values are explicit trust grants.",
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/port" }
+    },
+    "resources": {
+      "description": "Workspace CPU, memory, and clone-concurrency limits.",
+      "$ref": "#/$defs/resources"
+    }
+  },
+  "$defs": {
+    "name": {
+      "description": "Lowercase user-visible identifier used for processes, profiles, members, ports, grants, or volumes.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$",
+      "maxLength": 63,
+      "examples": ["web", "fix-test"]
+    },
+    "projectPath": {
+      "description": "Non-empty path interpreted relative to the canonical project root unless a field says otherwise.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "examples": [".", "services/api"]
+    },
+    "guestPath": {
+      "description": "Absolute path inside the Linux workspace.",
+      "type": "string",
+      "pattern": "^/",
+      "maxLength": 1024,
+      "examples": ["/workspace", "/var/lib/mysql"]
+    },
+    "imports": {
+      "description": "Supported project declarations from which explicitly selected fields may be imported.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "devcontainer": {
+          "description": "Selected supported fields from one Dev Container file; no unlisted hook executes.",
+          "$ref": "#/$defs/devcontainerImport"
+        }
+      }
+    },
+    "devcontainerImport": {
+      "description": "Path and exact supported-field allowlist for a Dev Container import.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "fields"],
+      "properties": {
+        "path": {
+          "description": "Dev Container JSON/JSONC file relative to the project root.",
+          "$ref": "#/$defs/projectPath",
+          "examples": [".devcontainer/devcontainer.json"]
+        },
+        "fields": {
+          "description": "Only these supported fields are imported; unsupported fields remain visible diagnostics.",
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 6,
+          "items": { "enum": ["image", "build", "containerEnv", "mounts", "forwardPorts", "postCreateCommand"] },
+          "examples": [["build", "forwardPorts"]]
+        }
+      }
+    },
+    "workspace": {
+      "description": "Canonical project-relative workspace root and optional repository member layout.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root"],
+      "properties": {
+        "root": {
+          "description": "Workspace root relative to the project root; normally a single dot.",
+          "$ref": "#/$defs/projectPath",
+          "examples": ["."]
+        },
+        "members": {
+          "description": "Repositories reproduced at the declared relative paths in composite clone mode.",
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/member" }
+        }
+      }
+    },
+    "member": {
+      "description": "One named repository in a composite workspace.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path"],
+      "properties": {
+        "name": {
+          "description": "Exact member selector accepted by dsx git --repo.",
+          "$ref": "#/$defs/name"
+        },
+        "path": {
+          "description": "Member repository path relative to the workspace root.",
+          "$ref": "#/$defs/projectPath"
+        }
+      }
+    },
+    "image": {
+      "description": "Exactly one prebuilt image reference or local build definition.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "description": "Linux ARM64 OCI image reference; release configurations should pin a digest.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "examples": ["ghcr.io/example/project@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        },
+        "build": {
+          "description": "Reviewed local OCI image build inputs.",
+          "$ref": "#/$defs/imageBuild"
+        }
+      },
+      "oneOf": [ { "required": ["ref"] }, { "required": ["build"] } ]
+    },
+    "imageBuild": {
+      "description": "Project-relative build context, file, optional target, and nonsecret build arguments.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context", "file"],
+      "properties": {
+        "context": {
+          "description": "Build context relative to the project root.",
+          "$ref": "#/$defs/projectPath",
+          "examples": ["."]
+        },
+        "file": {
+          "description": "Build file relative to the project root.",
+          "$ref": "#/$defs/projectPath",
+          "examples": [".devcontainer/Dockerfile"]
+        },
+        "target": {
+          "description": "Optional named build stage.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "args": {
+          "description": "Nonsecret build arguments; secrets must not be placed in image build arguments.",
+          "type": "object",
+          "maxProperties": 128,
+          "additionalProperties": { "type": "string", "maxLength": 8192 }
+        }
+      }
+    },
+    "command": {
+      "description": "One executable command expressed either as an argv array or an explicit shell plus shellPath.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "description": "Structured executable and argument array; no host shell interpolation is performed.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "type": "string", "minLength": 1, "maxLength": 8192 },
+          "examples": [["pnpm", "install", "--frozen-lockfile"]]
+        },
+        "shell": {
+          "description": "Explicit guest shell script. This is executable authority and changes the approval hash.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "shellPath": {
+          "description": "Exact supported guest shell interpreter required when shell is used.",
+          "type": "string",
+          "enum": ["/bin/sh", "/bin/bash", "/usr/bin/env bash"]
+        },
+        "cwd": {
+          "description": "Absolute working directory inside the guest.",
+          "$ref": "#/$defs/guestPath"
+        },
+        "env": {
+          "description": "Environment values, host-variable references, or secret references passed to this command.",
+          "type": "object",
+          "maxProperties": 256,
+          "additionalProperties": { "$ref": "#/$defs/envValue" }
+        }
+      },
+      "oneOf": [
+        { "required": ["argv"], "not": { "anyOf": [ { "required": ["shell"] }, { "required": ["shellPath"] } ] } },
+        { "required": ["shell", "shellPath"], "not": { "required": ["argv"] } }
+      ]
+    },
+    "envValue": {
+      "description": "Exactly one literal, named host environment lookup, or secret reference.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "description": "Literal nonsecret value recorded in the effective plan.",
+          "type": "string",
+          "maxLength": 65536,
+          "examples": ["development"]
+        },
+        "hostEnv": {
+          "description": "Exact host environment variable name resolved at execution; do not put the secret value in config.",
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "maxLength": 256,
+          "examples": ["API_TOKEN"]
+        },
+        "secretRef": {
+          "description": "Opaque secret-store reference; DSX plans and diagnostics retain only this reference.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "examples": ["project/api-token"]
+        }
+      },
+      "oneOf": [ { "required": ["value"] }, { "required": ["hostEnv"] }, { "required": ["secretRef"] } ]
+    },
+    "process": {
+      "description": "Supervised guest process using the same command forms plus dependency, readiness, and terminal metadata.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "description": "Structured process executable and arguments.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "type": "string", "minLength": 1, "maxLength": 8192 }
+        },
+        "shell": {
+          "description": "Explicit guest shell script; shellPath is required and argv is forbidden.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "shellPath": {
+          "description": "Exact supported guest shell interpreter.",
+          "type": "string",
+          "enum": ["/bin/sh", "/bin/bash", "/usr/bin/env bash"]
+        },
+        "cwd": {
+          "description": "Absolute guest working directory.",
+          "$ref": "#/$defs/guestPath"
+        },
+        "env": {
+          "description": "Process-specific environment value/reference map.",
+          "type": "object",
+          "maxProperties": 256,
+          "additionalProperties": { "$ref": "#/$defs/envValue" }
+        },
+        "dependsOn": {
+          "description": "Process names that must become ready before this process starts.",
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/name" }
+        },
+        "required": {
+          "description": "Whether failure makes the sandbox failed.",
+          "type": "boolean"
+        },
+        "terminal": {
+          "description": "Whether the process requests terminal semantics instead of separate stdout/stderr streams.",
+          "type": "boolean"
+        },
+        "health": {
+          "description": "Optional readiness check used by dependencies and agent/browser launch.",
+          "$ref": "#/$defs/health"
+        }
+      },
+      "oneOf": [
+        { "required": ["argv"], "not": { "anyOf": [ { "required": ["shell"] }, { "required": ["shellPath"] } ] } },
+        { "required": ["shell", "shellPath"], "not": { "required": ["argv"] } }
+      ]
+    },
+    "health": {
+      "description": "Exactly one HTTP, TCP, or command health probe with optional timing policy.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "http": {
+          "description": "Guest-visible HTTP readiness URL.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url"],
+          "properties": {
+            "url": {
+              "description": "Absolute URL probed from inside the workspace.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "examples": ["http://127.0.0.1:3000/health"]
+            }
+          }
+        },
+        "tcp": {
+          "description": "Guest-visible TCP readiness address.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["address"],
+          "properties": {
+            "address": {
+              "description": "Host and port probed from inside the workspace.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "examples": ["127.0.0.1:3306"]
+            }
+          }
+        },
+        "command": {
+          "description": "Guest command whose successful exit indicates readiness.",
+          "$ref": "#/$defs/command"
+        },
+        "interval": {
+          "description": "Go-style duration between attempts, for example 1s.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "examples": ["1s"]
+        },
+        "timeout": {
+          "description": "Go-style per-attempt timeout.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "examples": ["2s"]
+        },
+        "retries": {
+          "description": "Number of retry attempts after an unsuccessful probe.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "examples": [30]
+        }
+      },
+      "oneOf": [ { "required": ["http"] }, { "required": ["tcp"] }, { "required": ["command"] } ]
+    },
+    "volume": {
+      "description": "One DSX-owned writable volume mounted at a guest path.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "scope"],
+      "properties": {
+        "target": {
+          "description": "Absolute guest mount target.",
+          "$ref": "#/$defs/guestPath"
+        },
+        "scope": {
+          "description": "Whether clone sandboxes receive independent state or share project-scoped state.",
+          "enum": ["sandbox", "project"]
+        },
+        "persistent": {
+          "description": "Whether stop/recreation preserves the volume; clean still removes owned project resources.",
+          "type": "boolean"
+        }
+      }
+    },
+    "mountSource": {
+      "description": "Exactly one workspace path, named DSX volume, or canonical absolute host path.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "description": "Authority class of the mount source.",
+          "enum": ["workspace", "volume", "host"]
+        },
+        "path": {
+          "description": "Project-relative path for workspace sources or canonical absolute path for host sources.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "volume": {
+          "description": "Exact key from the top-level volumes object.",
+          "$ref": "#/$defs/name"
+        }
+      },
+      "oneOf": [
+        { "properties": { "type": { "const": "workspace" }, "path": { "$ref": "#/$defs/projectPath" } }, "required": ["path"], "not": { "required": ["volume"] } },
+        { "properties": { "type": { "const": "host" }, "path": { "$ref": "#/$defs/guestPath" } }, "required": ["path"], "not": { "required": ["volume"] } },
+        { "properties": { "type": { "const": "volume" } }, "required": ["volume"], "not": { "required": ["path"] } }
+      ]
+    },
+    "mount": {
+      "description": "Explicit source-to-guest-target mount. Host-directory mounts must be read-only.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "target"],
+      "properties": {
+        "source": {
+          "description": "Reviewed mount source authority.",
+          "$ref": "#/$defs/mountSource"
+        },
+        "target": {
+          "description": "Absolute target path inside the workspace.",
+          "$ref": "#/$defs/guestPath"
+        },
+        "readOnly": {
+          "description": "Read-only mount request; required by semantic validation for host sources.",
+          "type": "boolean"
+        }
+      }
+    },
+    "agents": {
+      "description": "Harness selection policy for this project.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "description": "Harness selected when no CLI override is provided.",
+          "enum": ["omp", "codex", "claude", "opencode"]
+        },
+        "allowed": {
+          "description": "Harnesses permitted for this project; the default must be included.",
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 4,
+          "items": { "enum": ["omp", "codex", "claude", "opencode"] },
+          "examples": [["codex", "claude"]]
+        }
+      }
+    },
+    "authProfile": {
+      "description": "Harness-bound credential profile with project/sandbox or global persistence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["harness", "persistence"],
+      "properties": {
+        "harness": {
+          "description": "Only this harness may use the profile.",
+          "enum": ["omp", "codex", "claude", "opencode"]
+        },
+        "persistence": {
+          "description": "sandbox scopes state to a sandbox; global survives ordinary project cleanup.",
+          "enum": ["sandbox", "global"]
+        }
+      }
+    },
+    "browser": {
+      "description": "Isolated disposable Playwright browser request.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Request a separate zero-mount browser VM on the owning private network; the CLI flag may enable but not disable this approved value.",
+          "type": "boolean"
+        }
+      }
+    },
+    "aws": {
+      "description": "Standard AWS behavior using no grant or an opt-in read-only Leapp directory.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "description": "none disables AWS host credentials; leapp requires a reviewed directory and permits an optional profile.",
+          "enum": ["none", "leapp"]
+        },
+        "directory": {
+          "description": "Canonical physical, non-symlink host directory mounted read-only in Leapp mode; it must contain regular config and credentials files, and every profile in them may be readable.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "examples": ["/Users/example/.aws"]
+        },
+        "profile": {
+          "description": "Standard AWS_PROFILE selection convenience; this is not credential isolation.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "examples": ["development"]
+        }
+      }
+    },
+    "network": {
+      "description": "Workspace internet policy and explicit single-destination host TCP grants.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "internet": {
+          "description": "Permit public internet access; enabling the isolated browser requires it.",
+          "type": "boolean"
+        },
+        "hostGrants": {
+          "description": "Hash-covered TCP destinations reachable through temporary project-scoped relays when required.",
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/hostGrant" }
+        }
+      }
+    },
+    "hostGrant": {
+      "description": "One immutable hostname-or-IP and TCP port; URLs, paths, generic proxies, and UDP are not accepted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "destination", "port"],
+      "properties": {
+        "name": {
+          "description": "Unique user-visible grant name.",
+          "$ref": "#/$defs/name"
+        },
+        "destination": {
+          "description": "Exact hostname or IP address without scheme, path, credentials, or port.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "examples": ["database.internal.example"]
+        },
+        "port": {
+          "description": "Single approved destination TCP port.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "examples": [5432]
+        }
+      }
+    },
+    "port": {
+      "description": "One guest TCP port published to the macOS loopback interface.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "guest", "host"],
+      "properties": {
+        "name": {
+          "description": "Unique display name for the URL/mapping.",
+          "$ref": "#/$defs/name"
+        },
+        "guest": {
+          "description": "TCP port listened on inside the workspace.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "examples": [3000]
+        },
+        "host": {
+          "description": "Request runtime-selected allocation with dynamic or one fixed host port.",
+          "oneOf": [ { "const": "dynamic" }, { "type": "integer", "minimum": 1, "maximum": 65535 } ],
+          "examples": ["dynamic"]
+        },
+        "bind": {
+          "description": "Host IP to bind. Omitting it defaults to 127.0.0.1; any non-loopback value is an explicit trust grant.",
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64
+        },
+        "protocol": {
+          "description": "Config v1 supports TCP only.",
+          "enum": ["tcp"]
+        }
+      }
+    },
+    "resources": {
+      "description": "Per-workspace resource and project clone-concurrency limits.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpus": {
+          "description": "Virtual CPU count.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "examples": [4]
+        },
+        "memory": {
+          "description": "Positive binary memory quantity in MiB or GiB.",
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(?:MiB|GiB)$",
+          "examples": ["8GiB"]
+        },
+        "maxConcurrentClones": {
+          "description": "Maximum running named clone sandboxes for this project; DSX fails rather than queues beyond it.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "examples": [2]
+        }
+      }
+    }
+  }
+}

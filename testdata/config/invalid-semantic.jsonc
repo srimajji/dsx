@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "workspace": {
+    "root": ".",
+    "members": [
+      { "name": "api", "path": "services" },
+      { "name": "worker", "path": "services/worker" }
+    ]
+  },
+  "image": { "ref": "ghcr.io/example/dev:latest" },
+  "processes": {
+    "web": { "argv": ["run-web"], "dependsOn": ["worker"] }
+  }
+}

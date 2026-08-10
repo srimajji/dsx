@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "platform": "linux/arm64",
+  "base": {
+    "reference": "docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9"
+  },
+  "harnesses": [
+    {
+      "name": "omp",
+      "version": "17.2.12",
+      "source": "https://github.com/can1357/oh-my-pi/releases/download/v17.2.12/omp-linux-arm64",
+      "upstreamDigest": "sha256:f176edf8174db252abe1aa6e84df284e1b83b8dd7ef34ac7faf7884a5e172a4c",
+      "buildSha256": "f176edf8174db252abe1aa6e84df284e1b83b8dd7ef34ac7faf7884a5e172a4c",
+      "executable": "omp"
+    },
+    {
+      "name": "codex",
+      "version": "rust-v0.147.0",
+      "source": "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-package-aarch64-unknown-linux-musl.tar.gz",
+      "upstreamDigest": "sha256:89cbf79bd5ae6f9c58da47e8079f311c84219350c9c43c070d42f3e9b2a81401",
+      "buildSha256": "89cbf79bd5ae6f9c58da47e8079f311c84219350c9c43c070d42f3e9b2a81401",
+      "executable": "codex"
+    },
+    {
+      "name": "claude",
+      "version": "2.1.226",
+      "source": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.226.tgz",
+      "upstreamDigest": "sha512-/USq3R28PunkjZZfyweEgUAlR7npgrruZmb47j3oRRxlFWk5Jurj+THiwhl/AKxUgkxaxb35cr6DCAeXNlQ/jg==",
+      "buildSha256": "fbbb2610daff70d118c8dda8aeffee92b38f20aa464e758c3d09e3c83ab6ef56",
+      "executable": "claude"
+    },
+    {
+      "name": "opencode",
+      "version": "1.18.15",
+      "source": "https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.18.15.tgz",
+      "upstreamDigest": "sha512-lJ+pPrJOxo3U2HeXis9aN/vrSFf1iXZXC9S0mTSWtm7qnFOJ3SLI7ALf7NKZoRHOOKUs9RfjR1DMLjzBcGAXog==",
+      "buildSha256": "65991c16d1afac6eb9a6af8ea7551ffc98cad9bf3af51211f5a172436335fefa",
+      "executable": "opencode"
+    }
+  ]
+}

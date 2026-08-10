@@ -1,0 +1,6 @@
+/bin/
+/dsx
+/dsx-guest
+
+/.release-tools/
+/dist/

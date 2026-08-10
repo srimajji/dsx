@@ -1,0 +1,22 @@
+[
+  {
+    "id": "dsx-abcdefghijklmnopqrst-main-network",
+    "configuration": {
+      "name": "dsx-abcdefghijklmnopqrst-main-network",
+      "creationDate": "2026-08-10T00:00:00Z",
+      "mode": "nat",
+      "labels": {
+        "dev.dsx.managed": "true",
+        "dev.dsx.contract": "dsx.ownership/v1",
+        "dev.dsx.project": "abcdefghijklmnopqrst",
+        "dev.dsx.sandbox": "main",
+        "dev.dsx.run": "01890f5c-7b00-7000-8000-000000000001",
+        "dev.dsx.kind": "network",
+        "dev.dsx.role": "network"
+      },
+      "plugin": "container-network-vmnet",
+      "options": {}
+    },
+    "status": {"ipv4Gateway":"192.168.64.1"}
+  }
+]

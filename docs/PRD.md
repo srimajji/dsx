@@ -5,6 +5,8 @@
 - **Date:** 2026-08-09
 - **Audience:** DSX users and maintainers
 
+Current command, configuration, security, and external-gate behavior is documented in the [DSX user and operator guide](./manual/user-guide.md). This PRD defines the product contract; the guide distinguishes implemented behavior from release evidence that is still blocked.
+
 ## 1. Product summary
 
 DSX is a fast, local, command-line development sandbox for macOS on Apple silicon. From an existing project directory, a developer can start an isolated Linux workspace, run supported coding-agent harnesses, run the project's application and local infrastructure, expose selected ports, test through an isolated browser, and remove all project resources with one command.
@@ -51,12 +53,14 @@ A developer who commits `.dsx/config.jsonc` so other contributors can start the 
 
 ```bash
 cd /Volumes/Dev/work/course-intelligence-agency
-dsx inspect
-dsx run --name fix-test --agent codex --browser -- "fix the failing test"
+dsx inspect --mode clone --sandbox fix-test --agent codex --browser
+dsx run --name fix-test --agent codex --browser --approve-config 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- "fix the failing test"
 dsx git diff fix-test
 dsx git fetch fix-test
 dsx clean --name fix-test
 ```
+
+The approval hash above is illustrative; copy the exact hash printed by the preceding inspection.
 
 Expected behavior:
 
@@ -95,12 +99,16 @@ A user may run DSX from a second directory while another DSX project is active. 
 ### 5.4 Parallel agents in one project
 
 ```bash
-dsx run --name api --agent codex -- "implement the API"
-dsx run --name tests --agent claude -- "add API tests"
+dsx inspect --mode clone --sandbox api --agent codex
+dsx run --name api --agent codex --approve-config 1111111111111111111111111111111111111111111111111111111111111111 -- "implement the API"
+dsx inspect --mode clone --sandbox tests --agent claude
+dsx run --name tests --agent claude --approve-config 2222222222222222222222222222222222222222222222222222222222222222 -- "add API tests"
 dsx ls
 dsx git fetch api
 dsx git fetch tests
 ```
+
+The hashes above are illustrative; inspect each named sandbox/agent plan and pass its exact hash.
 
 Each named run receives an independent Apple container/VM, guest-owned Git clone, branch, dependency state, service state, writable authentication copy, and dynamic host ports. One live-mounted interactive workspace is allowed per project; multiple named clone sandboxes may run concurrently. DSX provides isolation and result transfer, but does not schedule, coordinate, or merge agent work.
 
@@ -128,18 +136,23 @@ The setup wizard presents detected project facts, optional capabilities, and the
 | `dsx` | Open the context-aware setup wizard, project launcher, or sandbox dashboard when attached to a terminal; otherwise print help. |
 | `dsx inspect` | Show the effective image, workspace, commands, processes, services, mounts, credentials, network access, ports, and configuration sources. Make no changes. |
 | `dsx init` | Generate a reviewable `.dsx/config.jsonc` when an existing declaration cannot fully describe the workspace. |
-| `dsx shell [--agent <name>]` | Start or attach to the single interactive integrated workspace. Default to live workspace mode. |
-| `dsx run --name <name> --agent <agent> -- <prompt>` | Create or resume a named private-clone sandbox and run an agent task. |
-| `dsx ls` | List DSX sandboxes, project ownership, lifecycle state, and published ports. |
-| `dsx git status [name]` | Show the source ref, result branch, dirty state, and fetch state for clone sandboxes. |
-| `dsx git diff <name> [--repo <member>]` | Show changes produced in a private clone. |
-| `dsx git fetch <name> [--repo <member>]` | Import sandbox commits through a Git bundle into a host remote-tracking ref. |
-| `dsx git apply <name> [--repo <member>]` | Apply a sandbox result as a squashed working-tree change after safety checks. |
+| `dsx start --approve-config <hash>` | Start the approved live workspace without attaching. |
+| `dsx shell [--agent <name>] [--profile <name>] [--approve-config <hash>]` | Start or attach to the single interactive integrated workspace. Default to live workspace mode. |
+| `dsx run --name <name> --agent <agent> [--profile <name>] [--browser] --approve-config <hash> -- <prompt>` | Create or resume a named private-clone sandbox and run one agent task. |
+| `dsx list` / `dsx ls` | List DSX sandboxes, project ownership, lifecycle state, and published ports. |
+| `dsx status [--format text|json]` | Show final URLs and configured-process state for the live workspace. |
+| `dsx logs [--format text|json] <process>` | Return bounded retained output for one configured live-workspace process; do not follow. |
+| `dsx git status <name> [--repo <member>]` | Show the source ref, result branch, dirty state, host fingerprint, and fetch state for clone sandboxes. |
+| `dsx git diff <name> [--repo <member>]` | Show safely rendered changes produced in a private clone. |
+| `dsx git fetch <name> [--repo <member>]` | Import sandbox commits through a verified Git bundle into a host remote-tracking ref. |
+| `dsx git apply <name> [--repo <member>]` | Apply a sandbox result as a guarded squashed working-tree change. |
+| `dsx login --agent <agent> --profile <name> --root <path> --approve-config <hash>` | Run the selected provider's explicit interactive login and promote allowlisted credential artifacts. |
 | `dsx stop [--name <name>]` | Stop one sandbox, or the current project's live workspace, while retaining explicitly persistent state. |
-| `dsx clean [--name <name>]` | Remove one named sandbox or all DSX-owned resources for the current project. |
-| `dsx clean --all` | Remove DSX-owned resources for every project after confirmation. |
-| `dsx clean --purge-auth` | Also remove selected persisted agent authentication. |
-| `dsx doctor` | Validate runtime availability and report host, port, mount, and cleanup problems. |
+| `dsx clean [--name <name>]` | Remove one named sandbox or all proven DSX-owned resources for the current project. |
+| `dsx clean --all` | Remove proven DSX-owned resources for every project after confirmation. |
+| `dsx clean --purge-auth --agent <agent> [--profile <name>]` | Also remove the selected persisted authentication profile after cleanup; active copies block purge. |
+| `dsx doctor [--require-builder]` | Read-only validation of supported host architecture/OS, exact Apple CLI/API-server pair, service, builder, and compatibility allowlist. |
+| `dsx version [--json]` / `dsx --version [--json]` | Print build, guest-helper digest, and pinned image metadata. |
 
 Destructive commands require confirmation in an interactive terminal. `--force` bypasses only destructive cleanup confirmation; it never bypasses executable-configuration approval.
 
