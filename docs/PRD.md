@@ -49,7 +49,7 @@ A developer who explicitly promotes a home-local configuration to the repository
 
 ## 5. Core user journeys
 
-### 5.1 Existing project with a Dev Container definition
+### 5.1 Existing project
 
 ```bash
 cd /Volumes/Dev/work/course-intelligence-agency
@@ -64,7 +64,7 @@ The approval hash above is illustrative; copy the exact hash printed by the prec
 
 Expected behavior:
 
-1. `dsx inspect` reads the active home-local configuration, or an explicitly shared `.dsx/config.jsonc`, plus supported fields from `.devcontainer/devcontainer.json`, Dockerfiles, and lockfiles. It prints the effective plan and executes nothing.
+1. `dsx inspect` reads the active home-local configuration or an explicitly shared `.dsx/config.jsonc`, then reports safe project facts from Git roots, Dockerfiles, dependency lockfiles, and `devenv.nix`. Dev Container declarations are not discovered or imported. Inspection prints the effective plan and executes nothing.
 2. `dsx run` creates a named isolated project workspace, reuses or builds the required image, attaches run-specific writable authentication state, installs Linux dependencies using approved lifecycle commands, starts configured processes, and launches Codex.
 3. The optional browser runs separately and can reach the application over the private project network.
 4. Agent changes remain on the sandbox branch until `dsx git fetch` imports it into a host remote-tracking ref.
@@ -124,10 +124,10 @@ DSX resolves the current project before choosing a screen:
 
 - No active home-local or shared configuration and no DSX resources: open the setup wizard.
 - A configured project: open one state-driven project screen that reports Apple Container status and whether a live workspace exists.
-- The project screen exposes one primary action—start the container system, create and open, start and open, or attach—based on current state. Create and start from this interactive screen enter the live workspace shell after readiness; the explicit `dsx start` command remains start-only. Advanced clone, stop, clean, and Git operations appear only under **More options** when applicable.
+- The project screen exposes one primary action—start the container system, create and open, start and open, or attach—based on current state. Create and start from this interactive screen enter the live workspace shell after readiness; the explicit `dsx start` command remains start-only. Advanced port configuration, clone, stop, clean, and Git operations appear only under **More options** when applicable.
 - No interactive terminal: print command help and exit without prompting or changing state.
 
-The setup wizard presents detected project facts, image-source choices, supported coding assistants, internet access, and workspace resource choices before showing the complete effective plan and trust grants. New sandboxes default to 4 CPUs and 6 GiB of memory. Review provides an explicit path back to the environment choices without mutation. After final confirmation, DSX verifies that the Apple `container` CLI is installed and its system service reports `running`; a failed check leaves configuration and approval state untouched and provides the `container system start` remediation. Setup then writes `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`; when the selected standard image has no published release pin, DSX builds and verifies its embedded standard-image inputs before reporting setup complete. A repository `.dsx/config.jsonc` remains an explicit shared alternative; DSX refuses to continue when both exist.
+The setup wizard presents detected project facts, image-source choices, supported coding assistants, internet access, published guest ports, and workspace resource choices before showing the complete effective plan and trust grants. Guest ports entered during setup receive dynamic loopback host ports. New sandboxes default to 4 CPUs and 6 GiB of memory. Review provides an explicit path back to the environment choices without mutation. After final confirmation, DSX verifies that the Apple `container` CLI is installed and its system service reports `running`; a failed check leaves configuration and approval state unchanged. While confirmed work runs, the TUI shows bounded, animated milestones rather than raw command logs. Successful setup continues directly to the configured project screen instead of exiting. Creating or starting from that screen shows ordered plan-validation, image, resource, workspace, service, and readiness milestones before shell attachment.
 
 ## 6. Command surface
 
@@ -245,6 +245,9 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 - For fixed ports, the runtime bind result is authoritative; a preflight conflict check may improve diagnostics but is not a safety guarantee.
 - The user must explicitly request non-loopback binding.
 - DSX must display the final host URLs and port mappings per sandbox.
+- The setup wizard must accept optional guest ports and map them to dynamic loopback host ports.
+- The project dashboard must show configured guest ports and final URLs for active publications.
+- A configured project must allow its guest-port list to be changed from **More options**. If the live workspace exists, DSX must obtain explicit confirmation, replace only that workspace container, preserve its project network and DSX-owned volumes, and then attach.
 - Port forwarding must be removed during stop or cleanup as appropriate.
 
 ### R11. Browser support
@@ -260,9 +263,9 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 
 - Setup-created configuration must live at `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`, where the stable project ID prevents same-name collisions.
 - A repository `.dsx/config.jsonc` is an explicit shared alternative. Exactly one home-local or shared configuration may exist for a project; DSX must fail on ambiguity rather than merge them.
-- Configuration precedence must be: CLI flags, the single active DSX configuration, explicitly imported supported configuration, standard defaults.
+- Configuration precedence must be: CLI flags, the single active DSX configuration, then standard defaults.
 - `dsx inspect` must show each effective value and its source and be able to print the executable configuration hash.
-- Host-side commands and unsupported Dev Container fields must never execute silently.
+- Dev Container declarations must not be discovered, imported, parsed, or executed.
 - DSX must require approval when executable project configuration changes since the last approved hash.
 - Non-interactive execution must supply the exact expected hash through `--approve-config`; `--force` must not bypass this check.
 - Unsupported configuration must fail visibly rather than being ignored.
@@ -296,9 +299,9 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 - `dsx init` must open the same setup flow directly.
 - The TUI must be a presentation adapter over the same application services used by explicit CLI commands; it must not implement separate lifecycle state transitions.
 - The setup flow must show detected facts, selected capabilities, executable commands, mounts, credentials, network grants, ports, and the resulting configuration hash before confirmation.
-- The setup flow must allow CPU and memory selection, defaulting new sandboxes to 4 CPUs and 6 GiB, and must allow returning from review to the environment choices without losing selections or mutating state.
+- The setup flow must allow guest-port entry plus CPU and memory selection, defaulting new sandboxes to dynamic loopback publication, 4 CPUs, and 6 GiB, and must allow returning from review without losing selections or mutating state.
 - No project configuration or runtime resource may be created before final confirmation.
-- The dashboard must support listing, creating, attaching, starting, stopping, cleaning, and invoking `dsx git status`, `dsx git diff`, and `dsx git fetch`.
+- The dashboard must support showing and reconfiguring published ports, listing, creating, attaching, starting, stopping, cleaning, and invoking `dsx git status`, `dsx git diff`, and `dsx git fetch`.
 - The TUI must leave its alternate screen before handing control to an interactive agent or shell and restore it when that process exits.
 - Ctrl-C before confirmation must leave no changes; interruption during creation must use the normal rollback and cleanup path.
 - When stdin or stdout is not an interactive terminal, bare `dsx` must print help and exit without opening prompts.

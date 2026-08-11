@@ -136,6 +136,38 @@ func TestManifestRoundTripsUncapturedCloneWork(t *testing.T) {
 	}
 }
 
+func TestManifestPlanHashChangesOnlyForPortReconfiguration(t *testing.T) {
+	repository, err := NewManifestRepository(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := testManifest(t, "/tmp/dsx-port-reconfiguration", "main", "01890f5c-7b00-7000-8000-000000000098")
+	if err := repository.CreateIntent(context.Background(), manifest); err != nil {
+		t.Fatal(err)
+	}
+	replacement := manifest
+	replacement.PlanHash = strings.Repeat("b", 64)
+	replacement.Operation = "reconfigure-ports"
+	replacement.UpdatedAt = replacement.UpdatedAt.Add(time.Second)
+	if err := repository.ReplaceManifest(context.Background(), replacement, manifest.Generation); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := repository.LoadManifest(context.Background(), manifest.ProjectID, manifest.Sandbox, manifest.RunID)
+	if err != nil || !found {
+		t.Fatalf("LoadManifest() = %v, found=%t", err, found)
+	}
+	if loaded.PlanHash != replacement.PlanHash || loaded.Operation != "reconfigure-ports" {
+		t.Fatalf("port reconfiguration manifest = %#v", loaded)
+	}
+	invalid := loaded
+	invalid.PlanHash = strings.Repeat("c", 64)
+	invalid.Operation = "create"
+	invalid.UpdatedAt = invalid.UpdatedAt.Add(time.Second)
+	if err := repository.ReplaceManifest(context.Background(), invalid, loaded.Generation); model.ErrorCodeOf(err) != model.CodeInvalidInput {
+		t.Fatalf("ordinary plan hash replacement error = %v, want invalid input", err)
+	}
+}
+
 func fsManifestRepositoryIdentity(worktree string) gitx.RepositoryIdentity {
 	pathIdentity := func(value string) gitx.PhysicalPathIdentity {
 		parts := strings.Split(strings.TrimPrefix(value, "/"), "/")

@@ -25,9 +25,6 @@ var supportedHarnesses = map[string]struct{}{
 func validateSemantics(document ConfigDocument, sourcePath string, locations map[string]SourceLocation) []Diagnostic {
 	validator := semanticValidator{sourcePath: sourcePath, locations: locations}
 	validator.projectPath("/workspace/root", document.Workspace.Root)
-	if document.Imports.Devcontainer != nil {
-		validator.projectPath("/imports/devcontainer/path", document.Imports.Devcontainer.Path)
-	}
 	validator.validateMembers(document.Workspace)
 	validator.validateImage(document.Image)
 	for index, command := range document.Setup {

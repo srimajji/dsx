@@ -34,7 +34,7 @@ const (
 	standardBrowserImageDigest    = "dce1d9a9cc9ad38edf545ad29a7f2f3448210a73be3a1cf3651d1c8932b023c0"
 )
 
-func collectAuthorityInputs(root string, validated config.ValidatedConfig, imported []plan.ImportedValue, facts projectinspect.Facts, resolveMount HostMountResolver) (plan.AuthorityInputs, error) {
+func collectAuthorityInputs(root string, validated config.ValidatedConfig, imported []plan.ImportedValue, resolveMount HostMountResolver) (plan.AuthorityInputs, error) {
 	browserReference, browserDigest, err := browserImageAuthority()
 	if err != nil {
 		return plan.AuthorityInputs{}, err
@@ -46,22 +46,6 @@ func collectAuthorityInputs(root string, validated config.ValidatedConfig, impor
 	if validated.Document.Image.Standard {
 		authority.StandardImageDigest = agentimage.InputDigest()
 	}
-	if selection := validated.Document.Imports.Devcontainer; selection != nil {
-		selected := normalizeProjectPath(selection.Path)
-		for _, declaration := range facts.DevContainers {
-			if normalizeProjectPath(declaration.Path) != selected {
-				continue
-			}
-			authority.ImportedContent = append(authority.ImportedContent, plan.ContentDigest{Path: declaration.Path, Digest: declaration.ContentDigest})
-			break
-		}
-	}
-	sort.Slice(authority.ImportedContent, func(i, j int) bool {
-		if authority.ImportedContent[i].Path != authority.ImportedContent[j].Path {
-			return authority.ImportedContent[i].Path < authority.ImportedContent[j].Path
-		}
-		return authority.ImportedContent[i].Digest < authority.ImportedContent[j].Digest
-	})
 
 	if build := selectedBuild(validated.Document, imported); build != nil {
 		digest, err := digestBuildInput(root, *build)

@@ -101,7 +101,6 @@ func TestInspectJSON(t *testing.T) {
 			GitRoots:      []app.DetectedPath{},
 			Lockfiles:     []app.DetectedPath{},
 			Dockerfiles:   []app.DetectedPath{},
-			Devcontainers: []app.DetectedPath{},
 			DevenvFiles:   []app.DetectedPath{},
 		},
 		Diagnostics: []config.Diagnostic{{Severity: "warning", Code: "notice", Message: "included in JSON only"}},

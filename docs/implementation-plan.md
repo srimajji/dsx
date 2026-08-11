@@ -209,7 +209,7 @@ type ConfigDocument struct {
 }
 
 type SourceRef struct {
-    Kind string // cli|project|devcontainer|dockerfile|detected|default
+    Kind string // cli|project|detected|default
     Path string
     Line, Column int
     Priority int
@@ -395,9 +395,6 @@ Result flow: stage all changes with `git add -A` -> create a deterministic final
 {
   "$schema": "https://dsx.dev/schema/config-v1.json",
   "schemaVersion": 1,
-  "imports": {
-    "devcontainer": { "path": ".devcontainer/devcontainer.json", "fields": ["image", "build", "containerEnv", "mounts", "forwardPorts", "postCreateCommand"] }
-  },
   "workspace": {
     "root": ".",
     "members": [{ "name": "api", "path": "services/api" }]
@@ -438,12 +435,12 @@ Command is `oneOf` literal `argv` or explicit `{shell, shellPath}`; no implicit 
 4. Validate embedded Draft 2020-12 schema with no network `$ref` resolution; unknown fields are errors.
 5. Decode typed structs with `DisallowUnknownFields` as defense in depth.
 6. Semantic checks: path containment/canonicalization, member uniqueness/non-overlap, process DAG acyclicity, referenced dependency/volume/auth existence, image xor, command xor, health bounds, valid names, port uniqueness/range, resource limits, source-mode compatibility, mount denylist, and trust-grant consistency.
-7. Import only allowlisted fields. Unsupported Dev Container fields are diagnostics; executable/security-relevant fields fail. Never run host lifecycle hooks.
+7. Treat dependency and image declarations as suggestion-only facts; Dev Container declarations are outside discovery.
 8. Merge by fixed precedence and attach provenance per JSON pointer.
 9. Resolve platform facts and content digests into `ExecutionPlan`.
 10. Canonicalize/hash the executable projection; compare approval before mutation.
 
-Schema corpus includes minimal/full valid documents plus one fixture per syntax, duplicate, unknown, semantic, precedence, unsupported import, and trust failure. Editor schema and Go decoder drift is prevented by a shared accept/reject corpus, not a second configuration model.
+Schema corpus includes minimal/full valid documents plus one fixture per syntax, duplicate, unknown, semantic, precedence, and trust failure. Editor schema and Go decoder drift is prevented by a shared accept/reject corpus, not a second configuration model.
 
 ## 7. Contract dependency graph
 
@@ -668,8 +665,8 @@ A pre-job/boot sweeper handles trap-invisible SIGKILL/power loss by combining le
 | DSX-003 Process runner seam | 001 | Structured executable/argv/env/stdin; bounded context; captured result; no shell helper | `internal/runtime/apple`, test fake | Yes | `go test ./internal/runtime/apple -run TestRunner` |
 | DSX-004 Ordinary CI | 001 | host units, guest cross-build/import closure, race lanes, pinned actions, no Apple mutation | `.github/workflows`, scripts | Yes | workflow dry validation plus `go test` commands in Slice 1 |
 | DSX-010 JSONC/schema | 002 | JSONC, duplicate/unknown rejection, embedded offline schema, typed/semantic errors with locations | `internal/config`, `schema`, `testdata` | Yes | `go test ./internal/config -run 'Test(JSONC|Schema|Duplicate|Semantic)'` |
-| DSX-011 Project detectors | 002 | Git roots/lockfiles/Dockerfile/devcontainer/devenv facts; no execution; unsupported fields explicit | `internal/inspect` | Yes | `go test ./internal/inspect` |
-| DSX-012 Precedence/provenance | 010,011 | CLI>project>import>default per leaf; deterministic source locations; no silent unsupported input | `internal/plan` | No—shared contract | `go test ./internal/plan -run 'Test(Precedence|Provenance)'` |
+| DSX-011 Project detectors | 002 | Git roots, lockfiles, Dockerfiles, and `devenv.nix` facts; Dev Container declarations ignored; no execution | `internal/inspect` | Yes | `go test ./internal/inspect` |
+| DSX-012 Precedence/provenance | 010,011 | CLI > project > detected suggestion > default per leaf; deterministic source locations | `internal/plan` | No—shared contract | `go test ./internal/plan -run 'Test(Precedence|Provenance)'` |
 | DSX-013 Plan/hash/approval | 012 | executable projection canonical; comments stable; authority/input changes hash; exact noninteractive approval; force denied | `internal/plan`, `internal/state` | No—security boundary | `go test ./internal/plan ./internal/state -run 'Test(Hash|Approval)'` |
 | DSX-014 Doctor/capabilities | 003 | OS/arch, CLI/server versions, allowlist, service/builder capability diagnostics; no mutation | `internal/runtime/apple`, `internal/app` | Yes | `go test ./internal/runtime/apple -run 'Test(Probe|VersionGate)'` |
 | DSX-015 Inspect CLI | 012–014 | text/JSON complete plan, grants/provenance/hash; warm no-VM path; stable non-TTY exits | `internal/hostcmd`, `internal/app` | Yes | `go test ./internal/hostcmd -run TestInspect` |

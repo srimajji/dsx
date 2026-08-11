@@ -43,21 +43,6 @@ type Lockfile struct {
 	Ecosystem string `json:"ecosystem"`
 }
 
-type DevContainerBuild struct {
-	Dockerfile string `json:"dockerfile,omitempty"`
-	Context    string `json:"context,omitempty"`
-}
-
-type DevContainer struct {
-	Path            string            `json:"path"`
-	Name            string            `json:"name,omitempty"`
-	Image           string            `json:"image,omitempty"`
-	Build           DevContainerBuild `json:"build,omitempty"`
-	ContentDigest   string            `json:"contentDigest"`
-	WorkspaceFolder string            `json:"workspaceFolder,omitempty"`
-	ForwardPorts    []string          `json:"forwardPorts,omitempty"`
-}
-
 type Devenv struct {
 	Path      string   `json:"path"`
 	Processes []string `json:"processes,omitempty"`
@@ -65,13 +50,12 @@ type Devenv struct {
 }
 
 type Facts struct {
-	WorkspaceRoot  string         `json:"workspaceRoot"`
-	GitRoots       []string       `json:"gitRoots,omitempty"`
-	Lockfiles      []Lockfile     `json:"lockfiles,omitempty"`
-	Containerfiles []string       `json:"containerfiles,omitempty"`
-	DevContainers  []DevContainer `json:"devContainers,omitempty"`
-	Devenv         []Devenv       `json:"devenv,omitempty"`
-	Diagnostics    []Diagnostic   `json:"diagnostics,omitempty"`
+	WorkspaceRoot  string       `json:"workspaceRoot"`
+	GitRoots       []string     `json:"gitRoots,omitempty"`
+	Lockfiles      []Lockfile   `json:"lockfiles,omitempty"`
+	Containerfiles []string     `json:"containerfiles,omitempty"`
+	Devenv         []Devenv     `json:"devenv,omitempty"`
+	Diagnostics    []Diagnostic `json:"diagnostics,omitempty"`
 }
 
 func (f Facts) HasErrors() bool {
@@ -167,16 +151,6 @@ func Inspect(root string) (Facts, error) {
 				return err
 			}
 			facts.Containerfiles = append(facts.Containerfiles, rel)
-		}
-		if name == "devcontainer.json" && filepath.Base(filepath.Dir(path)) == ".devcontainer" {
-			content, readErr := readBoundedFile(canonical, path, rel)
-			if readErr != nil {
-				return readErr
-			}
-			container, diagnostics := parseDevContainer(rel, content)
-			container.ContentDigest = contentDigest(content)
-			facts.DevContainers = append(facts.DevContainers, container)
-			facts.Diagnostics = append(facts.Diagnostics, diagnostics...)
 		}
 		if name == "devenv.nix" {
 			content, readErr := readBoundedFile(canonical, path, rel)
@@ -333,7 +307,6 @@ func sortFacts(facts *Facts) {
 	sort.Strings(facts.GitRoots)
 	sort.Slice(facts.Lockfiles, func(i, j int) bool { return facts.Lockfiles[i].Path < facts.Lockfiles[j].Path })
 	sort.Strings(facts.Containerfiles)
-	sort.Slice(facts.DevContainers, func(i, j int) bool { return facts.DevContainers[i].Path < facts.DevContainers[j].Path })
 	sort.Slice(facts.Devenv, func(i, j int) bool { return facts.Devenv[i].Path < facts.Devenv[j].Path })
 	sort.SliceStable(facts.Diagnostics, func(i, j int) bool {
 		left, right := facts.Diagnostics[i], facts.Diagnostics[j]

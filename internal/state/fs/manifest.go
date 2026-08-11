@@ -614,7 +614,15 @@ func loadManifestFile(path string, projectID model.ProjectID, sandbox model.Sand
 }
 
 func validateReplacement(current, replacement state.Manifest) error {
-	if replacement.Version != current.Version || replacement.ProjectID != current.ProjectID || replacement.CanonicalRoot != current.CanonicalRoot || replacement.Sandbox != current.Sandbox || replacement.RunID != current.RunID || replacement.Mode != current.Mode || replacement.PlanHash != current.PlanHash || !replacement.CreatedAt.Equal(current.CreatedAt) {
+	identityChanged := replacement.Version != current.Version ||
+		replacement.ProjectID != current.ProjectID ||
+		replacement.CanonicalRoot != current.CanonicalRoot ||
+		replacement.Sandbox != current.Sandbox ||
+		replacement.RunID != current.RunID ||
+		replacement.Mode != current.Mode ||
+		!replacement.CreatedAt.Equal(current.CreatedAt)
+	planChangedWithoutPortReconfiguration := replacement.PlanHash != current.PlanHash && replacement.Operation != "reconfigure-ports"
+	if identityChanged || planChangedWithoutPortReconfiguration {
 		return errors.New("replacement changes immutable manifest identity")
 	}
 	if replacement.UpdatedAt.Before(current.UpdatedAt) {
