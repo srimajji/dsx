@@ -10,7 +10,6 @@ import (
 type ConfigDocument struct {
 	Schema        string                       `json:"$schema,omitempty"`
 	SchemaVersion int                          `json:"schemaVersion"`
-	Imports       ImportConfig                 `json:"imports,omitempty"`
 	Workspace     WorkspaceConfig              `json:"workspace"`
 	Image         ImageConfig                  `json:"image"`
 	Setup         []CommandSpec                `json:"setup,omitempty"`
@@ -24,15 +23,6 @@ type ConfigDocument struct {
 	Network       NetworkConfig                `json:"network,omitempty"`
 	Ports         []PortConfig                 `json:"ports,omitempty"`
 	Resources     ResourceLimits               `json:"resources,omitempty"`
-}
-
-type ImportConfig struct {
-	Devcontainer *DevcontainerImport `json:"devcontainer,omitempty"`
-}
-
-type DevcontainerImport struct {
-	Path   string   `json:"path"`
-	Fields []string `json:"fields"`
 }
 
 type WorkspaceConfig struct {

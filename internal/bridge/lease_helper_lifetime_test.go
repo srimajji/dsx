@@ -227,6 +227,40 @@ func TestAuthenticatedExactRenewalExtendsActiveLease(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedOldExecutableLeaseCanBeInspectedAndStoppedAfterUpgrade(t *testing.T) {
+	manager := leaseLifetimeManager(t)
+	identity := leaseTestIdentity(t, "ghijklmnopqrstuvwxyz", "01890f5c-7b00-7000-8000-000000000206")
+	specs := leaseLifetimeSpecs(t, 30*time.Second)
+	if _, err := manager.Ensure(context.Background(), identity, specs); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Stop(context.Background(), identity) })
+	executable, err := os.ReadFile(manager.executable.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(t.TempDir(), "upgraded-dsx")
+	if err := os.WriteFile(replacement, executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := NewProductionLeaseManager(manager.stateRoot, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgraded.stopWait = 5 * time.Second
+	status, err := upgraded.Status(context.Background(), identity)
+	if err != nil || status.State != "running" {
+		t.Fatalf("upgraded manager Status() = %#v, %v", status, err)
+	}
+	if err := upgraded.Stop(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+	status, err = upgraded.Status(context.Background(), identity)
+	if err != nil || status.State != "absent" {
+		t.Fatalf("stopped old executable lease Status() = %#v, %v", status, err)
+	}
+}
+
 func TestIdleExactRunningWorkspaceSelfRenewsBeyondInitialLease(t *testing.T) {
 	identity := leaseTestIdentity(t, "ijklmnopqrstuvwxyzab", "01890f5c-7b00-7000-8000-000000000205")
 	manager := leaseOwnedLifetimeManager(t, identity)

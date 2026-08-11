@@ -223,42 +223,6 @@ func TestHashBuildInputBytesChangePlan(t *testing.T) {
 	}
 }
 
-func TestImportedContentDigestChangesPreviewHashAndRecord(t *testing.T) {
-	root := t.TempDir()
-	devcontainerDirectory := filepath.Join(root, ".devcontainer")
-	if err := os.Mkdir(devcontainerDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	devcontainerPath := filepath.Join(devcontainerDirectory, "devcontainer.json")
-	if err := os.WriteFile(devcontainerPath, []byte(`{"forwardPorts":[3000]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rendered := []byte(`{
-  "schemaVersion": 1,
-  "imports": {"devcontainer": {"path": ".devcontainer/devcontainer.json", "fields": ["forwardPorts"]}},
-  "workspace": {"root": "."},
-  "image": {"ref": "example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-}`)
-	service := NewSetupService(NewInspectionService(plan.NewResolver()), nil, nil)
-	first, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root, RenderedConfig: rendered})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(first.ImportedContentDigests) != 1 || first.ImportedContentDigests[0].Path != ".devcontainer/devcontainer.json" {
-		t.Fatalf("ImportedContentDigests = %#v", first.ImportedContentDigests)
-	}
-	if err := os.WriteFile(devcontainerPath, []byte("{\n  \"forwardPorts\": [3000]\n}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	second, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root, RenderedConfig: rendered})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.ImportedContentDigests[0].Digest == second.ImportedContentDigests[0].Digest || first.Hash == second.Hash {
-		t.Fatalf("imported bytes did not alter record and plan hash")
-	}
-}
-
 func TestHostMountSymlinkSwapRefused(t *testing.T) {
 	root := t.TempDir()
 	canonicalRoot, err := filepath.EvalSymlinks(root)

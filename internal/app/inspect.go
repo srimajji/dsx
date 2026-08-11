@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -209,13 +208,7 @@ func (service *InspectionService) Inspect(ctx context.Context, request InspectRe
 		return result, invalidDiagnosticsError(result.Diagnostics)
 	}
 
-	imported, importDiagnostics := selectedDevcontainerImports(validated, facts)
-	result.Diagnostics = append(result.Diagnostics, importDiagnostics...)
-	if diagnosticsHaveErrors(result.Diagnostics) {
-		sortDiagnostics(result.Diagnostics)
-		return result, invalidDiagnosticsError(result.Diagnostics)
-	}
-	authority, err := collectAuthorityInputs(facts.WorkspaceRoot, validated, imported, facts, service.resolveHostMount)
+	authority, err := collectAuthorityInputs(facts.WorkspaceRoot, validated, nil, service.resolveHostMount)
 	if err != nil {
 		return result, model.Wrap(model.CodeInvalidInput, "resolve inspection authority inputs", err)
 	}
@@ -249,7 +242,6 @@ func (service *InspectionService) Inspect(ctx context.Context, request InspectRe
 			ResourceName: "dsx-" + string(projectID) + "-" + string(sandboxName),
 		},
 		CLI:       plan.CLIOverrides{Agent: request.CLIOverrides.Agent, Browser: request.CLIOverrides.Browser, CPUs: request.CLIOverrides.CPUs, Memory: request.CLIOverrides.Memory},
-		Imported:  imported,
 		Defaults:  plan.DefaultValues{Agent: "codex", Internet: true, CPUs: DefaultWorkspaceCPUs, MemoryBytes: DefaultWorkspaceMemoryBytes, MaxConcurrentClones: 1},
 		Authority: authority,
 	})
@@ -281,7 +273,6 @@ func mapProjectFacts(facts projectinspect.Facts) ProjectFacts {
 		GitRoots:      make([]DetectedPath, 0, len(facts.GitRoots)),
 		Lockfiles:     make([]DetectedPath, 0, len(facts.Lockfiles)),
 		Dockerfiles:   make([]DetectedPath, 0, len(facts.Containerfiles)),
-		Devcontainers: make([]DetectedPath, 0, len(facts.DevContainers)),
 		DevenvFiles:   make([]DetectedPath, 0, len(facts.Devenv)),
 	}
 	for _, path := range facts.GitRoots {
@@ -292,9 +283,6 @@ func mapProjectFacts(facts projectinspect.Facts) ProjectFacts {
 	}
 	for _, path := range facts.Containerfiles {
 		result.Dockerfiles = append(result.Dockerfiles, DetectedPath{Path: path, Kind: "containerfile"})
-	}
-	for _, devcontainer := range facts.DevContainers {
-		result.Devcontainers = append(result.Devcontainers, DetectedPath{Path: devcontainer.Path, Kind: "devcontainer"})
 	}
 	for _, devenv := range facts.Devenv {
 		result.DevenvFiles = append(result.DevenvFiles, DetectedPath{Path: devenv.Path, Kind: "devenv"})
@@ -314,71 +302,9 @@ func mapInspectDiagnostics(diagnostics []projectinspect.Diagnostic) []config.Dia
 	return result
 }
 
-func selectedDevcontainerImports(validated config.ValidatedConfig, facts projectinspect.Facts) ([]plan.ImportedValue, []config.Diagnostic) {
-	selection := validated.Document.Imports.Devcontainer
-	if selection == nil {
-		return nil, nil
-	}
-	selectedPath := normalizeProjectPath(selection.Path)
-	var declaration *projectinspect.DevContainer
-	for index := range facts.DevContainers {
-		if normalizeProjectPath(facts.DevContainers[index].Path) == selectedPath {
-			declaration = &facts.DevContainers[index]
-			break
-		}
-	}
-	if declaration == nil {
-		return nil, []config.Diagnostic{{Severity: "error", Code: "missing_devcontainer_import", Path: selection.Path, Message: "configured Dev Container import was not found as a regular project file"}}
-	}
-	source := config.SourceRef{Kind: "devcontainer", Path: declaration.Path}
-	imports := make([]plan.ImportedValue, 0, len(selection.Fields))
-	var diagnostics []config.Diagnostic
-	for _, field := range selection.Fields {
-		switch field {
-		case "image":
-			if declaration.Image == "" {
-				diagnostics = append(diagnostics, missingImportField(declaration.Path, field))
-			} else {
-				imports = append(imports, plan.ImportedValue{Pointer: "/image/ref", Value: declaration.Image, Source: source})
-			}
-		case "build":
-			if declaration.Build.Context == "" || declaration.Build.Dockerfile == "" {
-				diagnostics = append(diagnostics, missingImportField(declaration.Path, field))
-			} else {
-				base := filepath.ToSlash(filepath.Dir(declaration.Path))
-				build := config.ImageBuild{
-					Context: normalizeProjectPath(filepath.ToSlash(filepath.Join(base, declaration.Build.Context))),
-					File:    normalizeProjectPath(filepath.ToSlash(filepath.Join(base, declaration.Build.Dockerfile))),
-				}
-				imports = append(imports, plan.ImportedValue{Pointer: "/image/build", Value: build, Source: source})
-			}
-		case "forwardPorts":
-			ports := make([]config.PortConfig, 0, len(declaration.ForwardPorts))
-			for _, text := range declaration.ForwardPorts {
-				value, err := strconv.ParseUint(text, 10, 16)
-				if err != nil || value == 0 {
-					diagnostics = append(diagnostics, config.Diagnostic{Severity: "error", Code: "unsupported_devcontainer_port", Path: declaration.Path, Message: fmt.Sprintf("Dev Container forward port %q is not a plain guest port from 1 to 65535", text)})
-					continue
-				}
-				ports = append(ports, config.PortConfig{Name: "devcontainer-" + text, Guest: uint16(value), Host: config.HostPort{Dynamic: true}, Bind: "127.0.0.1", Protocol: "tcp"})
-			}
-			imports = append(imports, plan.ImportedValue{Pointer: "/ports", Value: ports, Source: source})
-		case "containerEnv", "mounts", "postCreateCommand":
-			diagnostics = append(diagnostics, config.Diagnostic{Severity: "error", Code: "unsupported_devcontainer_import", Path: declaration.Path, Message: fmt.Sprintf("Dev Container field %q is executable or security-relevant and is not supported for import", field)})
-		default:
-			diagnostics = append(diagnostics, config.Diagnostic{Severity: "error", Code: "unsupported_devcontainer_import", Path: declaration.Path, Message: fmt.Sprintf("Dev Container field %q is not supported for import", field)})
-		}
-	}
-	return imports, diagnostics
-}
-
 func normalizeProjectPath(path string) string {
 	path = filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
 	return strings.TrimPrefix(path, "./")
-}
-
-func missingImportField(path, field string) config.Diagnostic {
-	return config.Diagnostic{Severity: "error", Code: "missing_devcontainer_field", Path: path, Message: fmt.Sprintf("configured Dev Container field %q is absent or incomplete", field)}
 }
 
 func diagnosticsHaveErrors(diagnostics []config.Diagnostic) bool {

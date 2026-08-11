@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -80,10 +81,27 @@ func (stub *setupApplicationStub) Initialize(_ context.Context, request app.Init
 	if stub.initializeErr != nil {
 		return app.InitializeResult{}, stub.initializeErr
 	}
+	stub.bareState = app.BareState{
+		Screen:       app.BareLauncher,
+		ConfigExists: true,
+		Facts:        app.ProjectFacts{CanonicalRoot: request.Root},
+		ContainerSystem: runtime.SystemStatus{
+			State: runtime.SystemStateRunning,
+		},
+	}
 	return app.InitializeResult{ConfigPath: "/tmp/project/.dsx/config.jsonc", Hash: request.ExpectedHash, Created: true}, nil
 }
 
 func (stub *setupApplicationStub) ApproveExisting(_ context.Context, request app.InitializeRequest) (app.InitializeResult, error) {
+	stub.approvals++
+	stub.request = request
+	if stub.initializeErr != nil {
+		return app.InitializeResult{}, stub.initializeErr
+	}
+	return app.InitializeResult{ConfigPath: "/tmp/project/.dsx/config.jsonc", Hash: request.ExpectedHash}, nil
+}
+
+func (stub *setupApplicationStub) UpdateExisting(_ context.Context, request app.InitializeRequest) (app.InitializeResult, error) {
 	stub.approvals++
 	stub.request = request
 	if stub.initializeErr != nil {
@@ -200,6 +218,35 @@ func TestSetupShowsManagedStandardBuildProgressAfterConfirmation(t *testing.T) {
 	}
 }
 
+func TestWorkspaceProgressShowsBoundedMilestones(t *testing.T) {
+	request := ProgressRequest{
+		Title:   "Creating workspace",
+		Project: "/tmp/project",
+		Detail:  "DSX is creating the approved workspace and waiting until it is ready.",
+		Steps: []ProgressStep{
+			{ID: "validate", Label: "Validate approved project plan"},
+			{ID: "workspace", Label: "Create and start workspace"},
+			{ID: "ready", Label: "Workspace ready"},
+		},
+	}
+	model := newProgressModel(context.Background(), func() {}, request, func(context.Context, func(string)) error {
+		return nil
+	})
+	model.current = 1
+	view := strings.ToLower(ansi.Strip(model.View().Content))
+	for _, expected := range []string{
+		"creating workspace",
+		"validate approved project plan",
+		"create and start workspace",
+		"workspace ready",
+		"command output stays hidden",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("progress view missing %q:\n%s", expected, view)
+		}
+	}
+}
+
 func TestSetupAppliesSelectedDetectedImage(t *testing.T) {
 	detected := config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: "Dockerfile"}}
 	preview := app.SetupPreview{
@@ -248,12 +295,25 @@ func TestSetupResourceScreenDefaultsAndAppliesSelections(t *testing.T) {
 	model.form.Init()
 	model.form.NextGroup()
 	model.form.NextGroup()
+	model.form.NextGroup()
 	resourceView := ansi.Strip(model.form.View())
 	for _, expected := range []string{
 		"CPU allocation", "4 CPUs (Recommended)", "Memory allocation", "6GiB (Recommended)",
 	} {
 		if !strings.Contains(resourceView, expected) {
 			t.Fatalf("resource screen omitted %q:\n%s", expected, resourceView)
+		}
+	}
+	portModel := NewSetupModel(context.Background(), application, "/tmp/project", app.SetupPreview{
+		Config: config.ConfigDocument{SchemaVersion: 1},
+	}, false)
+	portModel.form.Init()
+	portModel.form.NextGroup()
+	portModel.form.NextGroup()
+	portView := ansi.Strip(portModel.form.View())
+	for _, expected := range []string{"Published guest ports", "comma-separated"} {
+		if !strings.Contains(portView, expected) {
+			t.Fatalf("port screen omitted %q:\n%s", expected, portView)
 		}
 	}
 
@@ -268,6 +328,25 @@ func TestSetupResourceScreenDefaultsAndAppliesSelections(t *testing.T) {
 		application.setupRequest.Config.Resources.CPUs != 8 ||
 		application.setupRequest.Config.Resources.Memory != "12GiB" {
 		t.Fatalf("resource preview request = %#v, message = %#v", application.setupRequest, message)
+	}
+}
+
+func TestSetupParsesGuestPortsIntoDynamicLoopbackMappings(t *testing.T) {
+	ports, err := parseGuestPorts(" 8080,3001 ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []config.PortConfig{
+		{Name: "port-3001", Guest: 3001, Host: config.HostPort{Dynamic: true}, Bind: "127.0.0.1", Protocol: "tcp"},
+		{Name: "port-8080", Guest: 8080, Host: config.HostPort{Dynamic: true}, Bind: "127.0.0.1", Protocol: "tcp"},
+	}
+	if !reflect.DeepEqual(ports, want) {
+		t.Fatalf("ports = %#v, want %#v", ports, want)
+	}
+	for _, input := range []string{"0", "65536", "8080,not-a-port"} {
+		if _, err := parseGuestPorts(input); err == nil {
+			t.Fatalf("parseGuestPorts(%q) succeeded", input)
+		}
 	}
 }
 
@@ -578,6 +657,37 @@ func TestProjectPrimaryActionMatchesCurrentState(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsPublishedPortsAndConfiguresThem(t *testing.T) {
+	state := app.BareState{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
+		ConfiguredPorts: []config.PortConfig{{
+			Name: "port-8080", Guest: 8080, Host: config.HostPort{Dynamic: true}, Bind: "127.0.0.1", Protocol: "tcp",
+		}},
+		ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+	}
+	action := NewDashboardModel(state, app.SandboxSummary{
+		Sandbox: "main", Mode: model.ModeLive, State: model.StateRunning, URLs: []string{"http://127.0.0.1:49152"},
+	})
+	theme := newVisualTheme(false)
+	view := strings.Join([]string{
+		action.renderStatus(theme),
+		action.renderSandboxList(theme),
+		action.renderManageActions(theme),
+	}, "\n")
+	for _, expected := range []string{"Published ports", "8080", "dynamic loopback", "http://127.0.0.1:49152", "[p] Configure published ports"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("dashboard omitted %q:\n%s", expected, view)
+		}
+	}
+	managed, _ := action.Update(tea.KeyPressMsg(tea.Key{Text: "m", Code: 'm'}))
+	action = managed.(*ActionModel)
+	updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: "p", Code: 'p'}))
+	intent, found := updated.(*ActionModel).Intent()
+	if command == nil || !found || intent != (Intent{Action: "configure-ports", Project: "/tmp/project"}) {
+		t.Fatalf("configure ports intent = %#v, found=%t, command=%v", intent, found, command)
+	}
+}
+
 func TestProjectScreenIgnoresHiddenActionShortcuts(t *testing.T) {
 	state := app.BareState{
 		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
@@ -811,7 +921,7 @@ func TestWideLayoutsCenterSharedChromeAndFooters(t *testing.T) {
 	}
 }
 
-func TestAccessibleSetupUsesPlainPromptsAndSanitizedReview(t *testing.T) {
+func TestAccessibleSetupUsesPlainPromptsAndContinuesToCreate(t *testing.T) {
 	hostile := "/tmp/project\x1b]52;c;Y2xpcA==\a\u202e"
 	preview := app.SetupPreview{
 		Facts: app.ProjectFacts{CanonicalRoot: hostile},
@@ -833,19 +943,19 @@ func TestAccessibleSetupUsesPlainPromptsAndSanitizedReview(t *testing.T) {
 	var output bytes.Buffer
 	runner := &Runner{
 		Application: application,
-		Input:       strings.NewReader("1\n\n\n\n\n" + strings.Repeat("\n", pageCount-1) + "y\n"),
+		Input:       strings.NewReader("1\n\n\n\n\n\n" + strings.Repeat("\n", pageCount-1) + "y\n\n"),
 		Output:      &output,
 	}
-	_, found, err := runner.Run(context.Background(), RunRequest{Root: hostile, ForceSetup: true, Accessible: true})
+	intent, found, err := runner.Run(context.Background(), RunRequest{Root: hostile, ForceSetup: true, Accessible: true})
 	if err != nil {
 		t.Fatalf("accessible Run() error = %v", err)
 	}
-	if found || application.initializes != 1 {
-		t.Fatalf("found = %t, initialize calls = %d, output = %q", found, application.initializes, output.String())
+	if !found || intent.Action != "create" || intent.Project != hostile || application.initializes != 1 || application.approvals != 0 {
+		t.Fatalf("intent = %#v, found = %t, initializes = %d, approvals = %d, output = %q", intent, found, application.initializes, application.approvals, output.String())
 	}
 	got := output.String()
 	assertTerminalSafe(t, got)
-	for _, expected := range []string{"Configured image", "Coding assistant", "Codex", "Claude Code", "OMP", "OpenCode", "Let this workspace access the internet?", "Final confirmation:", "DSX setup complete", `\x1b]52`, `\a`, `\u202e`} {
+	for _, expected := range []string{"Configured image", "Coding assistant", "Codex", "Claude Code", "OMP", "OpenCode", "Let this workspace access the internet?", "Final confirmation:", "Setting up this project", "DSX setup complete", "No workspace exists", `\x1b]52`, `\a`, `\u202e`} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("accessible output missing %q: %q", expected, got)
 		}

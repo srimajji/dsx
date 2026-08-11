@@ -122,7 +122,7 @@ func ValidateManifest(manifest Manifest) error {
 		return fmt.Errorf("invalid manifest state %q", manifest.State)
 	}
 	switch manifest.Operation {
-	case "create", "capture", "stop", "clean":
+	case "create", "reconfigure-ports", "capture", "stop", "clean":
 	default:
 		return fmt.Errorf("invalid manifest operation %q", manifest.Operation)
 	}

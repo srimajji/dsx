@@ -385,7 +385,49 @@ func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Inte
 		return reportError(stderr, "dsx "+intent.Action, model.NewError(model.CodeUnavailable, fmt.Sprintf("%s is not available in this build", intent.Action), nil))
 	}
 	switch intent.Action {
-	case "create", "start", "attach":
+	case "create", "start":
+		startRequest := app.StartRequest{Root: root, Interactive: true, FinalConfirmed: true}
+		progressRunner, showsProgress := dispatcher.dependencies.TUI.(TUIProgressRunner)
+		progressLifecycle, reportsProgress := dispatcher.dependencies.Lifecycle.(LifecycleProgress)
+		if showsProgress && reportsProgress {
+			progressRequest := tui.ProgressRequest{
+				Title:      "Creating workspace",
+				Project:    root,
+				Detail:     "DSX is creating the approved workspace and waiting until it is ready.",
+				Accessible: dispatcher.dependencies.Accessible,
+				Steps: []tui.ProgressStep{
+					{ID: string(app.StartProgressValidate), Label: "Validate approved project plan"},
+					{ID: string(app.StartProgressImage), Label: "Prepare workspace image"},
+					{ID: string(app.StartProgressResources), Label: "Create private network and persistent volumes"},
+					{ID: string(app.StartProgressWorkspace), Label: "Create and start workspace"},
+					{ID: string(app.StartProgressServices), Label: "Publish ports and start configured services"},
+					{ID: string(app.StartProgressReady), Label: "Workspace ready"},
+				},
+			}
+			if err := progressRunner.RunProgress(ctx, progressRequest, func(operationCtx context.Context, report func(string)) error {
+				_, err := progressLifecycle.StartWithProgress(operationCtx, startRequest, func(step app.StartProgressStep) {
+					report(string(step))
+				})
+				return err
+			}); err != nil {
+				return reportError(stderr, "dsx "+intent.Action, err)
+			}
+		} else if _, err := dispatcher.dependencies.Lifecycle.Start(ctx, startRequest); err != nil {
+			return reportError(stderr, "dsx "+intent.Action, err)
+		}
+		return dispatcher.runShell(ctx, app.ShellRequest{
+			Root: root, Terminal: true, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
+		}, stderr)
+	case "attach":
+		return dispatcher.runShell(ctx, app.ShellRequest{
+			Root: root, Terminal: true, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
+		}, stderr)
+	case "recreate-ports":
+		if _, err := dispatcher.dependencies.Lifecycle.RecreatePorts(ctx, app.StartRequest{
+			Root: root, ApproveConfig: intent.ApproveConfig, Interactive: true, FinalConfirmed: true,
+		}); err != nil {
+			return reportError(stderr, "dsx reconfigure ports", err)
+		}
 		return dispatcher.runShell(ctx, app.ShellRequest{
 			Root: root, Terminal: true, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
 		}, stderr)

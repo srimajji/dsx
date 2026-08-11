@@ -22,33 +22,54 @@ import (
 )
 
 type lifecycleStub struct {
-	startRequests  []app.StartRequest
-	stopRequests   []app.StopRequest
-	cleanRequests  []app.CleanRequest
-	listRequests   []app.ListRequest
-	shellRequests  []app.ShellRequest
-	statusRequests []app.ProcessStatusRequest
-	logsRequests   []app.ProcessLogsRequest
-	startResult    app.StartResult
-	stopResult     app.StopResult
-	cleanResult    app.CleanResult
-	listResult     app.ListResult
-	shellResult    app.ShellResult
-	statusResult   app.ProcessStatusResult
-	logsResult     app.ProcessLogsResult
-	shellReady     app.ShellReady
-	startErr       error
-	stopErr        error
-	cleanErr       error
-	listErr        error
-	shellErr       error
-	statusErr      error
-	logsErr        error
-	shellFunc      func(context.Context, app.ShellRequest) (app.ShellResult, error)
+	startRequests    []app.StartRequest
+	recreateRequests []app.StartRequest
+	stopRequests     []app.StopRequest
+	cleanRequests    []app.CleanRequest
+	listRequests     []app.ListRequest
+	shellRequests    []app.ShellRequest
+	statusRequests   []app.ProcessStatusRequest
+	logsRequests     []app.ProcessLogsRequest
+	startResult      app.StartResult
+	stopResult       app.StopResult
+	cleanResult      app.CleanResult
+	listResult       app.ListResult
+	shellResult      app.ShellResult
+	statusResult     app.ProcessStatusResult
+	logsResult       app.ProcessLogsResult
+	shellReady       app.ShellReady
+	startErr         error
+	stopErr          error
+	cleanErr         error
+	listErr          error
+	shellErr         error
+	statusErr        error
+	logsErr          error
+	shellFunc        func(context.Context, app.ShellRequest) (app.ShellResult, error)
 }
 
 func (stub *lifecycleStub) Start(_ context.Context, request app.StartRequest) (app.StartResult, error) {
 	stub.startRequests = append(stub.startRequests, request)
+	return stub.startResult, stub.startErr
+}
+
+func (stub *lifecycleStub) StartWithProgress(_ context.Context, request app.StartRequest, report app.StartProgressReporter) (app.StartResult, error) {
+	stub.startRequests = append(stub.startRequests, request)
+	for _, step := range []app.StartProgressStep{
+		app.StartProgressValidate,
+		app.StartProgressImage,
+		app.StartProgressResources,
+		app.StartProgressWorkspace,
+		app.StartProgressServices,
+		app.StartProgressReady,
+	} {
+		report(step)
+	}
+	return stub.startResult, stub.startErr
+}
+
+func (stub *lifecycleStub) RecreatePorts(_ context.Context, request app.StartRequest) (app.StartResult, error) {
+	stub.recreateRequests = append(stub.recreateRequests, request)
 	return stub.startResult, stub.startErr
 }
 
@@ -91,7 +112,7 @@ func (stub *lifecycleStub) ProcessLogs(_ context.Context, request app.ProcessLog
 }
 
 func (stub *lifecycleStub) calls() int {
-	return len(stub.startRequests) + len(stub.stopRequests) + len(stub.cleanRequests) + len(stub.listRequests) + len(stub.shellRequests) + len(stub.statusRequests) + len(stub.logsRequests)
+	return len(stub.startRequests) + len(stub.recreateRequests) + len(stub.stopRequests) + len(stub.cleanRequests) + len(stub.listRequests) + len(stub.shellRequests) + len(stub.statusRequests) + len(stub.logsRequests)
 }
 
 type harnessStub struct {

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dsx.dev/schema/config-v1.json",
   "title": "DSX project configuration v1",
-  "description": "Strict, reviewable project configuration for one DSX Linux ARM64 workspace. CLI flags override these values; selected supported imports and defaults have lower precedence.",
+  "description": "Strict, reviewable project configuration for one DSX Linux ARM64 workspace. CLI flags override project values; defaults have lower precedence.",
   "examples": [
     {
       "$schema": "https://dsx.dev/schema/config-v1.json",
@@ -23,10 +23,6 @@
     "schemaVersion": {
       "description": "Configuration format version. Version 1 is the only accepted value.",
       "const": 1
-    },
-    "imports": {
-      "description": "Explicit allowlist of supported fields imported from existing project declarations.",
-      "$ref": "#/$defs/imports"
     },
     "workspace": {
       "description": "Workspace root and optional composite repository members.",
@@ -117,38 +113,6 @@
       "pattern": "^/",
       "maxLength": 1024,
       "examples": ["/workspace", "/var/lib/mysql"]
-    },
-    "imports": {
-      "description": "Supported project declarations from which explicitly selected fields may be imported.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "devcontainer": {
-          "description": "Selected supported fields from one Dev Container file; no unlisted hook executes.",
-          "$ref": "#/$defs/devcontainerImport"
-        }
-      }
-    },
-    "devcontainerImport": {
-      "description": "Path and exact supported-field allowlist for a Dev Container import.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["path", "fields"],
-      "properties": {
-        "path": {
-          "description": "Dev Container JSON/JSONC file relative to the project root.",
-          "$ref": "#/$defs/projectPath",
-          "examples": [".devcontainer/devcontainer.json"]
-        },
-        "fields": {
-          "description": "Only these supported fields are imported; unsupported fields remain visible diagnostics.",
-          "type": "array",
-          "uniqueItems": true,
-          "maxItems": 6,
-          "items": { "enum": ["image", "build", "containerEnv", "mounts", "forwardPorts", "postCreateCommand"] },
-          "examples": [["build", "forwardPorts"]]
-        }
-      }
     },
     "workspace": {
       "description": "Canonical project-relative workspace root and optional repository member layout.",

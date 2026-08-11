@@ -1,13 +1,6 @@
 {
   "$schema": "https://dsx.dev/schema/config-v1.json",
   "schemaVersion": 1,
-  // Only explicitly supported fields may be imported.
-  "imports": {
-    "devcontainer": {
-      "path": ".devcontainer/devcontainer.json",
-      "fields": ["image", "build", "containerEnv", "mounts", "forwardPorts", "postCreateCommand"],
-    },
-  },
   "workspace": {
     "root": ".",
     "members": [{ "name": "api", "path": "services/api" }],

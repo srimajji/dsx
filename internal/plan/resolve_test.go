@@ -143,9 +143,9 @@ func TestProvenanceExactLocationsAndEveryEffectiveLeaf(t *testing.T) {
 	assertSource("/limits/cpus", "cli", "--cpus", 0, 0, PriorityCLI)
 	assertSource("/limits/max_concurrent_clones", "project", ".dsx/config.jsonc", 40, 9, PriorityProject)
 	assertSource("/image/context", "project", ".dsx/config.jsonc", 12, 7, PriorityProject)
-	assertSource("/image/target", "devcontainer", ".devcontainer/devcontainer.json", 5, 13, PriorityImport)
+	assertSource("/image/target", "detected", "package.json", 5, 13, PriorityImport)
 	assertSource("/ports/1/guest_port", "project", ".dsx/config.jsonc", 31, 17, PriorityProject)
-	assertSource("/ports/1/protocol", "devcontainer", ".devcontainer/devcontainer.json", 20, 3, PriorityImport)
+	assertSource("/ports/1/protocol", "detected", "package.json", 20, 3, PriorityImport)
 
 	encoded, err := json.Marshal(plan)
 	if err != nil {
@@ -338,7 +338,7 @@ func smokeResolveInput(permuted bool) ResolveInput {
 			Resources:    config.ResourceLimits{CPUs: 4, Memory: "4GiB", MaxConcurrentClones: 3},
 		},
 	}
-	importSource := config.SourceRef{Kind: "devcontainer", Path: ".devcontainer/devcontainer.json", Line: 20, Column: 3}
+	importSource := config.SourceRef{Kind: "detected", Path: "package.json", Line: 20, Column: 3}
 	return ResolveInput{
 		Config:    project,
 		Project:   ProjectIdentity{ID: model.ProjectID("abcdefghijklmnopqrst"), CanonicalRoot: "/work/project"},
@@ -348,9 +348,9 @@ func smokeResolveInput(permuted bool) ResolveInput {
 		CLI:       CLIOverrides{Agent: "cli-agent", Browser: boolPointer(true), CPUs: intPointer(8), Memory: "6GiB"},
 		Imported: []ImportedValue{
 			{Pointer: "/agents/default", Value: "import-agent", Source: importSource},
-			{Pointer: "/image/build/context", Value: "import-context", Source: config.SourceRef{Kind: "devcontainer", Path: ".devcontainer/devcontainer.json", Line: 3, Column: 11}},
-			{Pointer: "/image/build/file", Value: "Dockerfile", Source: config.SourceRef{Kind: "devcontainer", Path: ".devcontainer/devcontainer.json", Line: 4, Column: 11}},
-			{Pointer: "/image/build/target", Value: "import-target", Source: config.SourceRef{Kind: "devcontainer", Path: ".devcontainer/devcontainer.json", Line: 5, Column: 13}},
+			{Pointer: "/image/build/context", Value: "import-context", Source: config.SourceRef{Kind: "detected", Path: "package.json", Line: 3, Column: 11}},
+			{Pointer: "/image/build/file", Value: "Dockerfile", Source: config.SourceRef{Kind: "detected", Path: "package.json", Line: 4, Column: 11}},
+			{Pointer: "/image/build/target", Value: "import-target", Source: config.SourceRef{Kind: "detected", Path: "package.json", Line: 5, Column: 13}},
 			{Pointer: "/image/build/args/a", Value: "import-a", Source: importSource},
 			{Pointer: "/image/build/args/b", Value: "import-b", Source: importSource},
 			{Pointer: "/network/internet", Value: true, Source: importSource},
@@ -364,7 +364,7 @@ func smokeResolveInput(permuted bool) ResolveInput {
 			BuildContext:          &ContentDigest{Path: "project-context", Digest: strings.Repeat("b", 64)},
 			BrowserImageReference: "example/browser@sha256:" + strings.Repeat("c", 64),
 			BrowserImageDigest:    strings.Repeat("c", 64),
-			ImportedContent:       []ContentDigest{{Path: ".devcontainer/devcontainer.json", Digest: strings.Repeat("d", 64)}},
+			ImportedContent:       []ContentDigest{{Path: "package.json", Digest: strings.Repeat("d", 64)}},
 		},
 	}
 }

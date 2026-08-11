@@ -61,7 +61,6 @@ type ProjectFacts struct {
 	GitRoots      []DetectedPath `json:"git_roots"`
 	Lockfiles     []DetectedPath `json:"lockfiles"`
 	Dockerfiles   []DetectedPath `json:"dockerfiles"`
-	Devcontainers []DetectedPath `json:"devcontainers"`
 	DevenvFiles   []DetectedPath `json:"devenv_files"`
 }
 
@@ -97,6 +96,7 @@ type BareState struct {
 	OwnedResources  int                  `json:"owned_resources"`
 	Facts           ProjectFacts         `json:"facts"`
 	ContainerSystem runtime.SystemStatus `json:"container_system"`
+	ConfiguredPorts []config.PortConfig  `json:"configured_ports,omitempty"`
 }
 
 type SetupPreviewRequest struct {
@@ -135,6 +135,7 @@ type InitializeRequest struct {
 	ExpectedProjectState           string
 	ExpectedImportedContentDigests []state.ContentDigest
 	Confirmed                      bool
+	ReplacesConfigDigest           string
 	Config                         config.ConfigDocument
 	RenderedConfig                 []byte
 }

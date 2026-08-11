@@ -54,8 +54,17 @@ type TUIRunner interface {
 	Run(context.Context, tui.RunRequest) (tui.Intent, bool, error)
 }
 
+type TUIProgressRunner interface {
+	RunProgress(context.Context, tui.ProgressRequest, tui.ProgressOperation) error
+}
+
+type LifecycleProgress interface {
+	StartWithProgress(context.Context, app.StartRequest, app.StartProgressReporter) (app.StartResult, error)
+}
+
 type Lifecycle interface {
 	Start(context.Context, app.StartRequest) (app.StartResult, error)
+	RecreatePorts(context.Context, app.StartRequest) (app.StartResult, error)
 	Stop(context.Context, app.StopRequest) (app.StopResult, error)
 	Clean(context.Context, app.CleanRequest) (app.CleanResult, error)
 	List(context.Context, app.ListRequest) (app.ListResult, error)

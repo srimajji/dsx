@@ -170,11 +170,10 @@ Configuration precedence is:
 ```text
 CLI flags
   > one active DSX configuration (home-local or shared)
-  > explicitly imported supported configuration
   > DSX defaults
 ```
 
-DSX may suggest configuration from lockfiles, Dockerfiles, Dev Container files, or `devenv.nix`, but it will not silently execute inferred commands. Unsupported or dangerous imported fields must fail visibly or require explicit approval. Interactive users approve the executable configuration hash; unattended runs must provide the exact hash through `--approve-config`. `--force` never bypasses configuration trust.
+DSX may suggest configuration from dependency lockfiles, Dockerfiles, or `devenv.nix`, but it will not silently execute inferred commands. Dev Container declarations are outside discovery and import. Interactive users approve the executable configuration hash; unattended runs must provide the exact hash through `--approve-config`. `--force` never bypasses configuration trust.
 
 ### 7. Use cached OCI image layers
 
@@ -260,7 +259,7 @@ When stdin and stdout are interactive terminals, bare `dsx` will launch a termin
 - No project configuration and no DSX resources: setup wizard.
 - A configured project: one state-driven project screen reports whether Apple Container is installed, stopped, running, or unavailable and whether the live workspace is absent, stopped, running, or unverifiable.
 
-The project screen derives one primary action from those states. It never renders inapplicable lifecycle or Git commands. Advanced clone, stop, cleanup, and named-clone Git operations live under a secondary **More options** view. Starting the Apple container system is an explicit user action. `dsx init` opens the setup flow directly. Without an interactive terminal, bare `dsx` prints help and exits without prompting or changing state.
+The project screen derives one primary action from those states. It never renders inapplicable lifecycle or Git commands. Advanced port configuration, clone, stop, cleanup, and named-clone Git operations live under a secondary **More options** view. Starting the Apple container system is an explicit user action. `dsx init` opens the setup flow directly. Without an interactive terminal, bare `dsx` prints help and exits without prompting or changing state.
 
 The TUI will use [Bubble Tea](https://github.com/charmbracelet/bubbletea) as its state/update/view framework and [Huh](https://github.com/charmbracelet/huh) for setup forms, with Bubbles and Lip Gloss components only where needed. Huh's accessible mode supplies the initial screen-reader path.
 
@@ -272,9 +271,9 @@ Explicit CLI commands ─┐
 TUI actions ───────────┘
 ```
 
-The setup flow performs detection and planning without mutation, then shows selectable DSX-standard and detected project image sources, the effective configuration, executable commands, mounts, credentials, network grants, ports, and configuration hash. Final confirmation first triggers a read-only Apple container-system status check. A missing CLI or service state other than `running` fails before configuration or approval persistence and directs the user to install the supported runtime or run `container system start`. Only after that preflight may setup write the home-local project configuration, persist approval, build the managed standard image, or invoke other resource creation. The standard-image build uses only embedded DSX-owned inputs and never includes project files. A repository `.dsx/config.jsonc` is an explicit shared alternative. Configuration approval and destructive cleanup rules are identical in CLI and TUI paths.
+The setup flow performs detection and planning without mutation, then shows selectable DSX-standard and detected Dockerfile image sources, the effective configuration, executable commands, mounts, credentials, network grants, optional guest ports, and configuration hash. Guest ports entered interactively use dynamic loopback host publication. Final confirmation first triggers a read-only Apple container-system status check. A missing CLI or service state other than `running` fails before configuration or approval persistence. Confirmed setup remains inside the TUI, renders bounded setup milestones, and transitions directly to the configured project screen.
 
-The project screen supports project/workspace status, create, attach, start, stop, clean, and the existing `dsx git status`, `dsx git diff`, and `dsx git fetch` operations through contextual actions. It does not embed logs, agent chat, task scheduling, or a full configuration editor.
+The project screen supports project/workspace status, final published URLs, port reconfiguration, create, attach, start, stop, clean, and the existing Git operations through contextual actions. The approval completed during onboarding authorizes the immediately following create action without repeating the same review. Create and start operations remain application-service transactions; the TUI observes fixed, secret-free lifecycle milestones and never renders raw runtime logs. Port changes are reviewed and approved like other executable configuration. Because publication is create-time authority, an existing live workspace is replaced only after explicit confirmation; its project network and DSX-owned volumes are retained.
 
 Before handing the terminal to `container exec -it`, the TUI exits its alternate screen and restores normal terminal state; it may restore the dashboard after the child exits. Ctrl-C before confirmation is side-effect free, while interruption during creation invokes the same rollback path as explicit commands.
 

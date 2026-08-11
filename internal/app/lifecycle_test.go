@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -326,9 +327,23 @@ func TestLifecycleBuildsManagedStandardImageFromEmbeddedInputs(t *testing.T) {
 func TestLifecycleStartStopResumeShellAndClean(t *testing.T) {
 	service, root, manifests, fake, hash := lifecycleFixture(t)
 	ctx := context.Background()
-	started, err := service.Start(ctx, StartRequest{Root: root, ApproveConfig: hash})
+	var progress []StartProgressStep
+	started, err := service.StartWithProgress(ctx, StartRequest{Root: root, ApproveConfig: hash}, func(step StartProgressStep) {
+		progress = append(progress, step)
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	wantProgress := []StartProgressStep{
+		StartProgressValidate,
+		StartProgressImage,
+		StartProgressResources,
+		StartProgressWorkspace,
+		StartProgressServices,
+		StartProgressReady,
+	}
+	if !reflect.DeepEqual(progress, wantProgress) {
+		t.Fatalf("start progress = %#v, want %#v", progress, wantProgress)
 	}
 	if started.State != model.StateRunning || started.Existing {
 		t.Fatalf("Start() = %#v", started)
@@ -1330,6 +1345,81 @@ func TestManagedStandardImageSpecUsesGlobalReusableTag(t *testing.T) {
 	}
 	if len(spec.Labels) != 1 || spec.Labels[0].Key != "dev.dsx.standard-input" || spec.Labels[0].Value != digest {
 		t.Fatalf("managed standard labels = %#v", spec.Labels)
+	}
+}
+
+func TestRecreatePortsPreservesNetworkAndVolumes(t *testing.T) {
+	service, root, manifests, fake, _ := lifecycleFixture(t)
+	writeLifecycleConfig(t, root, `,"volumes":{"cache":{"target":"/workspace/.cache","scope":"sandbox","persistent":true}},"ports":[{"name":"port-3000","guest":3000,"host":32000,"bind":"127.0.0.1","protocol":"tcp"}]`)
+	firstHash := inspectLifecycleHash(t, service.inspection, root)
+	if _, err := service.Start(context.Background(), StartRequest{Root: root, ApproveConfig: firstHash, FinalConfirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := projectIDForRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := oneStoredManifest(t, manifests, projectID)
+	networkBefore, err := manifestResource(before, runtime.ResourceNetwork, networkRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volumeBefore, err := manifestResource(before, runtime.ResourceVolume, volumeRole("cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callOffset := len(fake.calls)
+
+	writeLifecycleConfig(t, root, `,"volumes":{"cache":{"target":"/workspace/.cache","scope":"sandbox","persistent":true}},"ports":[{"name":"port-8080","guest":8080,"host":32001,"bind":"127.0.0.1","protocol":"tcp"}]`)
+	secondHash := inspectLifecycleHash(t, service.inspection, root)
+	result, err := service.RecreatePorts(context.Background(), StartRequest{
+		Root: root, ApproveConfig: secondHash, FinalConfirmed: true,
+	})
+	if err != nil {
+		var causes []string
+		var collect func(error)
+		collect = func(cause error) {
+			if cause == nil {
+				return
+			}
+			causes = append(causes, cause.Error())
+			if joined, ok := cause.(interface{ Unwrap() []error }); ok {
+				for _, nested := range joined.Unwrap() {
+					collect(nested)
+				}
+				return
+			}
+			collect(errors.Unwrap(cause))
+		}
+		collect(err)
+		t.Fatalf("RecreatePorts() errors = %v", causes)
+	}
+	if result.State != model.StateRunning || len(result.URLs) != 1 {
+		t.Fatalf("recreate result = %#v", result)
+	}
+	after := oneStoredManifest(t, manifests, projectID)
+	if after.PlanHash != secondHash || len(after.HostBindings) != 1 || after.HostBindings[0].GuestPort != 8080 {
+		t.Fatalf("recreated manifest = %#v", after)
+	}
+	networkAfter, err := manifestResource(after, runtime.ResourceNetwork, networkRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volumeAfter, err := manifestResource(after, runtime.ResourceVolume, volumeRole("cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(networkAfter, networkBefore) || !reflect.DeepEqual(volumeAfter, volumeBefore) {
+		t.Fatalf("persistent resources changed:\nnetwork %#v -> %#v\nvolume %#v -> %#v", networkBefore, networkAfter, volumeBefore, volumeAfter)
+	}
+	calls := fake.calls[callOffset:]
+	if slices.Contains(calls, "image") ||
+		slices.Contains(calls, "delete:network") || slices.Contains(calls, "delete:volume") ||
+		slices.Contains(calls, "create:network") || slices.Contains(calls, "create:volume") {
+		t.Fatalf("port recreation mutated persistent resources: %v", calls)
+	}
+	if !slices.Contains(calls, "delete:workspace") || !slices.Contains(calls, "create:workspace") {
+		t.Fatalf("port recreation did not replace workspace: %v", calls)
 	}
 }
 

@@ -272,8 +272,8 @@ func (manager *ProductionLeaseManager) Stop(ctx context.Context, identity LeaseI
 		}
 		return removeEmptyRunDirectory(paths.run)
 	}
-	if ledger.Version != 1 || ledger.Identity != identity || ledger.PID <= 0 || ledger.Executable != manager.executable {
-		return model.NewError(model.CodeAmbiguous, "bridge lease ownership evidence is contradictory; preserving it", nil)
+	if err := validateLedger(ledger, identity, ledger.SpecDigest, ledger.Executable); err != nil {
+		return model.NewError(model.CodeAmbiguous, "bridge lease ownership evidence is contradictory; preserving it", err)
 	}
 	token, err := readPrivateToken(paths.token)
 	if err != nil {
@@ -344,8 +344,8 @@ func (manager *ProductionLeaseManager) Status(ctx context.Context, identity Leas
 		}
 		return LeaseStatus{State: "absent"}, nil
 	}
-	if ledger.Version != 1 || ledger.Identity != identity || ledger.Executable != manager.executable {
-		return LeaseStatus{}, model.NewError(model.CodeAmbiguous, "bridge lease ownership evidence is contradictory", nil)
+	if err := validateLedger(ledger, identity, ledger.SpecDigest, ledger.Executable); err != nil {
+		return LeaseStatus{}, model.NewError(model.CodeAmbiguous, "bridge lease ownership evidence is contradictory", err)
 	}
 	token, err := readPrivateToken(paths.token)
 	if err != nil {

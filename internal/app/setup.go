@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"time"
 
@@ -119,9 +120,15 @@ func (service *SetupService) BareState(ctx context.Context, request BareStateReq
 	if err != nil {
 		return BareState{}, err
 	}
+	var configuredPorts []config.PortConfig
 	if configExists {
+		validated, diagnostics := service.inspection.parseConfig(location.absolute, location.display)
+		if diagnosticsHaveErrors(diagnostics) {
+			return BareState{}, invalidDiagnosticsError(diagnostics)
+		}
 		mapped.ConfigExists = true
 		mapped.ConfigPath = location.display
+		configuredPorts = append([]config.PortConfig(nil), validated.Document.Ports...)
 	}
 	projectID, err := model.NewProjectID(facts.WorkspaceRoot)
 	if err != nil {
@@ -158,7 +165,8 @@ func (service *SetupService) BareState(ctx context.Context, request BareStateReq
 		screen = BareLauncher
 	}
 	return BareState{
-		Screen: screen, ConfigExists: configExists, OwnedResources: owned, Facts: mapped, ContainerSystem: systemStatus,
+		Screen: screen, ConfigExists: configExists, OwnedResources: owned, Facts: mapped,
+		ContainerSystem: systemStatus, ConfiguredPorts: configuredPorts,
 	}, nil
 }
 func (service *SetupService) StartContainerSystem(ctx context.Context) error {
@@ -245,13 +253,7 @@ func (service *SetupService) PreviewSetup(ctx context.Context, request SetupPrev
 	preview.RenderedConfig = rendered
 	preview.ConfigContentDigest = validated.ContentDigest
 
-	imported, importDiagnostics := selectedDevcontainerImports(validated, facts)
-	preview.Diagnostics = append(preview.Diagnostics, importDiagnostics...)
-	if diagnosticsHaveErrors(preview.Diagnostics) {
-		sortDiagnostics(preview.Diagnostics)
-		return preview, invalidDiagnosticsError(preview.Diagnostics)
-	}
-	authority, err := collectAuthorityInputs(facts.WorkspaceRoot, validated, imported, facts, service.inspection.resolveHostMount)
+	authority, err := collectAuthorityInputs(facts.WorkspaceRoot, validated, nil, service.inspection.resolveHostMount)
 	if err != nil {
 		return preview, model.Wrap(model.CodeInvalidInput, "resolve setup authority inputs", err)
 	}
@@ -272,7 +274,6 @@ func (service *SetupService) PreviewSetup(ctx context.Context, request SetupPrev
 			Labels:       []plan.KeyValue{{Key: "dsx.project", Value: string(projectID)}, {Key: "dsx.sandbox", Value: "main"}},
 			ResourceName: "dsx-" + string(projectID) + "-main",
 		},
-		Imported:  imported,
 		Defaults:  plan.DefaultValues{Agent: "codex", Internet: true, CPUs: DefaultWorkspaceCPUs, MemoryBytes: DefaultWorkspaceMemoryBytes, MaxConcurrentClones: 1},
 		Authority: authority,
 	})
@@ -543,6 +544,89 @@ func (service *SetupService) ApproveExisting(ctx context.Context, request Initia
 	}
 	return InitializeResult{ConfigPath: location.absolute, Hash: preview.Hash, Created: false}, nil
 }
+
+// UpdateExisting atomically replaces only the published-port portion of a
+// reviewed configuration and persists approval for the resulting plan.
+func (service *SetupService) UpdateExisting(ctx context.Context, request InitializeRequest) (InitializeResult, error) {
+	if ctx == nil {
+		return InitializeResult{}, model.NewError(model.CodeInvalidInput, "update existing configuration: context is nil", nil)
+	}
+	if !request.Confirmed {
+		return InitializeResult{}, model.NewError(model.CodeUnapproved, "port reconfiguration requires explicit final confirmation", nil)
+	}
+	if service == nil || service.approvals == nil {
+		return InitializeResult{}, model.NewError(model.CodeInternal, "setup approval repository is not configured", nil)
+	}
+	current, err := service.PreviewExisting(ctx, BareStateRequest{Root: request.Root})
+	if err != nil {
+		return InitializeResult{}, err
+	}
+	if request.ReplacesConfigDigest == "" || request.ReplacesConfigDigest != current.ConfigContentDigest {
+		return InitializeResult{}, model.NewError(model.CodeConflict, "project configuration changed since port editing began", nil)
+	}
+	candidate, err := service.PreviewSetup(ctx, SetupPreviewRequest{Root: request.Root, RenderedConfig: request.RenderedConfig})
+	if err != nil {
+		return InitializeResult{}, err
+	}
+	if request.ExpectedHash == "" || request.ExpectedHash != candidate.Hash ||
+		request.ExpectedConfigDigest == "" || request.ExpectedConfigDigest != candidate.ConfigContentDigest ||
+		request.ExpectedProjectState == "" || request.ExpectedProjectState != candidate.ProjectState {
+		return InitializeResult{}, model.NewError(model.CodeUnapproved, "port configuration changed since final review", nil)
+	}
+	currentDocument, candidateDocument := current.Config, candidate.Config
+	currentDocument.Ports = nil
+	candidateDocument.Ports = nil
+	if !reflect.DeepEqual(currentDocument, candidateDocument) {
+		return InitializeResult{}, model.NewError(model.CodeInvalidInput, "port reconfiguration may change only published ports", nil)
+	}
+	for _, port := range candidate.Config.Ports {
+		if !port.Host.Dynamic || port.Host.Port != 0 || (port.Bind != "" && port.Bind != "127.0.0.1") || (port.Protocol != "" && port.Protocol != "tcp") {
+			return InitializeResult{}, model.NewError(model.CodeInvalidInput, "interactive port configuration supports only dynamic loopback TCP publications", nil)
+		}
+	}
+	if err := service.checkContainerSystem(ctx); err != nil {
+		return InitializeResult{}, err
+	}
+	projectID, err := model.NewProjectID(candidate.Facts.CanonicalRoot)
+	if err != nil {
+		return InitializeResult{}, model.Wrap(model.CodeInvalidInput, "derive project identity", err)
+	}
+	priorApproval, priorApprovalFound, err := service.approvals.LoadApproval(ctx, projectID)
+	if err != nil {
+		return InitializeResult{}, model.Wrap(model.CodeInternal, "load prior setup approval", err)
+	}
+	location, found, err := service.inspection.activeConfig(candidate.Facts.CanonicalRoot)
+	if err != nil {
+		return InitializeResult{}, err
+	}
+	if !found {
+		return InitializeResult{}, model.NewError(model.CodeConflict, "project configuration disappeared during port review", nil)
+	}
+	if err := replaceExistingConfig(ctx, location.absolute, current.ConfigContentDigest, candidate.RenderedConfig); err != nil {
+		return InitializeResult{}, err
+	}
+	record := state.ApprovalRecord{
+		Version: state.ApprovalRecordVersion, ProjectID: projectID, Hash: candidate.Hash,
+		ApprovedAt: service.now().UTC(), DSXVersion: service.version,
+		ConfigContentDigest: candidate.ConfigContentDigest,
+	}
+	if err := service.approvals.SaveApproval(ctx, record); err != nil {
+		rollbackContext := context.WithoutCancel(ctx)
+		configRollbackErr := replaceExistingConfig(rollbackContext, location.absolute, candidate.ConfigContentDigest, current.RenderedConfig)
+		var approvalRollbackErr error
+		if priorApprovalFound {
+			approvalRollbackErr = service.approvals.SaveApproval(rollbackContext, priorApproval)
+		} else {
+			approvalRollbackErr = service.approvals.DeleteApproval(rollbackContext, projectID)
+		}
+		if configRollbackErr != nil || approvalRollbackErr != nil {
+			return InitializeResult{}, model.Wrap(model.CodeInternal, "persist port approval failed; rollback left recoverable residue",
+				errors.Join(err, wrapRollbackError("restore configuration", configRollbackErr), wrapRollbackError("restore approval", approvalRollbackErr)))
+		}
+		return InitializeResult{}, err
+	}
+	return InitializeResult{ConfigPath: location.absolute, Hash: candidate.Hash, Created: false}, nil
+}
 func (service *SetupService) checkContainerSystem(ctx context.Context) error {
 	if service.containerSystem == nil {
 		return model.NewError(model.CodeUnavailable, "Apple container system status check is not configured", nil)
@@ -589,7 +673,7 @@ func suggestConfig(facts projectinspect.Facts, options []SetupImageOption) (conf
 }
 
 func setupImageOptions(facts projectinspect.Facts, standardImage string) []SetupImageOption {
-	options := make([]SetupImageOption, 0, len(facts.Containerfiles)+len(facts.DevContainers)+2)
+	options := make([]SetupImageOption, 0, len(facts.Containerfiles)+2)
 	_, publishedStandard := pinnedImageDigest(standardImage)
 	standardDescription := "Built locally on first use with Codex, Claude, OMP, and OpenCode"
 	standardConfig := config.ImageConfig{Standard: true}
@@ -602,36 +686,15 @@ func setupImageOptions(facts projectinspect.Facts, standardImage string) []Setup
 		Image: standardConfig,
 	})
 	for _, candidate := range facts.Containerfiles {
-		if candidate != "Containerfile" && candidate != "Dockerfile" {
-			continue
+		location := "Detected in the project root"
+		if filepath.ToSlash(filepath.Dir(candidate)) != "." {
+			location = "Detected at " + candidate
 		}
 		options = append(options, SetupImageOption{
-			ID: "dockerfile:" + candidate, Name: "Use this project's " + candidate,
-			Description: "Detected in the project root", Available: true,
+			ID: "dockerfile:" + candidate, Name: "Use this project's " + filepath.Base(candidate),
+			Description: location, Available: true,
 			Image: config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: candidate}},
 		})
-	}
-	for _, devcontainer := range facts.DevContainers {
-		if devcontainer.Path != ".devcontainer/devcontainer.json" {
-			continue
-		}
-		option := SetupImageOption{
-			ID: "devcontainer:" + devcontainer.Path, Name: "Use this project's Dev Container",
-			Description: "Detected at " + devcontainer.Path, Available: true,
-		}
-		switch {
-		case devcontainer.Image != "":
-			option.Image = config.ImageConfig{Ref: devcontainer.Image}
-		case devcontainer.Build.Dockerfile != "":
-			contextPath := devcontainer.Build.Context
-			if contextPath == "" {
-				contextPath = "."
-			}
-			option.Image = config.ImageConfig{Build: &config.ImageBuild{Context: contextPath, File: devcontainer.Build.Dockerfile}}
-		default:
-			continue
-		}
-		options = append(options, option)
 	}
 	options = append(options, SetupImageOption{
 		ID: "custom", Name: "Use another image", Description: "Advanced", Available: true,
@@ -702,9 +765,6 @@ func projectStateDigest(facts projectinspect.Facts) (string, error) {
 	}
 	for _, lockfile := range facts.Lockfiles {
 		paths = append(paths, lockfile.Path)
-	}
-	for _, devcontainer := range facts.DevContainers {
-		paths = append(paths, devcontainer.Path)
 	}
 	sort.Strings(paths)
 	for _, relative := range paths {
@@ -792,6 +852,69 @@ func writeNewConfig(ctx context.Context, destination string, data []byte) (bool,
 		return false, model.Wrap(model.CodeInternal, "sync project configuration directory", errors.Join(syncErr, closeErr))
 	}
 	return true, nil
+}
+
+func replaceExistingConfig(ctx context.Context, destination, expectedDigest string, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return model.Wrap(model.CodeUnavailable, "replace project configuration", err)
+	}
+	info, err := os.Lstat(destination)
+	if err != nil {
+		return model.Wrap(model.CodeConflict, "inspect project configuration before replacement", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > config.MaxConfigBytes {
+		return model.NewError(model.CodeInvalidInput, "project configuration must remain a bounded regular non-symlink file", nil)
+	}
+	current, err := os.ReadFile(destination)
+	if err != nil {
+		return model.Wrap(model.CodeInvalidInput, "read project configuration before replacement", err)
+	}
+	digest := sha256.Sum256(current)
+	if expectedDigest == "" || hex.EncodeToString(digest[:]) != expectedDigest {
+		return model.NewError(model.CodeConflict, "project configuration changed before replacement", nil)
+	}
+	directory := filepath.Dir(destination)
+	temporary, err := os.CreateTemp(directory, ".config.jsonc-update-*")
+	if err != nil {
+		return model.Wrap(model.CodeInternal, "create temporary project configuration update", err)
+	}
+	temporaryPath := temporary.Name()
+	cleanup := true
+	defer func() {
+		_ = temporary.Close()
+		if cleanup {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return model.Wrap(model.CodeInternal, "set updated project configuration permissions", err)
+	}
+	if _, err := io.Copy(temporary, bytes.NewReader(data)); err != nil {
+		return model.Wrap(model.CodeInternal, "write updated project configuration", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return model.Wrap(model.CodeInternal, "sync updated project configuration", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return model.Wrap(model.CodeInternal, "close updated project configuration", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return model.Wrap(model.CodeUnavailable, "replace project configuration", err)
+	}
+	if err := os.Rename(temporaryPath, destination); err != nil {
+		return model.Wrap(model.CodeInternal, "install updated project configuration", err)
+	}
+	cleanup = false
+	parent, err := os.Open(directory)
+	if err != nil {
+		return model.Wrap(model.CodeInternal, "open project configuration directory after replacement", err)
+	}
+	syncErr := parent.Sync()
+	closeErr := parent.Close()
+	if syncErr != nil || closeErr != nil {
+		return model.Wrap(model.CodeInternal, "sync project configuration directory after replacement", errors.Join(syncErr, closeErr))
+	}
+	return nil
 }
 
 func ensureRealPrivateDirectory(path string) error {

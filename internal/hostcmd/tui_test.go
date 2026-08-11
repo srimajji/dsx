@@ -15,17 +15,26 @@ import (
 )
 
 type tuiRunnerStub struct {
-	calls    int
-	requests []tui.RunRequest
-	intent   tui.Intent
-	found    bool
-	err      error
+	calls            int
+	requests         []tui.RunRequest
+	intent           tui.Intent
+	found            bool
+	err              error
+	progressRequests []tui.ProgressRequest
+	progressSteps    []string
 }
 
 func (runner *tuiRunnerStub) Run(_ context.Context, request tui.RunRequest) (tui.Intent, bool, error) {
 	runner.calls++
 	runner.requests = append(runner.requests, request)
 	return runner.intent, runner.found, runner.err
+}
+
+func (runner *tuiRunnerStub) RunProgress(ctx context.Context, request tui.ProgressRequest, operation tui.ProgressOperation) error {
+	runner.progressRequests = append(runner.progressRequests, request)
+	return operation(ctx, func(step string) {
+		runner.progressSteps = append(runner.progressSteps, step)
+	})
 }
 
 func TestNonTTYBarePrintsHelpWithoutTUIOrService(t *testing.T) {
@@ -244,8 +253,8 @@ func TestTUIIntentsInvokeLifecycleServices(t *testing.T) {
 		action string
 		check  func(*testing.T, *lifecycleStub)
 	}{
-		{action: "create", check: checkTUIShell},
-		{action: "start", check: checkTUIShell},
+		{action: "create", check: checkTUIStartAndShell},
+		{action: "start", check: checkTUIStartAndShell},
 		{action: "attach", check: checkTUIShell},
 		{action: "stop", check: func(t *testing.T, service *lifecycleStub) {
 			t.Helper()
@@ -274,6 +283,15 @@ func TestTUIIntentsInvokeLifecycleServices(t *testing.T) {
 				t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
 			}
 			test.check(t, service)
+			if test.action == "create" || test.action == "start" {
+				if len(runner.progressRequests) != 1 || runner.progressRequests[0].Title != "Creating workspace" {
+					t.Fatalf("progress requests = %#v", runner.progressRequests)
+				}
+				wantSteps := []string{"validate", "image", "resources", "workspace", "services", "ready"}
+				if strings.Join(runner.progressSteps, ",") != strings.Join(wantSteps, ",") {
+					t.Fatalf("progress steps = %#v, want %#v", runner.progressSteps, wantSteps)
+				}
+			}
 		})
 	}
 }
@@ -292,6 +310,21 @@ func TestTUIDashboardStopPassesSelectedClone(t *testing.T) {
 	}
 }
 
+func TestTUIRecreatePortsInvokesLifecycleReplacement(t *testing.T) {
+	service := &lifecycleStub{startResult: app.StartResult{State: model.StateRunning}, shellResult: shellResult(0)}
+	dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
+	intent := tui.Intent{Action: "recreate-ports", Project: "/tmp/project", ApproveConfig: strings.Repeat("a", 64)}
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.executeIntent(context.Background(), intent, &stdout, &stderr); exit != 0 {
+		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+	}
+	if len(service.recreateRequests) != 1 || service.recreateRequests[0].Root != "/tmp/project" ||
+		service.recreateRequests[0].ApproveConfig != strings.Repeat("a", 64) ||
+		!service.recreateRequests[0].Interactive || !service.recreateRequests[0].FinalConfirmed {
+		t.Fatalf("recreate requests = %#v", service.recreateRequests)
+	}
+}
+
 func checkTUIShell(t *testing.T, service *lifecycleStub) {
 	t.Helper()
 	if len(service.shellRequests) != 1 || !service.shellRequests[0].Terminal || service.shellRequests[0].RunInteractive == nil {
@@ -299,6 +332,18 @@ func checkTUIShell(t *testing.T, service *lifecycleStub) {
 	}
 	if len(service.startRequests) != 0 {
 		t.Fatalf("start requests = %#v, want none", service.startRequests)
+	}
+}
+
+func checkTUIStartAndShell(t *testing.T, service *lifecycleStub) {
+	t.Helper()
+	if len(service.startRequests) != 1 || service.startRequests[0] != (app.StartRequest{
+		Root: "/tmp/project", Interactive: true, FinalConfirmed: true,
+	}) {
+		t.Fatalf("start requests = %#v", service.startRequests)
+	}
+	if len(service.shellRequests) != 1 || !service.shellRequests[0].Terminal || service.shellRequests[0].RunInteractive == nil {
+		t.Fatalf("shell requests = %#v", service.shellRequests)
 	}
 }
 

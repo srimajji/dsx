@@ -130,6 +130,21 @@ type StartRequest struct {
 	Mode           model.WorkspaceMode
 }
 
+// StartProgressStep identifies a fixed, secret-free workspace startup milestone.
+type StartProgressStep string
+
+const (
+	StartProgressValidate  StartProgressStep = "validate"
+	StartProgressImage     StartProgressStep = "image"
+	StartProgressResources StartProgressStep = "resources"
+	StartProgressWorkspace StartProgressStep = "workspace"
+	StartProgressServices  StartProgressStep = "services"
+	StartProgressReady     StartProgressStep = "ready"
+)
+
+// StartProgressReporter receives ordered workspace startup milestones.
+type StartProgressReporter func(StartProgressStep)
+
 type StartResult struct {
 	ProjectID   model.ProjectID    `json:"project_id"`
 	Sandbox     model.SandboxName  `json:"sandbox"`
@@ -178,6 +193,7 @@ type SandboxSummary struct {
 	State     model.SandboxState  `json:"state"`
 	Resources int                 `json:"resources"`
 	Warnings  []string            `json:"warnings,omitempty"`
+	URLs      []string            `json:"urls,omitempty"`
 }
 
 type ListResult struct {
@@ -211,10 +227,21 @@ type ShellResult struct {
 	Exit runtime.Exit `json:"exit"`
 }
 
-func (service *LifecycleService) Start(ctx context.Context, request StartRequest) (result StartResult, err error) {
+func (service *LifecycleService) Start(ctx context.Context, request StartRequest) (StartResult, error) {
+	return service.start(ctx, request, nil)
+}
+
+// StartWithProgress runs the same lifecycle transaction as Start while
+// reporting fixed milestones that are safe for user-facing presentation.
+func (service *LifecycleService) StartWithProgress(ctx context.Context, request StartRequest, report StartProgressReporter) (StartResult, error) {
+	return service.start(ctx, request, report)
+}
+
+func (service *LifecycleService) start(ctx context.Context, request StartRequest, report StartProgressReporter) (result StartResult, err error) {
 	if err := service.ready(ctx); err != nil {
 		return result, err
 	}
+	reportStartProgress(report, StartProgressValidate)
 	timing := beginPhase(service.timingRecorder, service.timingClock, PhaseStart)
 	defer timing.Stop()
 	inspected, err := service.inspectApproved(ctx, request)
@@ -231,10 +258,221 @@ func (service *LifecycleService) Start(ctx context.Context, request StartRequest
 			err = errors.Join(err, model.Wrap(model.CodeInternal, "unlock project lifecycle", unlockErr))
 		}
 	}()
-	return service.startLocked(ctx, request, inspected)
+	result, err = service.startLocked(ctx, request, inspected, report)
+	if err == nil {
+		reportStartProgress(report, StartProgressReady)
+	}
+	return result, err
 }
 
-func (service *LifecycleService) startLocked(ctx context.Context, request StartRequest, inspected InspectResult) (result StartResult, err error) {
+func reportStartProgress(report StartProgressReporter, step StartProgressStep) {
+	if report != nil {
+		report(step)
+	}
+}
+
+// RecreatePorts replaces only the live workspace resource so create-time port
+// publication can change without deleting the project network or volumes.
+func (service *LifecycleService) RecreatePorts(ctx context.Context, request StartRequest) (result StartResult, returnErr error) {
+	if err := service.ready(ctx); err != nil {
+		return result, err
+	}
+	inspected, err := service.inspectApproved(ctx, request)
+	if err != nil {
+		return result, err
+	}
+	projectID := inspected.Plan.Project.ID
+	lock, err := service.locks.LockProject(ctx, projectID)
+	if err != nil {
+		return result, model.Wrap(model.CodeConflict, "lock project port reconfiguration", err)
+	}
+	defer func() { returnErr = errors.Join(returnErr, lock.Unlock()) }()
+	manifest, err := service.oneLiveManifest(ctx, projectID)
+	if err != nil {
+		return result, err
+	}
+	if manifest.State != model.StateRunning && manifest.State != model.StateStopped {
+		return result, model.NewError(model.CodeConflict, fmt.Sprintf("cannot reconfigure ports while the live workspace is %s", manifest.State), nil)
+	}
+	capabilities, err := service.runtime.Probe(ctx)
+	if err != nil {
+		return result, err
+	}
+	if err := requireLifecycleCapabilities(inspected.Plan, capabilities); err != nil {
+		return result, err
+	}
+	publication, err := ports.Plan(inspected.Plan.Ports, capabilities)
+	if err != nil {
+		return result, portPlanError(err)
+	}
+	defer func() { _ = publication.Abort() }()
+	workspaceIndex := -1
+	for index := range manifest.Resources {
+		if manifest.Resources[index].Kind == string(runtime.ResourceWorkspace) && manifest.Resources[index].Role == workspaceRole {
+			workspaceIndex = index
+			break
+		}
+	}
+	if workspaceIndex < 0 {
+		return result, model.NewError(model.CodeAmbiguous, "live workspace manifest has no workspace resource", nil)
+	}
+	workspaceRecord := manifest.Resources[workspaceIndex]
+	snapshot, found, err := service.findRuntimeResource(ctx, workspaceRecord)
+	if err != nil {
+		return result, err
+	}
+	if !found {
+		return result, model.NewError(model.CodeUnavailable, "live workspace is unavailable for port reconfiguration", nil)
+	}
+	classification := ownership.Classify(&workspaceRecord, &snapshot)
+	if !classification.DeleteAllowed {
+		return result, model.NewError(model.CodeAmbiguous, classification.Reason, nil)
+	}
+	identity := bridge.LeaseIdentity{ProjectID: manifest.ProjectID, Sandbox: manifest.Sandbox, RunID: manifest.RunID}
+	if err := service.stopPersistentHostBridges(ctx, identity); err != nil {
+		return result, err
+	}
+	if snapshot.State == "running" {
+		if err := service.runtime.Stop(ctx, snapshot, runtime.StopPolicy{TimeoutSeconds: lifecycleStopSeconds, Signal: "TERM"}); err != nil {
+			return result, err
+		}
+	}
+	if manifest.State == model.StateRunning {
+		if err := service.transition(ctx, &manifest, model.StateStopped, "stop", ""); err != nil {
+			return result, err
+		}
+	}
+	if err := service.runtime.Delete(ctx, snapshot); err != nil {
+		return result, err
+	}
+	manifest.Resources[workspaceIndex].RuntimeID = string(snapshot.ID)
+	manifest.Resources[workspaceIndex].Created = true
+	manifest.Resources[workspaceIndex].Deleted = true
+	if err := service.replace(ctx, &manifest); err != nil {
+		return result, err
+	}
+	manifest.Resources[workspaceIndex].RuntimeID = ""
+	manifest.Resources[workspaceIndex].Created = false
+	manifest.Resources[workspaceIndex].Deleted = false
+	manifest.Resources[workspaceIndex].Absent = false
+	manifest.PlanHash = inspected.Plan.ExecutableHash
+	manifest.HostBindings = nil
+	manifest.Operation = "reconfigure-ports"
+	manifest.Failure = ""
+	if err := service.replace(ctx, &manifest); err != nil {
+		return result, err
+	}
+	current, err := service.revalidateApprovedPlan(ctx, request, inspected.Plan.ExecutableHash)
+	if err != nil {
+		return result, err
+	}
+	current.Sandbox.RunID = manifest.RunID
+	network, err := manifestResource(manifest, runtime.ResourceNetwork, networkRole)
+	if err != nil {
+		return result, err
+	}
+	volumeNames := make(map[string]string, len(current.Volumes))
+	for _, volume := range current.Volumes {
+		record, recordErr := manifestResource(manifest, runtime.ResourceVolume, volumeRole(volume.Name))
+		if recordErr != nil {
+			return result, recordErr
+		}
+		volumeNames[volume.Name] = record.Name
+	}
+	imageReference := current.Image.Reference
+	if imageReference == "" {
+		if current.Image.Standard {
+			imageReference = fmt.Sprintf("dsx.local/standard:%s", current.Image.InputDigest[:12])
+		} else {
+			imageReference = fmt.Sprintf("dsx.local/%s:%s", current.Project.ID, current.Image.InputDigest[:12])
+		}
+	}
+	if _, ok := pinnedImageDigest("local@" + snapshot.ImageDigest); !ok {
+		return result, model.NewError(model.CodeUnavailable, "existing workspace image digest is malformed", nil)
+	}
+	image := runtime.Image{
+		Reference: imageReference,
+		Digest:    snapshot.ImageDigest,
+		Local:     current.Image.Reference == "",
+	}
+	guestHelper, err := service.guestHelperForPlan(current)
+	if err != nil {
+		return result, err
+	}
+	leappMirrorSource, err := service.ensureLeappMirrorForPlan(ctx, current, identity)
+	if err != nil {
+		return result, err
+	}
+	runtimePorts, err := publication.ReleaseForCreate()
+	if err != nil {
+		return result, model.NewError(model.CodeConflict, "release port reservations for workspace recreation", err)
+	}
+	workspaceSpec, err := workspaceSpecForPlan(current, image, manifest.Resources[workspaceIndex], network.Name, volumeNames, runtimePorts, service.user(), guestHelper, leappMirrorSource)
+	if err != nil {
+		return result, err
+	}
+	if err := service.createResource(ctx, &manifest, workspaceIndex, func(state.ResourceRecord) (runtime.Resource, error) {
+		return service.runtime.CreateWorkspace(ctx, workspaceSpec)
+	}); err != nil {
+		return result, err
+	}
+	recreated, err := service.runtime.Inspect(ctx, runtime.ResourceID(manifest.Resources[workspaceIndex].ExpectedID))
+	if err != nil {
+		return result, err
+	}
+	classification = ownership.Classify(&manifest.Resources[workspaceIndex], &recreated)
+	if !classification.DeleteAllowed {
+		return result, model.NewError(model.CodeAmbiguous, classification.Reason, nil)
+	}
+	if err := service.runtime.StartWorkspace(ctx, recreated); err != nil {
+		return result, err
+	}
+	recreated, err = service.runtime.Inspect(ctx, runtime.ResourceID(manifest.Resources[workspaceIndex].ExpectedID))
+	if err != nil {
+		return result, err
+	}
+	relayBindings, err := publication.ReleaseForRelay()
+	if err != nil {
+		return result, model.NewError(model.CodeConflict, "release host relay reservations after workspace recreation", err)
+	}
+	bindings, err := publication.Reconcile(recreated.Ports)
+	if err != nil {
+		return result, model.NewError(model.CodeAmbiguous, "recreated workspace ports differ from the approved plan", err)
+	}
+	current, hostBridges, _, err := service.ensurePersistentHostBridges(ctx, recreated, current, identity, relayBindings, true)
+	if err != nil {
+		return result, err
+	}
+	defer func() { returnErr = errors.Join(returnErr, hostBridges.Close()) }()
+	if err := service.recordHostBindings(ctx, &manifest, bindings); err != nil {
+		return result, err
+	}
+	if guestGraphEnabled(current) {
+		if err := service.guest.Reconcile(ctx, recreated); err != nil {
+			return result, model.Wrap(model.CodeUnavailable, "reconcile recreated guest supervisor", err)
+		}
+		started, startErr := service.guest.Start(ctx, recreated, current, 0)
+		if startErr != nil {
+			return result, model.Wrap(model.CodeUnavailable, "start recreated guest process graph", startErr)
+		}
+		if err := service.waitGuestReady(ctx, recreated, started.Generation); err != nil {
+			return result, err
+		}
+	}
+	if err := service.transition(ctx, &manifest, model.StateRunning, "create", ""); err != nil {
+		return result, err
+	}
+	urls, err := ports.RenderURLs(bindings)
+	if err != nil {
+		return result, err
+	}
+	return StartResult{
+		ProjectID: projectID, Sandbox: manifest.Sandbox, RunID: manifest.RunID,
+		State: manifest.State, Existing: true, URLs: urls,
+	}, nil
+}
+
+func (service *LifecycleService) startLocked(ctx context.Context, request StartRequest, inspected InspectResult, report StartProgressReporter) (result StartResult, err error) {
 	projectID := inspected.Plan.Project.ID
 	capabilities, probeErr := service.runtime.Probe(ctx)
 	if probeErr != nil {
@@ -256,7 +494,7 @@ func (service *LifecycleService) startLocked(ctx context.Context, request StartR
 		if revalidateErr != nil {
 			return result, revalidateErr
 		}
-		return service.startExisting(ctx, active[0], current, capabilities)
+		return service.startExisting(ctx, active[0], current, capabilities, report)
 	}
 	publication, publicationErr := ports.Plan(inspected.Plan.Ports, capabilities)
 	if publicationErr != nil {
@@ -279,7 +517,7 @@ func (service *LifecycleService) startLocked(ctx context.Context, request StartR
 		return result, err
 	}
 	var hostBridges *hostBridgeSession
-	created, urls, createErr := service.createLive(ctx, request, inspected.Plan, volumeResources, publication, &manifest, &hostBridges)
+	created, urls, createErr := service.createLive(ctx, request, inspected.Plan, volumeResources, publication, &manifest, &hostBridges, report)
 	if createErr != nil {
 		rollbackErr := service.rollbackCreate(ctx, &manifest)
 		return result, errors.Join(createErr, rollbackErr)
@@ -292,7 +530,8 @@ func (service *LifecycleService) startLocked(ctx context.Context, request StartR
 	return StartResult{ProjectID: projectID, Sandbox: manifest.Sandbox, RunID: manifest.RunID, State: manifest.State, Existing: !created, URLs: urls, hostBridges: hostBridges}, nil
 }
 
-func (service *LifecycleService) startExisting(ctx context.Context, manifest state.Manifest, current plan.ExecutionPlan, capabilities runtime.Capabilities) (result StartResult, returnErr error) {
+func (service *LifecycleService) startExisting(ctx context.Context, manifest state.Manifest, current plan.ExecutionPlan, capabilities runtime.Capabilities, report StartProgressReporter) (result StartResult, returnErr error) {
+	reportStartProgress(report, StartProgressWorkspace)
 	result = StartResult{ProjectID: manifest.ProjectID, Sandbox: manifest.Sandbox, RunID: manifest.RunID, State: manifest.State, Existing: true}
 	if manifest.PlanHash != current.ExecutableHash {
 		return result, model.NewError(model.CodeUnapproved, "existing sandbox plan differs from the currently approved executable plan; clean it before starting", nil)
@@ -327,6 +566,7 @@ func (service *LifecycleService) startExisting(ctx context.Context, manifest sta
 		}
 	}()
 
+	reportStartProgress(report, StartProgressServices)
 	switch snapshot.State {
 	case "running":
 		if mirrorSource, mirrorErr := service.ensureLeappMirrorForPlan(ctx, current, mirrorIdentity); mirrorErr != nil {
@@ -493,7 +733,7 @@ func (service *LifecycleService) inspectVerifiedWorkspace(ctx context.Context, m
 	return snapshot, urls, nil
 }
 
-func (service *LifecycleService) createLive(ctx context.Context, request StartRequest, approved plan.ExecutionPlan, volumeResources map[string]int, publication *ports.PublicationPlan, manifest *state.Manifest, activeHostBridges **hostBridgeSession) (created bool, urls []string, returnErr error) {
+func (service *LifecycleService) createLive(ctx context.Context, request StartRequest, approved plan.ExecutionPlan, volumeResources map[string]int, publication *ports.PublicationPlan, manifest *state.Manifest, activeHostBridges **hostBridgeSession, report StartProgressReporter) (created bool, urls []string, returnErr error) {
 	if _, err := service.revalidateApprovedPlan(ctx, request, approved.ExecutableHash); err != nil {
 		return false, nil, err
 	}
@@ -501,6 +741,7 @@ func (service *LifecycleService) createLive(ctx context.Context, request StartRe
 	if err != nil {
 		return false, nil, err
 	}
+	reportStartProgress(report, StartProgressImage)
 	buildRoot := ""
 	var stagedBuild *config.ImageBuild
 	var approvedStagedDigest string
@@ -550,6 +791,7 @@ func (service *LifecycleService) createLive(ctx context.Context, request StartRe
 			return false, nil, model.NewError(model.CodeUnapproved, "staged build input changed while the image builder consumed it", nil)
 		}
 	}
+	reportStartProgress(report, StartProgressResources)
 	if err := service.createResource(ctx, manifest, 0, func(record state.ResourceRecord) (runtime.Resource, error) {
 		return service.runtime.CreateNetwork(ctx, runtime.NetworkSpec{Name: record.Name, Labels: runtimeLabels(record.Labels)})
 	}); err != nil {
@@ -593,6 +835,7 @@ func (service *LifecycleService) createLive(ctx context.Context, request StartRe
 	if err != nil {
 		return false, nil, err
 	}
+	reportStartProgress(report, StartProgressWorkspace)
 	if err := service.createResource(ctx, manifest, workspaceIndex, func(state.ResourceRecord) (runtime.Resource, error) {
 		return service.runtime.CreateWorkspace(ctx, workspaceSpec)
 	}); err != nil {
@@ -658,6 +901,7 @@ func (service *LifecycleService) createLive(ctx context.Context, request StartRe
 	if urlErr != nil {
 		return false, nil, model.NewError(model.CodeAmbiguous, "render verified host relay bindings", urlErr)
 	}
+	reportStartProgress(report, StartProgressServices)
 	if guestGraphEnabled(current) {
 		if err := service.guest.Reconcile(ctx, snapshot); err != nil {
 			return false, nil, model.Wrap(model.CodeUnavailable, "reconcile created guest supervisor", err)
@@ -1319,6 +1563,11 @@ func (service *LifecycleService) List(ctx context.Context, request ListRequest) 
 	for _, manifest := range manifests {
 		summary := SandboxSummary{ProjectID: manifest.ProjectID, Sandbox: manifest.Sandbox, RunID: manifest.RunID, Mode: manifest.Mode, State: manifest.State}
 		summary.Warnings = append(summary.Warnings, unfetchedResultEntries(manifest)...)
+		if urls, renderErr := ports.RenderURLs(publishedBindingsFromManifest(manifest)); renderErr != nil {
+			summary.Warnings = append(summary.Warnings, "published ports: "+renderErr.Error())
+		} else {
+			summary.URLs = urls
+		}
 		privateRelay := currentBridgePlan != nil && manifest.Mode == model.ModeLive && hasHostBridgeGrants(*currentBridgePlan)
 		publicationRelay := currentBridgePlan != nil && capabilityErr == nil && len(manifest.HostBindings) != 0 && ports.UsesFallback(currentBridgePlan.Ports, capabilities)
 		if currentBridgePlan != nil && manifest.PlanHash == currentBridgePlan.ExecutableHash && (privateRelay || publicationRelay) {
@@ -1399,7 +1648,7 @@ func (service *LifecycleService) Shell(ctx context.Context, request ShellRequest
 	defer func() { err = errors.Join(err, unlock()) }()
 	var hostBridges *hostBridgeSession
 	if inspected != nil {
-		started, startErr := service.startLocked(ctx, StartRequest{Root: request.Root, ApproveConfig: request.ApproveConfig, Agent: request.Agent}, *inspected)
+		started, startErr := service.startLocked(ctx, StartRequest{Root: request.Root, ApproveConfig: request.ApproveConfig, Agent: request.Agent}, *inspected, nil)
 		if startErr != nil {
 			return result, startErr
 		}

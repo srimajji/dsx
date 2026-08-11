@@ -40,16 +40,6 @@ func TestInspectCompositeWorkspaceStableRelativeFacts(t *testing.T) {
 	if got, want := first.Containerfiles, []string{"Dockerfile"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Containerfiles = %v, want %v", got, want)
 	}
-	if len(first.DevContainers) != 1 {
-		t.Fatalf("DevContainers = %#v, want one", first.DevContainers)
-	}
-	container := first.DevContainers[0]
-	if container.Path != ".devcontainer/devcontainer.json" || container.Name != "composite" || container.Build.Dockerfile != "../Dockerfile" || container.Build.Context != ".." || container.WorkspaceFolder != "/workspace" {
-		t.Errorf("DevContainer = %#v", container)
-	}
-	if got, want := container.ForwardPorts, []string{"3000", "localhost:8080"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("ForwardPorts = %v, want %v", got, want)
-	}
 	if len(first.Devenv) != 1 {
 		t.Fatalf("Devenv = %#v, want one", first.Devenv)
 	}
@@ -59,57 +49,31 @@ func TestInspectCompositeWorkspaceStableRelativeFacts(t *testing.T) {
 	if got, want := first.Devenv[0].Services, []string{"caddy", "mysql", "redis"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Services = %v, want %v", got, want)
 	}
-	if len(first.Diagnostics) != 1 || first.Diagnostics[0].Severity != SeverityWarning || first.Diagnostics[0].Field != "/customizations" {
-		t.Errorf("Diagnostics = %#v, want unsupported customizations warning", first.Diagnostics)
+	if len(first.Diagnostics) != 0 {
+		t.Errorf("Diagnostics = %#v, want none", first.Diagnostics)
 	}
 	if after := snapshotTree(t, root); !reflect.DeepEqual(before, after) {
 		t.Fatalf("inspection changed filesystem state:\nbefore: %#v\nafter:  %#v", before, after)
 	}
 }
 
-func TestInspectDevContainerUnsupportedAndMalformedInputExplicit(t *testing.T) {
-	t.Run("unsupported fields are classified", func(t *testing.T) {
-		root := t.TempDir()
-		writeTestFile(t, root, ".devcontainer/devcontainer.json", `{
-			"name": "unsafe",
-			"initializeCommand": ["sh", "-c", "exit 9"],
-			"mounts": ["source=/,target=/host,type=bind"],
-			"hostRequirements": {"cpus": 2}
-		}`)
-		facts, err := Inspect(root)
-		if err != nil {
-			t.Fatalf("Inspect() error = %v", err)
-		}
-		severities := make(map[string]Severity)
-		for _, diagnostic := range facts.Diagnostics {
-			severities[diagnostic.Field] = diagnostic.Severity
-		}
-		if severities["/initializeCommand"] != SeverityError || severities["/mounts"] != SeverityError {
-			t.Errorf("security diagnostics = %#v, want errors", facts.Diagnostics)
-		}
-		if severities["/hostRequirements"] != SeverityWarning {
-			t.Errorf("hostRequirements severity = %q, want warning", severities["/hostRequirements"])
-		}
-		if !facts.HasErrors() {
-			t.Error("Facts.HasErrors() = false, want true")
-		}
-	})
-
-	for name, content := range map[string]string{
-		"syntax":    `{"name":`,
-		"duplicate": `{"image":"one", "image":"two"}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
-			writeTestFile(t, root, ".devcontainer/devcontainer.json", content)
-			facts, err := Inspect(root)
-			if err != nil {
-				t.Fatalf("Inspect() error = %v", err)
-			}
-			if len(facts.Diagnostics) != 1 || facts.Diagnostics[0].Code != "malformed_devcontainer" || facts.Diagnostics[0].Severity != SeverityError {
-				t.Fatalf("Diagnostics = %#v, want one explicit malformed error", facts.Diagnostics)
-			}
-		})
+func TestInspectIgnoresDevContainerDeclarationsCompletely(t *testing.T) {
+	root := t.TempDir()
+	sentinel := filepath.Join(root, "executed")
+	writeTestFile(t, root, ".devcontainer/devcontainer.json", `{
+		"initializeCommand": "touch `+sentinel+`",
+		"mounts": ["source=/,target=/host,type=bind"],
+		"forwardPorts": [3000]
+	}`)
+	facts, err := Inspect(root)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if len(facts.Diagnostics) != 0 {
+		t.Fatalf("Diagnostics = %#v, want Dev Container ignored", facts.Diagnostics)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("ignored Dev Container command executed or stat failed: %v", err)
 	}
 }
 
@@ -131,10 +95,7 @@ func TestInspectRejectsSymlinkEscapeAndOversizedInput(t *testing.T) {
 
 	t.Run("oversized declaration", func(t *testing.T) {
 		root := t.TempDir()
-		path := filepath.Join(root, ".devcontainer", "devcontainer.json")
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		path := filepath.Join(root, "package-lock.json")
 		if err := os.WriteFile(path, bytes.Repeat([]byte{' '}, int(MaxFileBytes)+1), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -183,26 +144,6 @@ func TestInspectHostileDevenvDeclarationNeverExecutes(t *testing.T) {
 	}
 	if len(facts.Devenv) != 1 || !slices.Equal(facts.Devenv[0].Processes, []string{"hostile"}) || !slices.Equal(facts.Devenv[0].Services, []string{"redis"}) {
 		t.Fatalf("Devenv facts = %#v", facts.Devenv)
-	}
-}
-
-func TestImportedDevContainerContentDigestFacts(t *testing.T) {
-	root := t.TempDir()
-	writeTestFile(t, root, ".devcontainer/devcontainer.json", `{"image":"example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
-	first, err := Inspect(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(first.DevContainers) != 1 || len(first.DevContainers[0].ContentDigest) != 64 {
-		t.Fatalf("DevContainer digest fact = %#v", first.DevContainers)
-	}
-	writeTestFile(t, root, ".devcontainer/devcontainer.json", "{\n  \"image\": \"example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n}\n")
-	second, err := Inspect(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.DevContainers[0].ContentDigest == second.DevContainers[0].ContentDigest {
-		t.Fatal("DevContainer byte change did not alter content digest fact")
 	}
 }
 

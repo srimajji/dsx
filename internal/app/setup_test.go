@@ -2,9 +2,7 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -144,7 +142,7 @@ func TestSetupLauncherDashboardSelection(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, ".dsx"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, projectConfigPath), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, projectConfigPath), []byte(`{"schemaVersion":1,"workspace":{"root":"."},"image":{"standard":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stateResult, err = service.BareState(context.Background(), BareStateRequest{Root: root})
@@ -294,10 +292,7 @@ func TestStageStandardImageMatchesEmbeddedAuthority(t *testing.T) {
 func TestSetupListsStandardAndDetectedImageOptions(t *testing.T) {
 	standard := "ghcr.io/example/dsx-agent@sha256:" + strings.Repeat("a", 64)
 	facts := projectinspect.Facts{
-		Containerfiles: []string{"Dockerfile"},
-		DevContainers: []projectinspect.DevContainer{{
-			Path: ".devcontainer/devcontainer.json", Image: "ghcr.io/example/project@sha256:" + strings.Repeat("b", 64),
-		}},
+		Containerfiles: []string{"Dockerfile", ".devcontainer/Dockerfile"},
 	}
 	options := setupImageOptions(facts, standard)
 	if len(options) != 4 {
@@ -310,7 +305,7 @@ func TestSetupListsStandardAndDetectedImageOptions(t *testing.T) {
 	if document.Resources.CPUs != DefaultWorkspaceCPUs || document.Resources.Memory != DefaultWorkspaceMemory {
 		t.Fatalf("suggested resources = %#v", document.Resources)
 	}
-	for index, id := range []string{"standard", "dockerfile:Dockerfile", "devcontainer:.devcontainer/devcontainer.json", "custom"} {
+	for index, id := range []string{"standard", "dockerfile:Dockerfile", "dockerfile:.devcontainer/Dockerfile", "custom"} {
 		if options[index].ID != id {
 			t.Fatalf("option %d = %#v, want %q", index, options[index], id)
 		}
@@ -371,7 +366,7 @@ func TestSetupWritesNamespacedHomeConfigAndRejectsSharedAmbiguity(t *testing.T) 
 	}
 }
 
-func TestSetupIgnoresNestedImageRecipesWhenSuggestingProjectImage(t *testing.T) {
+func TestSetupOffersNestedImageRecipesWithoutReadingDevContainerConfig(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "fixtures", "example", ".devcontainer"), 0o700); err != nil {
 		t.Fatal(err)
@@ -401,6 +396,9 @@ func TestSetupIgnoresNestedImageRecipesWhenSuggestingProjectImage(t *testing.T) 
 	}
 	if len(preview.Diagnostics) != 0 {
 		t.Fatalf("diagnostics = %#v", preview.Diagnostics)
+	}
+	if len(preview.ImageOptions) != 3 || preview.ImageOptions[1].ID != "dockerfile:fixtures/example/Containerfile" {
+		t.Fatalf("nested container recipe options = %#v", preview.ImageOptions)
 	}
 }
 
@@ -667,65 +665,6 @@ func TestSetupApprovalRollbackFailureReportsRecoverableResidue(t *testing.T) {
 	assertSetupConfigMissing(t, root)
 }
 
-func TestImportedDigestPersistenceAndConfirmation(t *testing.T) {
-	root := t.TempDir()
-	importPath := ".devcontainer/devcontainer.json"
-	importBytes := []byte(`{"image":"alpine@sha256:` + strings.Repeat("d", 64) + `"}`)
-	if err := os.MkdirAll(filepath.Join(root, ".devcontainer"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(importPath)), importBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	image := "alpine@sha256:" + strings.Repeat("d", 64)
-	inspection := NewInspectionService(plan.NewResolver())
-	repository := &setupApprovalRepository{}
-	service := NewSetupServiceWithDependencies(SetupDependencies{
-		Inspection:      inspection,
-		Approvals:       repository,
-		ContainerSystem: &setupContainerSystem{},
-		Now:             func() time.Time { return time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC) },
-		DSXVersion:      "test",
-	})
-	document := config.ConfigDocument{
-		SchemaVersion: 1,
-		Imports: config.ImportConfig{Devcontainer: &config.DevcontainerImport{
-			Path: importPath, Fields: []string{"image"},
-		}},
-		Workspace: config.WorkspaceConfig{Root: "."},
-		Image:     config.ImageConfig{Ref: image},
-		Agents:    config.AgentConfig{Default: "codex", Allowed: []string{"codex"}},
-	}
-	preview, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root, Config: document})
-	if err != nil {
-		t.Fatal(err)
-	}
-	expectedDigest := sha256.Sum256(importBytes)
-	wantDigests := []state.ContentDigest{{Path: importPath, Digest: fmt.Sprintf("%x", expectedDigest)}}
-	if !reflect.DeepEqual(preview.ImportedContentDigests, wantDigests) {
-		t.Fatalf("preview imported digests = %#v, want %#v", preview.ImportedContentDigests, wantDigests)
-	}
-	request := confirmedInitializeRequest(root, preview)
-	request.ExpectedImportedContentDigests = nil
-	if _, err := service.Initialize(context.Background(), request); model.ErrorCodeOf(err) != model.CodeUnapproved {
-		t.Fatalf("Initialize() with empty reviewed imports error = %v, want unapproved", err)
-	}
-	request.ExpectedImportedContentDigests = []state.ContentDigest{{Path: importPath, Digest: ""}}
-	if _, err := service.Initialize(context.Background(), request); model.ErrorCodeOf(err) != model.CodeUnapproved {
-		t.Fatalf("Initialize() with malformed reviewed import error = %v, want unapproved", err)
-	}
-	if repository.saves != 0 {
-		t.Fatalf("rejected imported digests saved approval %d times", repository.saves)
-	}
-	request.ExpectedImportedContentDigests = append([]state.ContentDigest(nil), preview.ImportedContentDigests...)
-	if _, err := service.Initialize(context.Background(), request); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(repository.record.ImportedContentDigests, wantDigests) {
-		t.Fatalf("saved imported digests = %#v, want %#v", repository.record.ImportedContentDigests, wantDigests)
-	}
-}
-
 func confirmedInitializeRequest(root string, preview SetupPreview) InitializeRequest {
 	return InitializeRequest{
 		Root:                           root,
@@ -735,6 +674,65 @@ func confirmedInitializeRequest(root string, preview SetupPreview) InitializeReq
 		ExpectedImportedContentDigests: append([]state.ContentDigest(nil), preview.ImportedContentDigests...),
 		Confirmed:                      true,
 		RenderedConfig:                 preview.RenderedConfig,
+	}
+}
+
+func TestUpdateExistingReplacesOnlyReviewedDynamicLoopbackPorts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".dsx"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`{"schemaVersion":1,"workspace":{"root":"."},"image":{"ref":"ghcr.io/example/dev@sha256:` + strings.Repeat("a", 64) + `"},"agents":{"default":"codex","allowed":["codex"]}}`)
+	configPath := filepath.Join(root, projectConfigPath)
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository := &setupApprovalRepository{}
+	service := setupTestService(t, root, repository, nil)
+	current, err := service.PreviewExisting(context.Background(), BareStateRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := current.Config
+	document.Ports = []config.PortConfig{{
+		Name: "port-3000", Guest: 3000, Host: config.HostPort{Dynamic: true}, Bind: "127.0.0.1", Protocol: "tcp",
+	}}
+	candidate, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root, Config: document})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.UpdateExisting(context.Background(), InitializeRequest{
+		Root: root, ExpectedHash: candidate.Hash, ExpectedConfigDigest: candidate.ConfigContentDigest,
+		ExpectedProjectState: candidate.ProjectState, ReplacesConfigDigest: current.ConfigContentDigest,
+		Confirmed: true, RenderedConfig: candidate.RenderedConfig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Hash != candidate.Hash || repository.record.Hash != candidate.Hash {
+		t.Fatalf("update result=%#v approval=%#v", result, repository.record)
+	}
+	updated, err := service.PreviewExisting(context.Background(), BareStateRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Config.Ports) != 1 || updated.Config.Ports[0].Guest != 3000 || !updated.Config.Ports[0].Host.Dynamic {
+		t.Fatalf("updated ports = %#v", updated.Config.Ports)
+	}
+
+	changedDocument := updated.Config
+	changedDocument.Image.Ref = "ghcr.io/example/other@sha256:" + strings.Repeat("b", 64)
+	changedCandidate, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root, Config: changedDocument})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.UpdateExisting(context.Background(), InitializeRequest{
+		Root: root, ExpectedHash: changedCandidate.Hash, ExpectedConfigDigest: changedCandidate.ConfigContentDigest,
+		ExpectedProjectState: changedCandidate.ProjectState, ReplacesConfigDigest: updated.ConfigContentDigest,
+		Confirmed: true, RenderedConfig: changedCandidate.RenderedConfig,
+	})
+	if model.ErrorCodeOf(err) != model.CodeInvalidInput {
+		t.Fatalf("non-port update error = %v, want invalid input", err)
 	}
 }
 

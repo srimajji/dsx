@@ -24,13 +24,13 @@ $ dsx doctor --require-builder
 
 In a terminal, bare `dsx` resolves the canonical current project and routes to the setup wizard, launcher, or dashboard according to configuration and owned resources. `dsx init [--root PATH]` opens the setup flow directly. Its review gives each topic a separate color-coded view for detected facts, the effective plan, executable commands, mounts, credential and network grants, ports, provenance, and the executable hash. The shared TUI column, stepper, panels, status, and footer controls use consistent centered alignment and outer padding. Page position, section continuation, and navigation cues remain visible before confirmation. Cancelling before final confirmation must not write configuration or create runtime resources. After confirmation, a development build without published image metadata builds and verifies the embedded DSX Standard image; release builds continue to use their published digest-pinned standard image.
 
-Setup includes explicit CPU and memory selectors. New sandbox configurations default to 4 CPUs and 6 GiB. The review's `b` action returns to the first environment screen and preserves all in-memory choices; it does not write configuration or mutate runtime resources.
+Setup includes optional comma-separated guest-port entry plus CPU and memory selectors. Entered ports receive dynamic loopback host mappings. New sandbox configurations default to 4 CPUs and 6 GiB. The review's `b` action returns to the first environment screen and preserves all in-memory choices; it does not write configuration or mutate runtime resources.
 
-After final confirmation, setup performs a read-only `container system status --format json` preflight before writing configuration or approval state. A missing Apple container CLI or a service state other than `running` stops setup without persistence; start a stopped service with `container system start`, then retry.
+After final confirmation, setup performs a read-only `container system status --format json` preflight before writing configuration or approval state. A missing Apple container CLI or a service state other than `running` stops setup without persistence; start a stopped service with `container system start`, then retry. Confirmed setup renders an animated, bounded checklist instead of raw command logs and then opens the configured project screen without exiting. The immediately following **Create & open** action uses the approval just completed, reports fixed plan, image, resource, workspace, service, and readiness milestones, and attaches only after readiness.
 
 If either stdin or stdout is not a TTY, bare `dsx` prints command help and exits without prompting or changing state. `dsx init` instead fails because setup is interactive. Use explicit commands and their text/JSON output in automation. Set `DSX_ACCESSIBLE=1` for the accessible TUI form mode; `NO_COLOR` is also respected.
 
-By default, setup writes `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`. A repository `.dsx/config.jsonc` is supported as an explicit shared alternative. DSX requires exactly one location and refuses to continue if both exist. Configuration precedence is CLI flag, the active DSX configuration, explicitly selected supported import field, then default. Unknown fields and unsupported security-relevant declarations fail visibly; inferred lifecycle commands are not executed automatically.
+By default, setup writes `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`. A repository `.dsx/config.jsonc` is supported as an explicit shared alternative. DSX requires exactly one location and refuses to continue if both exist. Configuration precedence is CLI flag, the active DSX configuration, then default. Dev Container declarations are not discovered or imported; inferred lifecycle commands are not executed automatically.
 
 ## 3. Inspect and approve before mutation
 
@@ -71,7 +71,7 @@ $ dsx run --name NAME --agent omp|codex|claude|opencode [--profile NAME] [--brow
 
 `start` starts the approved live workspace without attaching. `shell` starts or attaches to it. A direct command must follow `--`; `shell --agent` is interactive and cannot also take a direct command. `run` requires exactly one non-empty prompt after `--` and creates or resumes a named clone in the current project. Interactive child exit status, signals, terminal resize, and cancellation are propagated.
 
-Bare `dsx` keeps these operations on the same application services. After setup, one project screen reports Apple Container status and the live workspace state, then offers exactly one primary action: start the container system, create and open the first workspace, start and open a stopped workspace, or attach to a running workspace. The create and start actions in this interactive screen enter the workspace shell after it is ready; the explicit `dsx start` command remains start-only. **More options** contains only applicable isolated-clone, stop, clean, and named-clone Git operations. Creating a configured project's first workspace still reviews the complete current plan and requires final confirmation; the approval transaction does not rewrite the committed configuration. Creating an isolated clone collects the clone name, harness, authentication profile, one-shot prompt, and browser choice, renders the exact clone plan and authority before approval, then starts the harness only after confirmation.
+Bare `dsx` keeps these operations on the same application services. After setup, one project screen reports Apple Container, live workspace, and configured-port state, then offers exactly one primary lifecycle action. **More options** includes published-port editing and only the applicable clone, stop, clean, and Git actions. Active sandbox entries show final URLs. Changing ports reviews and approves a new plan; when the live workspace exists, DSX asks before replacing only that container, preserves its network and DSX-owned volumes, and then attaches.
 
 ### List, status, logs, stop, and clean
 
@@ -151,7 +151,7 @@ The OAuth callback bridge likewise has no public CLI or configuration surface an
 
 ### Published ports
 
-Each `ports` entry names a guest TCP port and uses either a fixed host port or `"dynamic"`. Omitting `bind` defaults to `127.0.0.1`; any non-loopback IP value is an explicit, hash-covered trust grant. On Apple `container` 1.2.2, DSX does not trust the accepted-but-reset native publication path: a durable host listener reaches only the exact owned workspace through pinned `container exec` and the read-only guest helper, without exposing the runtime socket. Helper readiness and the atomic manifest are authoritative for fallback bindings; native mappings remain inspect-authoritative on runtime versions that pass the compatibility gate. `list`, `status`, and inspection show final mappings/URLs. Fixed-port conflicts fail without taking over an existing listener. Stop/clean removes exact-owned forwarding.
+Each `ports` entry names a guest TCP port and uses either a fixed host port or `"dynamic"`. Setup accepts guest ports only and emits dynamic `127.0.0.1` mappings. Bare `dsx` shows configured guest ports and active final URLs; **More options** → **Configure published ports** edits the list. An existing live workspace must be explicitly confirmed before its container is replaced, while its project network and DSX-owned volumes remain. On Apple `container` 1.2.2, DSX uses durable, ownership-pinned host listeners for the compatibility-gated fallback path; fixed-port conflicts fail without taking over an existing listener.
 
 ## 8. Security boundaries
 
@@ -173,18 +173,12 @@ These examples are review plans, not successful physical-run evidence. They use 
 
 ### `course-intelligence-agency`
 
-The repository has a Dev Container build plus ports. Import only explicitly supported, nonsecret fields; do not import its host AWS bind or host-side initialization hooks.
+The repository contains a Dev Container declaration, but DSX does not read it. The DSX configuration explicitly selects the Dockerfile, setup commands, credentials, and ports that belong to the sandbox contract.
 
 ```jsonc
 {
   "$schema": "https://dsx.dev/schema/config-v1.json",
   "schemaVersion": 1,
-  "imports": {
-    "devcontainer": {
-      "path": ".devcontainer/devcontainer.json",
-      "fields": ["build", "forwardPorts"]
-    }
-  },
   "workspace": { "root": "." },
   "image": {
     "build": {

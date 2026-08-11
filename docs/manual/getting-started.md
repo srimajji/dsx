@@ -70,19 +70,18 @@ $ dsx
 For an unconfigured project, DSX opens the setup wizard. Its image selector shows:
 
 - **DSX Standard — Ubuntu**, including the supported coding agents. Release binaries pull the published digest; development binaries build the embedded pinned recipe locally after confirmation;
-- detected root Dockerfile or Containerfile builds;
-- a detected root `.devcontainer/devcontainer.json`; and
+- detected Dockerfile or Containerfile builds anywhere in the project; and
 - an advanced custom digest-pinned OCI image option.
 
 The next step presents Codex, Claude Code, OMP, and OpenCode as selectable coding assistants. Internet access is an explicit, form-aligned choice between **Allow** and **Keep offline**.
 
-The resource step selects CPU and memory for each workspace sandbox. New configurations default to **4 CPUs** and **6 GiB** of memory. From review, press **b** to return to the environment choices; the wizard preserves the current agent, network, and resource selections.
+Enter optional comma-separated guest ports such as `3000, 8080`. DSX assigns dynamic `127.0.0.1` host ports. The resource step then selects CPU and memory; new configurations default to **4 CPUs** and **6 GiB**. From review, press **b** to return without losing the current selections.
 
 The review gives each topic its own color-coded view: workspace, detected project files, access and isolation, commands and services, persistent files, and final approval identity. Section headings, descriptions, labels, values, positive states, and warnings use distinct visual treatments. Every view shows its position, progress, continuation count when needed, and navigation keys. The shared TUI column is centered with consistent outer padding; the stepper and footer controls are centered against the same panel width. Setup commands, mounts, credential and network grants, ports, resource limits, source provenance, and the executable configuration hash remain visible without exposing the plan as raw JSON. Published image digests remain visible; a locally built DSX Standard image instead shows the exact embedded build-input digest.
 
-After final confirmation, DSX first verifies that the Apple `container` CLI is installed and that `container system status` reports `running`. If the service is stopped, run `container system start` and retry; this failed preflight does not write configuration or approval state. Once the check succeeds, setup writes `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`; when DSX Standard requires a local build, setup then builds and verifies its content-addressed image before reporting success. The project ID prevents collisions between equal folder names. Teams may instead explicitly maintain a shared repository `.dsx/config.jsonc`, but DSX refuses ambiguity when both locations exist.
+After final confirmation, DSX first verifies that the Apple `container` CLI is installed and that `container system status` reports `running`. If the service is stopped, run `container system start` and retry; this failed preflight does not write configuration or approval state. Once the check succeeds, setup writes `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`; when DSX Standard requires a local build, setup then builds and verifies its content-addressed image. The project ID prevents collisions between equal folder names. Teams may instead explicitly maintain a shared repository `.dsx/config.jsonc`, but DSX refuses ambiguity when both locations exist.
 
-Run `dsx` again later to open the project screen. It reports Apple Container and workspace status, then shows one primary next action. Less-common isolated-clone, stop, clean, and Git operations appear under **More options** only when applicable. In automation or a non-interactive terminal, bare `dsx` prints help instead of prompting.
+The setup screen stays open while this work runs. It shows an animated indicator and a bounded checklist for the container-system check, configuration and approval persistence, image preparation, and transition to the project screen—never raw build logs. On success, the project screen appears immediately. Press **Enter** to create and open the first workspace; DSX then shows ordered milestones for plan validation, image preparation, private resources, workspace startup, published ports and services, and readiness before attaching the shell. Run `dsx` again later to return to the same project screen. Choose **More options** and press **p** to change guest ports. If the live workspace exists, DSX asks before replacing only that container, preserves the project network and DSX-owned volumes, then attaches with the new publication.
 
 ## Understand the two workspace modes
 
@@ -179,30 +178,25 @@ $ dsx clean --purge-auth --agent codex --profile default --force
 
 ## Publish an application port
 
-Declare ports in `.dsx/config.jsonc`. This example asks DSX to choose a free host port and bind it only to loopback:
+During setup, enter guest ports such as:
+
+```text
+3000, 8080
+```
+
+DSX records each as a dynamic loopback-only publication and shows the complete mapping in final review. The equivalent configuration is:
 
 ```jsonc
 {
   "ports": [
-    {
-      "name": "web",
-      "guest": 3000,
-      "host": "dynamic",
-      "bind": "127.0.0.1",
-      "protocol": "tcp"
-    }
+    { "name": "port-3000", "guest": 3000, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" }
   ]
 }
 ```
 
-After startup, inspect the final URL with:
+Run bare `dsx` later to see configured ports. Active sandbox entries show final URLs. Under **More options**, press **p** to edit the list. Applying a change to an existing live workspace requires explicit confirmation and recreates only its container; the project network and DSX-owned volumes are preserved.
 
-```console
-$ dsx status
-$ dsx list
-```
-
-Non-loopback publication must be written explicitly in configuration and becomes part of the reviewed approval hash.
+Non-loopback publication remains available only through explicit configuration and becomes part of the reviewed approval hash.
 
 ## Use the isolated browser
 

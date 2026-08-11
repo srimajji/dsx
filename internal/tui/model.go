@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
@@ -36,6 +37,7 @@ type Application interface {
 	PreviewClone(context.Context, app.ClonePreviewRequest) (app.SetupPreview, error)
 	Initialize(context.Context, app.InitializeRequest) (app.InitializeResult, error)
 	ApproveExisting(context.Context, app.InitializeRequest) (app.InitializeResult, error)
+	UpdateExisting(context.Context, app.InitializeRequest) (app.InitializeResult, error)
 }
 
 type Intent struct {
@@ -60,35 +62,39 @@ const (
 )
 
 type SetupModel struct {
-	ctx           context.Context
-	application   Application
-	root          string
-	form          *huh.Form
-	customForm    *huh.Form
-	stage         setupStage
-	preview       app.SetupPreview
-	document      config.ConfigDocument
-	image         string
-	imageChoice   string
-	imageOptions  []app.SetupImageOption
-	agent         string
-	initialImage  string
-	initialAgent  string
-	internet      bool
-	cpus          int
-	memory        string
-	confirming    bool
-	accessible    bool
-	width         int
-	color         bool
-	height        int
-	result        app.InitializeResult
-	err           error
-	review        string
-	reviewPage    int
-	reviewRefused error
-	approveOnly   bool
-	reviewOnly    bool
+	ctx                 context.Context
+	application         Application
+	root                string
+	form                *huh.Form
+	customForm          *huh.Form
+	stage               setupStage
+	spinner             spinner.Model
+	preview             app.SetupPreview
+	document            config.ConfigDocument
+	image               string
+	imageChoice         string
+	imageOptions        []app.SetupImageOption
+	agent               string
+	initialImage        string
+	initialAgent        string
+	initialConfigDigest string
+	internet            bool
+	cpus                int
+	memory              string
+	portInput           string
+	confirming          bool
+	accessible          bool
+	width               int
+	color               bool
+	height              int
+	result              app.InitializeResult
+	err                 error
+	review              string
+	reviewPage          int
+	reviewRefused       error
+	approveOnly         bool
+	updateOnly          bool
+	reviewOnly          bool
 }
 
 type previewMessage struct {
@@ -110,6 +116,7 @@ func NewSetupModel(ctx context.Context, application Application, root string, in
 		application:  application,
 		root:         root,
 		stage:        setupForm,
+		spinner:      spinner.New(spinner.WithSpinner(spinner.Line)),
 		preview:      initial,
 		document:     initial.Config,
 		image:        terminal.SanitizeLine(initial.Config.Image.Ref),
@@ -121,6 +128,7 @@ func NewSetupModel(ctx context.Context, application Application, root string, in
 		internet:     true,
 		cpus:         initial.Config.Resources.CPUs,
 		memory:       initial.Config.Resources.Memory,
+		portInput:    formatGuestPorts(initial.Config.Ports),
 		accessible:   accessible,
 		width:        80,
 		color:        terminal.ColorEnabled(),
@@ -194,6 +202,56 @@ func setupMemoryOptions(selected string) []huh.Option[string] {
 	return options
 }
 
+func formatGuestPorts(ports []config.PortConfig) string {
+	values := make([]int, 0, len(ports))
+	for _, port := range ports {
+		if port.Guest != 0 && !slices.Contains(values, int(port.Guest)) {
+			values = append(values, int(port.Guest))
+		}
+	}
+	slices.Sort(values)
+	parts := make([]string, len(values))
+	for index, value := range values {
+		parts[index] = strconv.Itoa(value)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func parseGuestPorts(value string) ([]config.PortConfig, error) {
+	fields := strings.FieldsFunc(value, func(character rune) bool {
+		return character == ',' || character == ' ' || character == '\t' || character == '\n'
+	})
+	if len(fields) > 128 {
+		return nil, fmt.Errorf("at most 128 guest ports may be published")
+	}
+	seen := make(map[uint16]struct{}, len(fields))
+	ports := make([]config.PortConfig, 0, len(fields))
+	for _, field := range fields {
+		parsed, err := strconv.ParseUint(field, 10, 16)
+		if err != nil || parsed == 0 {
+			return nil, fmt.Errorf("guest port %q must be an integer from 1 to 65535", field)
+		}
+		guest := uint16(parsed)
+		if _, duplicate := seen[guest]; duplicate {
+			return nil, fmt.Errorf("guest port %d is listed more than once", guest)
+		}
+		seen[guest] = struct{}{}
+		ports = append(ports, config.PortConfig{
+			Name: "port-" + strconv.Itoa(int(guest)), Guest: guest,
+			Host: config.HostPort{Dynamic: true}, Bind: "127.0.0.1", Protocol: "tcp",
+		})
+	}
+	slices.SortFunc(ports, func(left, right config.PortConfig) int {
+		return int(left.Guest) - int(right.Guest)
+	})
+	return ports, nil
+}
+
+func validateGuestPorts(value string) error {
+	_, err := parseGuestPorts(value)
+	return err
+}
+
 func (model *SetupModel) buildSetupForms() {
 	imageOptions := make([]huh.Option[string], 0, len(model.imageOptions))
 	for _, option := range model.imageOptions {
@@ -228,6 +286,13 @@ func (model *SetupModel) buildSetupForms() {
 				Negative("Keep offline").
 				Value(&model.internet).
 				WithButtonAlignment(lipgloss.Left),
+		),
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Published guest ports").
+				Description("Optional comma-separated guest ports, for example 3000, 8080. DSX assigns dynamic loopback host ports.").
+				Value(&model.portInput).
+				Validate(validateGuestPorts),
 		),
 		huh.NewGroup(
 			huh.NewSelect[int]().
@@ -275,6 +340,7 @@ func (model *SetupModel) prepareImageOptions() {
 	if len(model.imageOptions) == 0 {
 		option := app.SetupImageOption{ID: "custom", Name: "Custom OCI image", Available: true}
 		if model.document.Image.Build != nil || model.document.Image.Ref != "" {
+
 			option = app.SetupImageOption{
 				ID: "configured", Name: "Configured image", Description: "Use the current configuration",
 				Available: true, Image: model.document.Image,
@@ -306,6 +372,15 @@ func (model *SetupModel) prepareImageOptions() {
 	}
 }
 
+func NewPortUpdateReviewModel(ctx context.Context, application Application, root string, current, candidate app.SetupPreview, accessible bool) *SetupModel {
+	model := NewSetupModel(ctx, application, root, candidate, accessible)
+	model.stage = setupPreview
+	model.document = candidate.Config
+	model.updateOnly = true
+	model.initialConfigDigest = current.ConfigContentDigest
+	return model
+}
+
 func (model *SetupModel) validateImageChoice(choice string) error {
 	for _, option := range model.imageOptions {
 		if option.ID != choice {
@@ -335,13 +410,17 @@ func NewPlanReviewModel(ctx context.Context, application Application, root strin
 
 func (model *SetupModel) Init() tea.Cmd {
 	if model.form == nil {
-		return nil
+		return model.spinner.Tick
 	}
-	return model.form.Init()
+	return tea.Batch(model.form.Init(), model.spinner.Tick)
 }
 
 func (model *SetupModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
+	case spinner.TickMsg:
+		var command tea.Cmd
+		model.spinner, command = model.spinner.Update(message)
+		return model, command
 	case tea.WindowSizeMsg:
 		resized := false
 		if message.Width > 0 && message.Width != model.width {
@@ -460,10 +539,18 @@ func (model *SetupModel) View() tea.View {
 		case setupSaving:
 			step = 1
 			title := "Checking your choices"
-			body := "DSX is preparing a complete, reviewable plan. Nothing has been created yet."
-			if model.confirming && model.preview.Plan.Image.Standard {
-				title = "Building DSX Standard"
-				body = "DSX is building and verifying the approved Ubuntu agent image. No workspace has been created."
+			body := model.spinner.View() + " Preparing the complete plan for review\n\n" +
+				"[ ] Inspect project configuration\n[ ] Resolve workspace access\n[ ] Calculate approval identity"
+			if model.confirming {
+				title = "Applying approved setup"
+				body = model.spinner.View() + " Setting up this project\n\n" +
+					"[ ] Verify Apple container system\n[ ] Save configuration and approval"
+				if model.preview.Plan.Image.Standard {
+					title = "Building DSX Standard"
+					body = model.spinner.View() + " building and verifying the approved image\n\n" +
+						"[ ] Verify Apple container system\n[ ] Save configuration and approval\n[ ] Build and verify DSX Standard"
+				}
+				body += "\n[ ] Open project workspace screen"
 			}
 			content = header + "\n\n" + theme.stepper(step, model.width) + "\n\n" +
 				theme.panel(title, body, model.width, true)
@@ -521,6 +608,9 @@ func (model *SetupModel) applyForm() {
 	model.document.Network.Internet = &internet
 	model.document.Resources.CPUs = model.cpus
 	model.document.Resources.Memory = model.memory
+	if ports, err := parseGuestPorts(model.portInput); err == nil {
+		model.document.Ports = ports
+	}
 }
 
 func (model *SetupModel) previewCommand() tea.Cmd {
@@ -539,6 +629,8 @@ func (model *SetupModel) initializeCommand() tea.Cmd {
 			result = app.InitializeResult{Hash: model.preview.Hash}
 		} else if model.approveOnly {
 			result, err = model.application.ApproveExisting(model.ctx, request)
+		} else if model.updateOnly {
+			result, err = model.application.UpdateExisting(model.ctx, request)
 		} else {
 			result, err = model.application.Initialize(model.ctx, request)
 		}
@@ -554,6 +646,7 @@ func (model *SetupModel) approvalRequest() app.InitializeRequest {
 		ExpectedImportedContentDigests: slices.Clone(model.preview.ImportedContentDigests),
 		ExpectedProjectState:           model.preview.ProjectState,
 		Confirmed:                      true,
+		ReplacesConfigDigest:           model.initialConfigDigest,
 		RenderedConfig:                 append([]byte(nil), model.preview.RenderedConfig...),
 	}
 }
@@ -689,7 +782,6 @@ func buildDetectedProjectReview(builder *setupReviewBuilder, preview app.SetupPr
 	buildDetectedPaths(builder, "Git repositories", preview.Facts.GitRoots)
 	buildDetectedPaths(builder, "Dependency files", preview.Facts.Lockfiles)
 	buildDetectedPaths(builder, "Container builds", preview.Facts.Dockerfiles)
-	buildDetectedPaths(builder, "Dev Containers", preview.Facts.Devcontainers)
 	buildDetectedPaths(builder, "devenv files", preview.Facts.DevenvFiles)
 	if len(preview.Diagnostics) > 0 {
 		builder.item("Diagnostics", strconv.Itoa(len(preview.Diagnostics)))
@@ -1215,6 +1307,11 @@ func (model *ActionModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.intent = &Intent{Action: "new-clone", Project: model.state.Facts.CanonicalRoot}
 			return model, tea.Quit
 		}
+	case "p":
+		if model.state.ConfigExists {
+			model.intent = &Intent{Action: "configure-ports", Project: model.state.Facts.CanonicalRoot}
+			return model, tea.Quit
+		}
 	case "x":
 		if selected := model.selectedSandbox(); selected != nil && selected.State == modelpkg.StateRunning {
 			model.intent = &Intent{
@@ -1349,6 +1446,7 @@ func (model *ActionModel) renderStatus(theme visualTheme) string {
 		statusRow(theme, "Container system", containerSystemLabel(model.state.ContainerSystem.State)),
 		statusRow(theme, "Project setup", setup),
 		statusRow(theme, "Workspace", model.workspaceLabel()),
+		statusRow(theme, "Published ports", configuredPortLabel(model.state.ConfiguredPorts)),
 	}, "\n")
 }
 
@@ -1364,6 +1462,13 @@ func statusRow(theme visualTheme, label, value string) string {
 		style = theme.danger
 	}
 	return theme.label.Render(label) + "    " + style.Render(value)
+}
+
+func configuredPortLabel(ports []config.PortConfig) string {
+	if len(ports) == 0 {
+		return "None"
+	}
+	return formatGuestPorts(ports) + " → dynamic loopback"
 }
 
 func containerSystemLabel(state runtime.SystemState) string {
@@ -1440,9 +1545,12 @@ func (model *ActionModel) nextStep(theme visualTheme) string {
 }
 
 func (model *ActionModel) renderManageActions(theme visualTheme) string {
-	actions := make([]string, 0, 6)
+	actions := make([]string, 0, 7)
 	if model.runtimeReady() && model.state.ConfigExists {
 		actions = append(actions, theme.help("[n] Create isolated clone"))
+	}
+	if model.state.ConfigExists {
+		actions = append(actions, theme.help("[p] Configure published ports"))
 	}
 	selected := model.selectedSandbox()
 	if selected != nil && selected.State == modelpkg.StateRunning {
@@ -1485,6 +1593,9 @@ func (model *ActionModel) renderSandboxList(theme visualTheme) string {
 			nameStyle.Render(terminal.SanitizeLine(string(sandbox.Sandbox))),
 			theme.badge(state, tone),
 		)
+		for _, publishedURL := range sandbox.URLs {
+			fmt.Fprintf(&entries, "    %s\n", theme.value.Render(terminal.SanitizeLine(publishedURL)))
+		}
 	}
 	return strings.TrimRight(entries.String(), "\n")
 }
