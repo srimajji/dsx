@@ -421,6 +421,59 @@ func TestLifecycleStartStopResumeShellAndClean(t *testing.T) {
 	}
 }
 
+func TestLifecycleShellDefaultsToZshInteractiveLoginShell(t *testing.T) {
+	service, root, _, fake, hash := lifecycleFixture(t)
+	ctx := context.Background()
+	if _, err := service.Start(ctx, StartRequest{Root: root, ApproveConfig: hash}); err != nil {
+		t.Fatal(err)
+	}
+
+	exitCode := 0
+	var childArgv []string
+	result, err := service.Shell(ctx, ShellRequest{
+		Root:     root,
+		Terminal: true,
+		RunInteractive: func(_ context.Context, child InteractiveChild) (runtime.Exit, error) {
+			childArgv = append([]string(nil), child.Argv...)
+			return runtime.Exit{Code: &exitCode}, nil
+		},
+	})
+	if err != nil || result.Exit.Code == nil || *result.Exit.Code != exitCode {
+		t.Fatalf("Shell() = %#v, error %v", result, err)
+	}
+	want := []string{
+		"/usr/bin/container", "exec", "--interactive", "--tty", string(fake.workspaceSpec.Name),
+		DefaultGuestHelperPath, "exec", "--", "/bin/zsh", "-il",
+	}
+	if !reflect.DeepEqual(childArgv, want) {
+		t.Fatalf("interactive argv = %#v, want %#v", childArgv, want)
+	}
+}
+
+func TestLifecycleShellPreservesExplicitCommandArgv(t *testing.T) {
+	service, root, _, fake, hash := lifecycleFixture(t)
+	ctx := context.Background()
+	if _, err := service.Start(ctx, StartRequest{Root: root, ApproveConfig: hash}); err != nil {
+		t.Fatal(err)
+	}
+
+	requestArgv := []string{"node", "--version"}
+	result, err := service.Shell(ctx, ShellRequest{Root: root, Argv: requestArgv})
+	if err != nil || result.Exit.Code == nil || *result.Exit.Code != 0 {
+		t.Fatalf("Shell() = %#v, error %v", result, err)
+	}
+	if len(fake.execSpecs) == 0 {
+		t.Fatal("Shell() did not execute a runtime command")
+	}
+	want := []string{DefaultGuestHelperPath, "exec", "--", "node", "--version"}
+	if got := fake.execSpecs[len(fake.execSpecs)-1].Argv; !reflect.DeepEqual(got, want) {
+		t.Fatalf("exec argv = %#v, want %#v", got, want)
+	}
+	if wantRequest := []string{"node", "--version"}; !reflect.DeepEqual(requestArgv, wantRequest) {
+		t.Fatalf("request argv mutated to %#v, want %#v", requestArgv, wantRequest)
+	}
+}
+
 func TestShellApprovalCreatesAndAttachesWithinApplicationTransaction(t *testing.T) {
 	service, root, manifests, fake, hash := lifecycleFixture(t)
 	zero := 0

@@ -137,7 +137,7 @@ The setup wizard presents detected project facts, image-source choices, supporte
 | `dsx inspect` | Show the effective image, workspace, commands, processes, services, mounts, credentials, network access, ports, and configuration sources. Make no changes. |
 | `dsx init` | Generate a reviewable home-local, project-namespaced configuration when an existing declaration cannot fully describe the workspace. |
 | `dsx start --approve-config <hash>` | Start the approved live workspace without attaching. |
-| `dsx shell [--agent <name>] [--profile <name>] [--approve-config <hash>]` | Start or attach to the single interactive integrated workspace. Default to live workspace mode. |
+| `dsx shell [--agent <name>] [--profile <name>] [--approve-config <hash>] [-- <command> [args...]]` | Start or attach to the single integrated live workspace. With no command, open its interactive shell; with a command, execute the structured argument vector directly. |
 | `dsx run --name <name> --agent <agent> [--profile <name>] [--browser] --approve-config <hash> -- <prompt>` | Create or resume a named private-clone sandbox and run one agent task. |
 | `dsx list` / `dsx ls` | List DSX sandboxes, project ownership, lifecycle state, and published ports. |
 | `dsx status [--format text|json]` | Show final URLs and configured-process state for the live workspace. |
@@ -172,6 +172,7 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 - Multiple named clone sandboxes may run concurrently for one project; only one live-mounted workspace may exist per project, and live and managed clone modes do not coexist in the MVP.
 - Every resource must carry DSX ownership, project ID, sandbox name, run ID, resource type, and creation-time metadata where the runtime supports labels.
 - A workspace must not receive the host home directory, unrelated repositories, container control sockets, SSH agent, GPG agent, or macOS Keychain by default.
+- DSX must never read, copy, mount, import, or execute host shell dotfiles. Shell configuration supplied by the managed standard image must remain image-owned.
 - CPU, memory, and per-project clone-sandbox concurrency limits must be configurable.
 
 ### R3. Workspace modes
@@ -192,6 +193,11 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 - Image builds must use OCI layers and content-addressed caching. A locally built standard image is keyed by the complete embedded build-input digest and reused only under that key.
 - Setup commands must run only when declared by `.dsx/config.jsonc` or imported from an approved supported field.
 - A changed configuration or image input must invalidate the relevant cached setup state.
+- The managed standard image must provide Node.js active LTS with npm, a compatible stable pnpm, Python 3 with pip and venv plus the `python` command, Go, and a supported LTS JDK with `java` and `javac`.
+- In the managed standard image, an interactive `dsx shell` with no explicit command must open login interactive Zsh using one DSX-owned authored shell-defaults file.
+- The managed standard image must install immutable, pinned Antidote plugin content and pre-generate Starship initialization at image-build time. Interactive startup must require neither network access nor plugin fetching or regeneration.
+- The managed standard image must publish its development-tool PATH at image level so interactive shells, direct commands, setup, and managed processes resolve the same baseline tools without depending on shell rc files.
+- These shell and toolchain guarantees apply only to the DSX-managed standard image. A custom image remains an explicit project responsibility, and DSX must not inject the managed shell stack or assume that it supplies the standard toolchain.
 
 ### R5. Integrated processes and services
 
@@ -203,6 +209,7 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 - DSX must wait for required health checks before launching a dependent agent or browser task.
 - DSX does not automatically restart failed processes in the MVP; a failed required process makes the sandbox failed. A configured project process manager may implement its own restart policy.
 - Sibling service containers are not required for the MVP.
+- `dsx shell -- <command>` and configured argv processes must be passed as structured arguments and run directly; they must not be wrapped in an interactive shell or depend on shell rc files. An explicitly declared shell command remains explicit executable configuration.
 
 ### R6. Agent harnesses
 
@@ -392,6 +399,9 @@ The MVP does not:
 17. Cleanup refuses to destroy unfetched results without explicit confirmation.
 18. `dsx clean --purge-auth` removes selected persisted authentication.
 19. Ctrl-C and partial startup leave either no ephemeral resources or resources discoverable and removable by `dsx clean`.
+
+20. With the managed standard image, an interactive `dsx shell` opens Zsh with the DSX-owned prompt and pinned plugin environment while offline, without reading or mounting host dotfiles.
+21. In the managed standard image, direct shell commands and configured processes resolve the baseline Node, Python, Go, and Java tools without loading Zsh rc files.
 
 ## 12. Success measures
 

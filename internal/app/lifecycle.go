@@ -1706,7 +1706,7 @@ func (service *LifecycleService) Shell(ctx context.Context, request ShellRequest
 	}
 	argv := append([]string(nil), request.Argv...)
 	if len(argv) == 0 {
-		argv = []string{"/bin/sh"}
+		argv = []string{"/bin/zsh", "-il"}
 	}
 	shellEnvironment, environmentErr := mergeHostBridgeEnvironment(request.Env, hostBridges.Environment())
 	if environmentErr != nil {

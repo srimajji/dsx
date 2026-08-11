@@ -108,6 +108,50 @@ $ dsx shell --approve-config <inspected-hash>
 
 The live workspace can modify or delete the mounted host project. Use it when you want changes to appear on the Mac immediately.
 
+### Use the DSX Standard shell
+
+With the managed **DSX Standard — Ubuntu** image, bare `dsx shell` opens `/bin/zsh -il` with a DSX-managed Starship prompt. Its pinned startup files are part of the image: DSX never reads, copies, mounts, or executes your host dotfiles. Plugin startup is offline and static, so opening a shell does not contact the network or regenerate plugin initialization.
+
+The managed shell loads `zsh-completions`, `fzf-tab`, `zsh-history-substring-search`, `zsh-autosuggestions`, and `zsh-syntax-highlighting` for additional completions, interactive tab selection, substring history search, suggestions, and syntax highlighting. Native `fzf` and `direnv` shell integration is also available. Antidote is available from managed Zsh for inspection, but the managed pinned plugin bundle is static and Antidote does not update it at startup.
+
+The portable aliases are:
+
+| Alias | Expansion |
+|---|---|
+| `ll` | `ls -alF` |
+| `la` | `ls -A` |
+| `l` | `ls -CF` |
+| `..` | `cd ..` |
+| `...` | `cd ../..` |
+| `....` | `cd ../../..` |
+| `g` | `git` |
+| `gs` | `git status --short --branch` |
+| `gd` | `git diff` |
+| `gl` | `git log --graph --decorate --oneline -20` |
+| `reload` | `exec zsh -il` |
+
+The portable functions are `mkcd DIR` (create a directory and enter it), `extract FILE` (unpack common tar, zip, and gzip formats), `serve [PORT]` (run `python -m http.server`, default port `8000`), and `path` (print `PATH` entries one per line).
+
+Node with `npm` and `pnpm`, Python 3 with `pip` and virtual-environment support, Go, and a supported LTS JDK with `java` and `javac` are installed in the standard image. Their paths are configured at image level, so they are available to both interactive shells and direct commands. Check the installed tools and versions with:
+
+```console
+$ dsx shell -- /bin/zsh -lc 'command -v zsh starship antidote fzf direnv node npm pnpm python python3 pip go java javac'
+$ dsx shell -- zsh --version
+$ dsx shell -- starship --version
+$ dsx shell -- node --version
+$ dsx shell -- npm --version
+$ dsx shell -- pnpm --version
+$ dsx shell -- python --version
+$ dsx shell -- python -m pip --version
+$ dsx shell -- go version
+$ dsx shell -- java -version
+$ dsx shell -- javac -version
+```
+
+Arguments after `dsx shell --` are passed as direct structured arguments; DSX does not parse them through Zsh or load shell aliases and functions. For example, `dsx shell -- node --version` runs `node` directly. Use bare `dsx shell` for the managed interactive experience.
+
+Custom images are unchanged: they must provide their own shell, startup files, toolchains, and image-level `PATH`. DSX does not inject the standard image's Zsh environment into them.
+
 ### Run an agent in a named clone
 
 Inspect the same sandbox name and harness you intend to run:

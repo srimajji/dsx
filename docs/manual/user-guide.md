@@ -73,6 +73,57 @@ $ dsx run --name NAME --agent omp|codex|claude|opencode [--profile NAME] [--brow
 
 Bare `dsx` keeps these operations on the same application services. After setup, one project screen reports Apple Container, live workspace, and configured-port state, then offers exactly one primary lifecycle action. **More options** includes published-port editing and only the applicable clone, stop, clean, and Git actions. Active sandbox entries show final URLs. Changing ports reviews and approves a new plan; when the live workspace exists, DSX asks before replacing only that container, preserves its network and DSX-owned volumes, and then attaches.
 
+### Managed DSX Standard shell and toolchains
+
+For the managed **DSX Standard — Ubuntu** image, bare `dsx shell` attaches with `/bin/zsh -il` and a DSX-managed Starship prompt. DSX never reads, copies, mounts, or executes host dotfiles. The pinned plugin code and generated initialization are built into the image; shell startup is offline and static, with no network fetch or plugin regeneration.
+
+The managed Zsh environment loads `zsh-completions`, `fzf-tab`, `zsh-history-substring-search`, `zsh-autosuggestions`, and `zsh-syntax-highlighting` for additional completions, interactive tab selection, substring history search, suggestions, and syntax highlighting. Native `fzf` and `direnv` shell integration is also available. Antidote is available from managed Zsh for inspection, but the managed pinned plugin bundle is static and Antidote does not update it at startup.
+
+It defines exactly these portable aliases:
+
+| Alias | Expansion |
+|---|---|
+| `ll` | `ls -alF` |
+| `la` | `ls -A` |
+| `l` | `ls -CF` |
+| `..` | `cd ..` |
+| `...` | `cd ../..` |
+| `....` | `cd ../../..` |
+| `g` | `git` |
+| `gs` | `git status --short --branch` |
+| `gd` | `git diff` |
+| `gl` | `git log --graph --decorate --oneline -20` |
+| `reload` | `exec zsh -il` |
+
+The portable functions are:
+
+- `mkcd DIR` creates a directory and enters it;
+- `extract FILE` unpacks common tar, zip, and gzip formats;
+- `serve [PORT]` runs `python -m http.server`, using port `8000` by default; and
+- `path` prints `PATH` entries one per line.
+
+The standard image includes Node with `npm` and `pnpm`, Python 3 with `pip` and virtual-environment support, Go, and a supported LTS JDK with `java` and `javac`. Tool paths are set at image level rather than only in Zsh startup, so interactive shells and direct commands discover the same executables.
+
+Anything after `dsx shell --` remains direct structured arguments: DSX runs the named executable without Zsh parsing or startup, so aliases and functions do not apply. For example, `dsx shell -- node --version` executes `node` directly; use bare `dsx shell` when you want the managed interactive environment.
+
+Use these checks to troubleshoot tool discovery and installed versions:
+
+```console
+$ dsx shell -- /bin/zsh -lc 'command -v zsh starship antidote fzf direnv node npm pnpm python python3 pip go java javac'
+$ dsx shell -- zsh --version
+$ dsx shell -- starship --version
+$ dsx shell -- node --version
+$ dsx shell -- npm --version
+$ dsx shell -- pnpm --version
+$ dsx shell -- python --version
+$ dsx shell -- python -m pip --version
+$ dsx shell -- go version
+$ dsx shell -- java -version
+$ dsx shell -- javac -version
+```
+
+Custom images do not inherit or receive this environment. They must provide their own shell, startup files, toolchains, and image-level `PATH`; DSX does not inject the standard image's Zsh configuration or command suite.
+
 ### List, status, logs, stop, and clean
 
 ```console
