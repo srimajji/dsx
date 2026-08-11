@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	agentimage "github.com/srimajji/dsx/images/agent"
 	"github.com/srimajji/dsx/internal/auth"
 	"github.com/srimajji/dsx/internal/buildinfo"
 	"github.com/srimajji/dsx/internal/guestproto"
@@ -371,18 +372,30 @@ func (service *HarnessService) verifyHarnessBuildAttestation(
 	adapter harness.Adapter,
 	read func(io.Writer, io.Writer) (runtime.Exit, error),
 ) error {
-	if service.agentImageReference == "" || service.agentImageReference == "unknown" {
-		return model.NewError(model.CodeUnavailable, "standard agent image attestation authority is unavailable", nil)
-	}
-	if execution.Image.Context != "" || execution.Image.File != "" || execution.Image.Reference != service.agentImageReference {
-		return model.NewError(model.CodeUnapproved, "project or custom images cannot satisfy the standard harness artifact contract", nil)
-	}
-	approvedDigest, ok := pinnedImageDigest(execution.Image.Reference)
-	if !ok || execution.Image.InputDigest != approvedDigest {
-		return model.NewError(model.CodeUnapproved, "approved agent image reference and digest are inconsistent", nil)
-	}
-	if snapshot.ImageDigest != "sha256:"+approvedDigest {
-		return model.NewError(model.CodeUnavailable, "runtime workspace image digest does not match the approved standard agent image", nil)
+	if execution.Image.Standard {
+		if execution.Image.Reference != "" ||
+			execution.Image.Context != "@dsx/standard" ||
+			execution.Image.File != agentimage.BuildFile ||
+			execution.Image.InputDigest != agentimage.InputDigest() {
+			return model.NewError(model.CodeUnapproved, "approved standard image build authority is inconsistent", nil)
+		}
+		if _, ok := pinnedImageDigest("local@" + snapshot.ImageDigest); !ok {
+			return model.NewError(model.CodeUnavailable, "runtime workspace image digest is malformed", nil)
+		}
+	} else {
+		if service.agentImageReference == "" || service.agentImageReference == "unknown" {
+			return model.NewError(model.CodeUnavailable, "standard agent image attestation authority is unavailable", nil)
+		}
+		if execution.Image.Context != "" || execution.Image.File != "" || execution.Image.Reference != service.agentImageReference {
+			return model.NewError(model.CodeUnapproved, "project or custom images cannot satisfy the standard harness artifact contract", nil)
+		}
+		approvedDigest, ok := pinnedImageDigest(execution.Image.Reference)
+		if !ok || execution.Image.InputDigest != approvedDigest {
+			return model.NewError(model.CodeUnapproved, "approved agent image reference and digest are inconsistent", nil)
+		}
+		if snapshot.ImageDigest != "sha256:"+approvedDigest {
+			return model.NewError(model.CodeUnavailable, "runtime workspace image digest does not match the approved standard agent image", nil)
+		}
 	}
 
 	var stdout, stderr cappedBuffer

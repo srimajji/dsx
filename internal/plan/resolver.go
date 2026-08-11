@@ -47,6 +47,7 @@ type DefaultValues struct {
 
 type AuthorityInputs struct {
 	BuildContext          *ContentDigest
+	StandardImageDigest   string
 	ImportedContent       []ContentDigest
 	BrowserImageReference string
 	BrowserImageDigest    string

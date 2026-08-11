@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	agentimage "github.com/srimajji/dsx/images/agent"
 	"github.com/srimajji/dsx/internal/auth"
 	"github.com/srimajji/dsx/internal/harness"
 	"github.com/srimajji/dsx/internal/model"
@@ -459,6 +460,36 @@ func TestHarnessServiceSelectedAgentRequiresItsApprovedHash(t *testing.T) {
 	}
 	if len(fakeRuntime.calls) != 0 {
 		t.Fatalf("stale configured-agent hash reached runtime: %#v", fakeRuntime.calls)
+	}
+}
+
+func TestManagedStandardImageSatisfiesHarnessAttestation(t *testing.T) {
+	service := &HarnessService{}
+	execution := plan.ExecutionPlan{Image: plan.ResolvedImage{
+		Context:     "@dsx/standard",
+		File:        agentimage.BuildFile,
+		InputDigest: agentimage.InputDigest(),
+		Standard:    true,
+	}}
+	lock, err := os.ReadFile("../../images/agent/harnesses.lock.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = service.verifyHarnessBuildAttestation(
+		context.Background(),
+		runtime.ResourceSnapshot{ImageDigest: "sha256:" + strings.Repeat("b", 64)},
+		execution,
+		fakeHarnessAdapter{},
+		func(stdout, _ io.Writer) (runtime.Exit, error) {
+			if _, writeErr := stdout.Write(lock); writeErr != nil {
+				return runtime.Exit{}, writeErr
+			}
+			code := 0
+			return runtime.Exit{Code: &code}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

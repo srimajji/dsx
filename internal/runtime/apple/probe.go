@@ -167,22 +167,12 @@ func (adapter *Adapter) Probe(ctx context.Context) (runtime.Capabilities, error)
 	}
 	capabilities.CompatibilityID = compatibilityID
 
-	statusResult, err := adapter.run(ctx, adapter.containerExecutable, "container system status", "system", "status", "--format", "json")
+	_, statusServerVersion, err := adapter.systemStatus(ctx)
 	if err != nil {
 		return capabilities, err
 	}
-	status, statusServerVersion, err := decodeSystemStatus(statusResult.Stdout)
-	if err != nil {
-		return capabilities, invalidOutput("container system status", string(statusResult.Stdout), "start the Apple container service and retry", err)
-	}
 	if statusServerVersion != serverVersion {
 		return capabilities, versionMismatch("container system status", statusServerVersion, serverVersion)
-	}
-	if status != "running" {
-		return capabilities, unavailableProbeError(&ProbeError{
-			Kind: ProbeServiceUnhealthy, Component: "container API service", Observed: status,
-			Required: `JSON status "running"`, Remediation: "start the Apple container system service and retry",
-		})
 	}
 	capabilities.ServiceHealthy = true
 	setAllowlistedCapabilities(&capabilities)
@@ -197,6 +187,90 @@ func (adapter *Adapter) Probe(ctx context.Context) (runtime.Capabilities, error)
 	}
 	capabilities.BuilderHealthy = builderHealthy
 	return capabilities, nil
+}
+
+// Status reports whether the installed Apple container system service is
+// running without requiring the API server to be available.
+func (adapter *Adapter) Status(ctx context.Context) (runtime.SystemStatus, error) {
+	if err := adapter.ready(ctx); err != nil {
+		return runtime.SystemStatus{}, err
+	}
+	command := Command{
+		Executable: adapter.containerExecutable,
+		Args:       []string{"system", "status", "--format", "json"},
+		Env:        append([]string(nil), probeEnvironment...),
+	}
+	result, runErr := adapter.runner.Run(ctx, command)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return runtime.SystemStatus{}, ctxErr
+	}
+	var output systemStatus
+	if result.StdoutTruncated || decodeJSON(result.Stdout, &output, true) != nil {
+		return runtime.SystemStatus{}, unavailableProbeError(&ProbeError{
+			Kind: ProbeInvalidOutput, Component: "container system status", Observed: "unreadable status",
+			Required: "bounded JSON status", Remediation: "run `container system start` and retry", Cause: runErr,
+		})
+	}
+	switch output.Status {
+	case "running":
+		if runErr != nil || result.ExitCode != 0 || result.Signal != "" {
+			return runtime.SystemStatus{}, unavailableProbeError(&ProbeError{
+				Kind: ProbeCommandFailed, Component: "container system status", Observed: fmt.Sprintf("exit %d", result.ExitCode),
+				Required: "exit 0", Remediation: commandRemediation("container system status"), Cause: runErr,
+			})
+		}
+		return runtime.SystemStatus{State: runtime.SystemStateRunning}, nil
+	case "stopped", "unregistered":
+		return runtime.SystemStatus{
+			State: runtime.SystemStateStopped, Remediation: "Run `container system start` to continue.",
+		}, nil
+	default:
+		return runtime.SystemStatus{}, unavailableProbeError(&ProbeError{
+			Kind: ProbeInvalidOutput, Component: "container system status", Observed: output.Status,
+			Required: `status "running", "stopped", or "unregistered"`, Remediation: "run `dsx doctor` and repair Apple Container",
+		})
+	}
+}
+
+func (adapter *Adapter) StartSystem(ctx context.Context) error {
+	if err := adapter.ready(ctx); err != nil {
+		return err
+	}
+	_, err := adapter.command(ctx, "start container system", Command{Args: []string{"system", "start"}})
+	return err
+}
+
+// CheckSystemStatus gates setup persistence on a running container system.
+func (adapter *Adapter) CheckSystemStatus(ctx context.Context) error {
+	status, err := adapter.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if status.State != runtime.SystemStateRunning {
+		return unavailableProbeError(&ProbeError{
+			Kind: ProbeServiceUnhealthy, Component: "container API service", Observed: string(status.State),
+			Required: `status "running"`, Remediation: "run `container system start` and retry",
+		})
+	}
+	return nil
+}
+
+func (adapter *Adapter) systemStatus(ctx context.Context) (string, string, error) {
+	result, err := adapter.run(ctx, adapter.containerExecutable, "container system status", "system", "status", "--format", "json")
+	if err != nil {
+		return "", "", err
+	}
+	status, serverVersion, err := decodeSystemStatus(result.Stdout)
+	if err != nil {
+		return "", "", invalidOutput("container system status", string(result.Stdout), "start the Apple container service and retry", err)
+	}
+	if status != "running" {
+		return "", "", unavailableProbeError(&ProbeError{
+			Kind: ProbeServiceUnhealthy, Component: "container API service", Observed: status,
+			Required: `JSON status "running"`, Remediation: "run `container system start` and retry",
+		})
+	}
+	return status, serverVersion, nil
 }
 
 func (adapter *Adapter) scalar(ctx context.Context, executable, component string, args ...string) (string, error) {
@@ -238,6 +312,9 @@ func (adapter *Adapter) run(ctx context.Context, executable, component string, a
 }
 
 func commandRemediation(component string) string {
+	if component == "container system status" {
+		return "run `container system start` and retry; if the command is unavailable, install container 1.2.2"
+	}
 	if strings.HasPrefix(component, "container") {
 		return "install container 1.2.2, start its system service, and retry"
 	}

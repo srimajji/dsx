@@ -60,7 +60,13 @@ func renderInspect(writer io.Writer, result app.InspectResult, format string) er
 		_, err := io.WriteString(writer, "Executable plan: unavailable until configuration is complete\n")
 		return err
 	}
-	if _, err := fmt.Fprintf(writer, "Mode: %q\nAgent: %q\nImage: %q\nExecutable hash: %s\n", terminal.SanitizeLine(string(result.Plan.Mode)), terminal.SanitizeLine(result.Plan.Agent), terminal.SanitizeLine(result.Plan.Image.Reference), terminal.SanitizeLine(result.Plan.ExecutableHash)); err != nil {
+	image := result.Plan.Image.Reference
+	if result.Plan.Image.Standard {
+		image = "DSX Standard — Ubuntu (local build)"
+	} else if image == "" && result.Plan.Image.File != "" {
+		image = "project build " + result.Plan.Image.File
+	}
+	if _, err := fmt.Fprintf(writer, "Mode: %q\nAgent: %q\nImage: %q\nExecutable hash: %s\n", terminal.SanitizeLine(string(result.Plan.Mode)), terminal.SanitizeLine(result.Plan.Agent), terminal.SanitizeLine(image), terminal.SanitizeLine(result.Plan.ExecutableHash)); err != nil {
 		return model.Wrap(model.CodeInternal, "write inspect output", err)
 	}
 	var encoded bytes.Buffer

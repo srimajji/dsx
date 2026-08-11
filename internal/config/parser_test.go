@@ -39,6 +39,20 @@ func TestJSONCFixtures(t *testing.T) {
 	})
 }
 
+func TestManagedStandardImageConfig(t *testing.T) {
+	validated, diagnostics := ParseBytes("standard.jsonc", []byte(`{
+		"schemaVersion": 1,
+		"workspace": {"root": "."},
+		"image": {"standard": true}
+	}`))
+	if len(diagnostics) != 0 {
+		t.Fatalf("ParseBytes() diagnostics = %#v", diagnostics)
+	}
+	if !validated.Document.Image.Standard || validated.SourceLocations["/image/standard"].Line == 0 {
+		t.Fatalf("managed standard image = %#v", validated)
+	}
+}
+
 func TestSchemaUnknownField(t *testing.T) {
 	t.Parallel()
 	_, diagnostics := ParseBytes("invalid-unknown.jsonc", fixture(t, "invalid-unknown.jsonc"))

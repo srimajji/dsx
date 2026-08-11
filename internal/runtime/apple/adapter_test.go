@@ -86,6 +86,63 @@ func TestBuild(t *testing.T) {
 	}
 	r.done()
 }
+
+func TestBuildCreatesMissingManagedImage(t *testing.T) {
+	ref := "dsx.local/standard:abcdef123456"
+	input := "abcdef123456abcdef123456abcdef123456abcdef123456abcdef123456abcd"
+	label := runtime.Label{Key: "dev.dsx.standard-input", Value: input}
+	r := &cr{t: t, q: []call{
+		nf([]string{"image", "inspect", ref}, "image", ref),
+		{a: []string{"build", "--progress", "plain", "--tag", ref, "--file", "/tmp/c/Containerfile", "--label", label.Key + "=" + label.Value, "/tmp/c"}},
+		{a: []string{"image", "inspect", ref}, o: f(t, "image-inspect-managed-1.2.2.json")},
+	}}
+	image, err := ad(t, r).EnsureImage(context.Background(), runtime.ImageSpec{
+		Reference: ref, Context: "/tmp/c", File: "/tmp/c/Containerfile", Labels: []runtime.Label{label}, Reuse: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image.Digest != "sha256:"+strings.Repeat("a", 64) || !image.Local {
+		t.Fatalf("built image = %#v", image)
+	}
+	r.done()
+}
+
+func TestBuildReusesExistingManagedImage(t *testing.T) {
+	ref := "dsx.local/standard:abcdef123456"
+	input := "abcdef123456abcdef123456abcdef123456abcdef123456abcdef123456abcd"
+	label := runtime.Label{Key: "dev.dsx.standard-input", Value: input}
+	r := &cr{t: t, q: []call{
+		{a: []string{"image", "inspect", ref}, o: f(t, "image-inspect-managed-1.2.2.json")},
+	}}
+	image, err := ad(t, r).EnsureImage(context.Background(), runtime.ImageSpec{
+		Reference: ref, Context: "/tmp/c", File: "/tmp/c/Containerfile", Labels: []runtime.Label{label}, Reuse: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image.Digest != "sha256:"+strings.Repeat("a", 64) || !image.Local {
+		t.Fatalf("reused image = %#v", image)
+	}
+	r.done()
+}
+
+func TestBuildReplacesManagedImageWithWrongAuthorityLabel(t *testing.T) {
+	ref := "dsx.local/standard:abcdef123456"
+	input := "abcdef123456abcdef123456abcdef123456abcdef123456abcdef123456abcd"
+	label := runtime.Label{Key: "dev.dsx.standard-input", Value: input}
+	r := &cr{t: t, q: []call{
+		{a: []string{"image", "inspect", ref}, o: f(t, "image-inspect-1.2.2.json")},
+		{a: []string{"build", "--progress", "plain", "--tag", ref, "--file", "/tmp/c/Containerfile", "--label", label.Key + "=" + label.Value, "/tmp/c"}},
+		{a: []string{"image", "inspect", ref}, o: f(t, "image-inspect-managed-1.2.2.json")},
+	}}
+	if _, err := ad(t, r).EnsureImage(context.Background(), runtime.ImageSpec{
+		Reference: ref, Context: "/tmp/c", File: "/tmp/c/Containerfile", Labels: []runtime.Label{label}, Reuse: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.done()
+}
 func TestEnsureImage(t *testing.T) {
 	ref := "registry.example/dev@sha256:" + strings.Repeat("a", 64)
 	r := &cr{t: t, q: []call{

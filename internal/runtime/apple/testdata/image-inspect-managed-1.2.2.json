@@ -1,0 +1,27 @@
+[
+  {
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "configuration": {
+      "name": "dsx.local/standard:abcdef123456",
+      "descriptor": {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 640,
+        "annotations": {}
+      },
+      "creationDate": "2026-08-10T00:00:00Z"
+    },
+    "variants": [
+      {
+        "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "config": {
+          "config": {
+            "Labels": {
+              "dev.dsx.standard-input": "abcdef123456abcdef123456abcdef123456abcdef123456abcdef123456abcd"
+            }
+          }
+        }
+      }
+    ]
+  }
+]

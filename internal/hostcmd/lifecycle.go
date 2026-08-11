@@ -385,16 +385,7 @@ func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Inte
 		return reportError(stderr, "dsx "+intent.Action, model.NewError(model.CodeUnavailable, fmt.Sprintf("%s is not available in this build", intent.Action), nil))
 	}
 	switch intent.Action {
-	case "create", "start":
-		result, err := dispatcher.dependencies.Lifecycle.Start(ctx, app.StartRequest{Root: root, Interactive: true})
-		if err != nil {
-			return reportError(stderr, "dsx start", err)
-		}
-		if err := renderStart(stdout, result); err != nil {
-			return reportError(stderr, "dsx start", err)
-		}
-		return 0
-	case "attach":
+	case "create", "start", "attach":
 		return dispatcher.runShell(ctx, app.ShellRequest{
 			Root: root, Terminal: true, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
 		}, stderr)

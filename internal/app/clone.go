@@ -738,7 +738,14 @@ func (service *CloneService) createClone(ctx context.Context, request StartReque
 	var staged *config.ImageBuild
 	if approved.Image.Reference == "" {
 		build := config.ImageBuild{Context: approved.Image.Context, File: approved.Image.File}
-		root, digest, stageErr := stageBuildInput(ctx, approved.Project.CanonicalRoot, build)
+		var root, digest string
+		var stageErr error
+		if approved.Image.Standard {
+			build = config.ImageBuild{Context: ".", File: "Containerfile"}
+			root, digest, stageErr = stageStandardImage(ctx, approved.Project.CanonicalRoot)
+		} else {
+			root, digest, stageErr = stageBuildInput(ctx, approved.Project.CanonicalRoot, build)
+		}
 		if stageErr != nil || digest != approved.Image.InputDigest {
 			return snapshot, model.NewError(model.CodeUnapproved, "build input changed while staging", stageErr)
 		}

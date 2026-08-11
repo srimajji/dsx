@@ -45,7 +45,7 @@ A macOS developer using Apple silicon who wants to run one or more coding-agent 
 
 ### Project maintainer
 
-A developer who commits `.dsx/config.jsonc` so other contributors can start the same environment without reconstructing project setup knowledge.
+A developer who explicitly promotes a home-local configuration to the repository as `.dsx/config.jsonc` so other contributors can start the same environment without reconstructing project setup knowledge.
 
 ## 5. Core user journeys
 
@@ -64,7 +64,7 @@ The approval hash above is illustrative; copy the exact hash printed by the prec
 
 Expected behavior:
 
-1. `dsx inspect` reads supported fields from `.devcontainer/devcontainer.json`, Dockerfiles, lockfiles, and `.dsx/config.jsonc` if present. It prints the effective plan and executes nothing.
+1. `dsx inspect` reads the active home-local configuration, or an explicitly shared `.dsx/config.jsonc`, plus supported fields from `.devcontainer/devcontainer.json`, Dockerfiles, and lockfiles. It prints the effective plan and executes nothing.
 2. `dsx run` creates a named isolated project workspace, reuses or builds the required image, attaches run-specific writable authentication state, installs Linux dependencies using approved lifecycle commands, starts configured processes, and launches Codex.
 3. The optional browser runs separately and can reach the application over the private project network.
 4. Agent changes remain on the sandbox branch until `dsx git fetch` imports it into a host remote-tracking ref.
@@ -86,8 +86,8 @@ dsx clean
 Expected behavior:
 
 1. `dsx inspect` identifies multiple Git roots, `devenv.nix`, process definitions, and service definitions. It reports what DSX understands and what requires explicit configuration.
-2. `dsx init` creates `.dsx/config.jsonc` from safe, reviewable suggestions. It does not translate or execute arbitrary Nix expressions.
-3. The committed configuration declares workspace member repositories, the Linux image/build, setup commands, processes, services, health checks, and ports.
+2. `dsx init` creates a project-ID-namespaced configuration under `~/.dsx/projects/` from safe, reviewable suggestions. It does not translate or execute arbitrary Nix expressions.
+3. A configuration explicitly promoted to `.dsx/config.jsonc` declares the shareable workspace contract for other contributors.
 4. `dsx shell` starts one integrated Linux workspace. Laravel, frontend processes, MySQL, Redis, Caddy, and the selected agent may run as processes inside that workspace.
 5. Container-local services communicate over `127.0.0.1`; only user-facing ports are published to macOS.
 6. `dsx stop` preserves configured workspace state. `dsx clean` deletes it.
@@ -122,20 +122,20 @@ dsx
 
 DSX resolves the current project before choosing a screen:
 
-- No `.dsx/config.jsonc` and no DSX resources: open the setup wizard.
-- Configuration exists but no resources: open a launcher for live workspace or named clone creation.
-- Existing resources: open the project dashboard with sandbox status and safe lifecycle/Git actions.
+- No active home-local or shared configuration and no DSX resources: open the setup wizard.
+- A configured project: open one state-driven project screen that reports Apple Container status and whether a live workspace exists.
+- The project screen exposes one primary action—start the container system, create and open, start and open, or attach—based on current state. Create and start from this interactive screen enter the live workspace shell after readiness; the explicit `dsx start` command remains start-only. Advanced clone, stop, clean, and Git operations appear only under **More options** when applicable.
 - No interactive terminal: print command help and exit without prompting or changing state.
 
-The setup wizard presents detected project facts, optional capabilities, and the complete effective plan and trust grants. It writes `.dsx/config.jsonc` or creates resources only after final confirmation. `dsx init` opens the same wizard directly.
+The setup wizard presents detected project facts, image-source choices, supported coding assistants, internet access, and workspace resource choices before showing the complete effective plan and trust grants. New sandboxes default to 4 CPUs and 6 GiB of memory. Review provides an explicit path back to the environment choices without mutation. After final confirmation, DSX verifies that the Apple `container` CLI is installed and its system service reports `running`; a failed check leaves configuration and approval state untouched and provides the `container system start` remediation. Setup then writes `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`; when the selected standard image has no published release pin, DSX builds and verifies its embedded standard-image inputs before reporting setup complete. A repository `.dsx/config.jsonc` remains an explicit shared alternative; DSX refuses to continue when both exist.
 
 ## 6. Command surface
 
 | Command | User outcome |
 |---|---|
-| `dsx` | Open the context-aware setup wizard, project launcher, or sandbox dashboard when attached to a terminal; otherwise print help. |
+| `dsx` | Open the context-aware setup wizard or state-driven project screen when attached to a terminal; otherwise print help. |
 | `dsx inspect` | Show the effective image, workspace, commands, processes, services, mounts, credentials, network access, ports, and configuration sources. Make no changes. |
-| `dsx init` | Generate a reviewable `.dsx/config.jsonc` when an existing declaration cannot fully describe the workspace. |
+| `dsx init` | Generate a reviewable home-local, project-namespaced configuration when an existing declaration cannot fully describe the workspace. |
 | `dsx start --approve-config <hash>` | Start the approved live workspace without attaching. |
 | `dsx shell [--agent <name>] [--profile <name>] [--approve-config <hash>]` | Start or attach to the single interactive integrated workspace. Default to live workspace mode. |
 | `dsx run --name <name> --agent <agent> [--profile <name>] [--browser] --approve-config <hash> -- <prompt>` | Create or resume a named private-clone sandbox and run one agent task. |
@@ -187,9 +187,9 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 
 ### R4. Images and dependencies
 
-- DSX must provide a versioned standard Linux ARM64 image containing common development tools and supported agent harnesses.
+- DSX must provide a versioned standard Linux ARM64 image containing common development tools and supported agent harnesses. Release builds pull its published digest; development builds may build the exact embedded, approved recipe locally.
 - Project-specific system dependencies must be added through a project image or explicit build definition.
-- Image builds must use OCI layers and content-addressed caching.
+- Image builds must use OCI layers and content-addressed caching. A locally built standard image is keyed by the complete embedded build-input digest and reused only under that key.
 - Setup commands must run only when declared by `.dsx/config.jsonc` or imported from an approved supported field.
 - A changed configuration or image input must invalidate the relevant cached setup state.
 
@@ -258,8 +258,9 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 
 ### R12. Configuration and trust
 
-- Project configuration must live at `.dsx/config.jsonc`.
-- Configuration precedence must be: CLI flags, project DSX configuration, explicitly imported supported configuration, standard defaults.
+- Setup-created configuration must live at `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`, where the stable project ID prevents same-name collisions.
+- A repository `.dsx/config.jsonc` is an explicit shared alternative. Exactly one home-local or shared configuration may exist for a project; DSX must fail on ambiguity rather than merge them.
+- Configuration precedence must be: CLI flags, the single active DSX configuration, explicitly imported supported configuration, standard defaults.
 - `dsx inspect` must show each effective value and its source and be able to print the executable configuration hash.
 - Host-side commands and unsupported Dev Container fields must never execute silently.
 - DSX must require approval when executable project configuration changes since the last approved hash.
@@ -295,6 +296,7 @@ Destructive commands require confirmation in an interactive terminal. `--force` 
 - `dsx init` must open the same setup flow directly.
 - The TUI must be a presentation adapter over the same application services used by explicit CLI commands; it must not implement separate lifecycle state transitions.
 - The setup flow must show detected facts, selected capabilities, executable commands, mounts, credentials, network grants, ports, and the resulting configuration hash before confirmation.
+- The setup flow must allow CPU and memory selection, defaulting new sandboxes to 4 CPUs and 6 GiB, and must allow returning from review to the environment choices without losing selections or mutating state.
 - No project configuration or runtime resource may be created before final confirmation.
 - The dashboard must support listing, creating, attaching, starting, stopping, cleaning, and invoking `dsx git status`, `dsx git diff`, and `dsx git fetch`.
 - The TUI must leave its alternate screen before handing control to an interactive agent or shell and restore it when that process exits.

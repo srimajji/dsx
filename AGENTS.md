@@ -133,6 +133,8 @@ Tests use the standard `testing` package, same-package fakes, table tests, `t.Te
 - `testdata/config/` and `internal/inspect/testdata/`: parser and heterogeneous repository fixtures.
 
 Run focused tests while iterating, then `go test ./...`; use `go test -race` for stateful/concurrent packages. Add fuzz seeds for parser/protocol/terminal/ownership/runtime/bridge inputs when changing those boundaries. Do not add `t.Parallel` to tests that mutate globals, environment, shared process state, or real runtime resources.
+For every TUI or onboarding change, MUST build the host binary and manually sanity-check the real UI end to end on a safe isolated project: start from bare `dsx`, complete every onboarding and approval step, continue through successful workspace creation and attach, and verify Apple container-system and builder prerequisites along the way. Unit tests, render snapshots, or stopping at the final confirmation screen are not sufficient verification.
+
 
 Never casually enable destructive Apple tests. `DSX_RUN_APPLE_TESTS=1` is for a dedicated physical Apple-silicon host. Fault and performance suites require additional evidence/run variables and ownership-safe recovery. They must inventory unrelated resources, use unique labeled run IDs, clean exact proven resources twice, preserve the Apple builder/default network, and quarantine on ambiguity—never prune broadly.
 

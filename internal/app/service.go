@@ -92,16 +92,25 @@ type BareStateRequest struct {
 }
 
 type BareState struct {
-	Screen         BareScreen   `json:"screen"`
-	ConfigExists   bool         `json:"config_exists"`
-	OwnedResources int          `json:"owned_resources"`
-	Facts          ProjectFacts `json:"facts"`
+	Screen          BareScreen           `json:"screen"`
+	ConfigExists    bool                 `json:"config_exists"`
+	OwnedResources  int                  `json:"owned_resources"`
+	Facts           ProjectFacts         `json:"facts"`
+	ContainerSystem runtime.SystemStatus `json:"container_system"`
 }
 
 type SetupPreviewRequest struct {
 	Root           string
 	Config         config.ConfigDocument
 	RenderedConfig []byte
+}
+
+type SetupImageOption struct {
+	ID          string             `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	Available   bool               `json:"available"`
+	Image       config.ImageConfig `json:"image"`
 }
 
 type SetupPreview struct {
@@ -115,6 +124,8 @@ type SetupPreview struct {
 	Plan                   plan.ExecutionPlan    `json:"plan"`
 	Hash                   string                `json:"hash"`
 	ProjectState           string                `json:"project_state"`
+	ImageOptions           []SetupImageOption    `json:"image_options"`
+	SelectedImageOption    string                `json:"selected_image_option"`
 }
 
 type InitializeRequest struct {

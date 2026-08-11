@@ -45,6 +45,20 @@ type Capabilities struct {
 	PTY                       bool   `json:"pty"`
 	Resize                    bool   `json:"resize"`
 }
+type SystemState string
+
+const (
+	SystemStateUnknown      SystemState = "unknown"
+	SystemStateNotInstalled SystemState = "not-installed"
+	SystemStateStopped      SystemState = "stopped"
+	SystemStateRunning      SystemState = "running"
+	SystemStateUnavailable  SystemState = "unavailable"
+)
+
+type SystemStatus struct {
+	State       SystemState `json:"state"`
+	Remediation string      `json:"remediation,omitempty"`
+}
 
 var ErrResourceNotFound = errors.New("runtime resource not found")
 
@@ -88,6 +102,7 @@ type ImageSpec struct {
 	Target    string
 	BuildArgs []Label
 	Labels    []Label
+	Reuse     bool
 }
 
 type Image struct {

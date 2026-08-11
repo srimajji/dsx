@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/srimajji/dsx/internal/model"
+	"github.com/srimajji/dsx/internal/runtime"
 )
 
 const testContainerExecutable = "/opt/test/bin/container"
@@ -60,6 +61,76 @@ func TestProbeHealthy(t *testing.T) {
 		t.Fatal("port publication must remain false until the runtime experiment proves forwarding")
 	}
 	assertReadOnlyProbeCalls(t, runner.calls)
+}
+func TestCheckSystemStatusQueriesOnlyServiceStatus(t *testing.T) {
+	runner := healthyProbeRunner(t)
+	adapter := newTestAdapter(t, runner)
+	if err := adapter.CheckSystemStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []Command{{
+		Executable: testContainerExecutable,
+		Args:       []string{"system", "status", "--format", "json"},
+		Env:        append([]string(nil), probeEnvironment...),
+	}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("status calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestCheckSystemStatusRejectsStoppedService(t *testing.T) {
+	runner := healthyProbeRunner(t)
+	runner.responses[commandKey(testContainerExecutable, "system", "status", "--format", "json")] =
+		stdoutResponse(systemStatusJSON("stopped", "1.2.2"))
+	adapter := newTestAdapter(t, runner)
+
+	err := adapter.CheckSystemStatus(context.Background())
+	assertProbeError(t, err, ProbeServiceUnhealthy)
+	if !strings.Contains(err.Error(), "container system start") {
+		t.Fatalf("status error lacks start command: %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("status calls = %#v, want one", runner.calls)
+	}
+	assertReadOnlyProbeCalls(t, runner.calls)
+}
+func TestStatusRecognizesStoppedUnregisteredService(t *testing.T) {
+	runner := healthyProbeRunner(t)
+	runner.responses[commandKey(testContainerExecutable, "system", "status", "--format", "json")] = fakeResponse{
+		result: Result{
+			Stdout:   []byte(`{"apiServerAppName":"","apiServerBuild":"","apiServerCommit":"","apiServerVersion":"","appRoot":"","installRoot":"","status":"unregistered"}`),
+			ExitCode: 1,
+		},
+		err: errors.New("exit status 1"),
+	}
+	adapter := newTestAdapter(t, runner)
+
+	status, err := adapter.Status(context.Background())
+	if err != nil || status.State != runtime.SystemStateStopped || !strings.Contains(status.Remediation, "container system start") {
+		t.Fatalf("Status() = %#v, %v", status, err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("status calls = %#v, want one", runner.calls)
+	}
+	assertReadOnlyProbeCalls(t, runner.calls)
+}
+
+func TestStartSystemUsesExactCommand(t *testing.T) {
+	runner := &fakeProbeRunner{responses: map[string]fakeResponse{
+		commandKey(testContainerExecutable, "system", "start"): stdoutResponse(""),
+	}}
+	adapter := newTestAdapter(t, runner)
+	if err := adapter.StartSystem(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []Command{{
+		Executable: testContainerExecutable,
+		Args:       []string{"system", "start"},
+		Env:        append([]string(nil), probeEnvironment...),
+	}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("start calls = %#v, want %#v", runner.calls, want)
+	}
 }
 
 func TestProbeHostGates(t *testing.T) {

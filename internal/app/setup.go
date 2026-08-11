@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,7 +20,14 @@ import (
 	projectinspect "github.com/srimajji/dsx/internal/inspect"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
+	"github.com/srimajji/dsx/internal/runtime"
 	"github.com/srimajji/dsx/internal/state"
+)
+
+const (
+	DefaultWorkspaceCPUs        = 4
+	DefaultWorkspaceMemoryBytes = int64(6 << 30)
+	DefaultWorkspaceMemory      = "6GiB"
 )
 
 // OwnedResourceInventory is the read-only project state port used to choose a
@@ -29,23 +37,38 @@ type OwnedResourceInventory interface {
 	CountOwnedResources(context.Context, model.ProjectID) (int, error)
 }
 
+type StandardImagePreparer interface {
+	PrepareStandardImage(context.Context, plan.ExecutionPlan) error
+}
+type ContainerSystemController interface {
+	CheckSystemStatus(context.Context) error
+	Status(context.Context) (runtime.SystemStatus, error)
+	StartSystem(context.Context) error
+}
+
 type SetupDependencies struct {
-	Inspection *InspectionService
-	Approvals  state.ApprovalRepository
-	Inventory  OwnedResourceInventory
-	Now        func() time.Time
-	DSXVersion string
+	Inspection      *InspectionService
+	Approvals       state.ApprovalRepository
+	Inventory       OwnedResourceInventory
+	ContainerSystem ContainerSystemController
+	ImagePreparer   StandardImagePreparer
+	Now             func() time.Time
+	DSXVersion      string
+	StandardImage   string
 }
 
 // SetupService owns the final-confirmation transaction. PreviewSetup is
 // read-only; Initialize is the only setup path allowed to write configuration
 // and approval state.
 type SetupService struct {
-	inspection *InspectionService
-	approvals  state.ApprovalRepository
-	inventory  OwnedResourceInventory
-	now        func() time.Time
-	version    string
+	inspection      *InspectionService
+	approvals       state.ApprovalRepository
+	inventory       OwnedResourceInventory
+	containerSystem ContainerSystemController
+	imagePreparer   StandardImagePreparer
+	now             func() time.Time
+	version         string
+	standardImage   string
 }
 
 func NewSetupService(inspection *InspectionService, approvals state.ApprovalRepository, inventory OwnedResourceInventory) *SetupService {
@@ -65,12 +88,18 @@ func NewSetupServiceWithDependencies(dependencies SetupDependencies) *SetupServi
 	if dependencies.DSXVersion == "" {
 		dependencies.DSXVersion = "development"
 	}
+	if dependencies.StandardImage == "" {
+		dependencies.StandardImage = buildinfo.Current().AgentImage
+	}
 	return &SetupService{
-		inspection: dependencies.Inspection,
-		approvals:  dependencies.Approvals,
-		inventory:  dependencies.Inventory,
-		now:        dependencies.Now,
-		version:    dependencies.DSXVersion,
+		inspection:      dependencies.Inspection,
+		approvals:       dependencies.Approvals,
+		inventory:       dependencies.Inventory,
+		containerSystem: dependencies.ContainerSystem,
+		imagePreparer:   dependencies.ImagePreparer,
+		now:             dependencies.Now,
+		version:         dependencies.DSXVersion,
+		standardImage:   dependencies.StandardImage,
 	}
 }
 
@@ -86,19 +115,13 @@ func (service *SetupService) BareState(ctx context.Context, request BareStateReq
 		return BareState{}, model.Wrap(model.CodeInvalidInput, "inspect project state", err)
 	}
 	mapped := mapProjectFacts(facts)
-	configPath := filepath.Join(facts.WorkspaceRoot, filepath.FromSlash(projectConfigPath))
-	info, statErr := os.Lstat(configPath)
-	configExists := false
-	switch {
-	case errors.Is(statErr, os.ErrNotExist):
-	case statErr != nil:
-		return BareState{}, model.Wrap(model.CodeInvalidInput, "inspect project configuration", statErr)
-	case info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular():
-		return BareState{}, model.NewError(model.CodeInvalidInput, "project configuration must be a regular non-symlink file", nil)
-	default:
-		configExists = true
+	location, configExists, err := service.inspection.activeConfig(facts.WorkspaceRoot)
+	if err != nil {
+		return BareState{}, err
+	}
+	if configExists {
 		mapped.ConfigExists = true
-		mapped.ConfigPath = projectConfigPath
+		mapped.ConfigPath = location.display
 	}
 	projectID, err := model.NewProjectID(facts.WorkspaceRoot)
 	if err != nil {
@@ -114,13 +137,51 @@ func (service *SetupService) BareState(ctx context.Context, request BareStateReq
 			return BareState{}, model.NewError(model.CodeInternal, "owned resource count is negative", nil)
 		}
 	}
+	systemStatus := runtime.SystemStatus{
+		State: runtime.SystemStateUnavailable, Remediation: "Run `dsx doctor` to inspect Apple Container.",
+	}
+	if service.containerSystem != nil {
+		systemStatus, err = service.containerSystem.Status(ctx)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return BareState{}, ctxErr
+			}
+			systemStatus = runtime.SystemStatus{
+				State: runtime.SystemStateUnavailable, Remediation: "Run `dsx doctor` to inspect Apple Container.",
+			}
+		}
+	}
 	screen := BareSetup
 	if owned > 0 {
 		screen = BareDashboard
 	} else if configExists {
 		screen = BareLauncher
 	}
-	return BareState{Screen: screen, ConfigExists: configExists, OwnedResources: owned, Facts: mapped}, nil
+	return BareState{
+		Screen: screen, ConfigExists: configExists, OwnedResources: owned, Facts: mapped, ContainerSystem: systemStatus,
+	}, nil
+}
+func (service *SetupService) StartContainerSystem(ctx context.Context) error {
+	if ctx == nil {
+		return model.NewError(model.CodeInvalidInput, "start container system: context is nil", nil)
+	}
+	if service == nil || service.containerSystem == nil {
+		return model.NewError(model.CodeUnavailable, "Apple container system control is unavailable", nil)
+	}
+	status, err := service.containerSystem.Status(ctx)
+	if err != nil {
+		return model.Wrap(model.CodeUnavailable, "read Apple container system status", err)
+	}
+	if status.State == runtime.SystemStateRunning {
+		return nil
+	}
+	if err := service.containerSystem.StartSystem(ctx); err != nil {
+		return model.Wrap(model.CodeUnavailable, "start Apple container system", err)
+	}
+	if err := service.containerSystem.CheckSystemStatus(ctx); err != nil {
+		return model.Wrap(model.CodeUnavailable, "verify Apple container system after start", err)
+	}
+	return nil
 }
 
 func (service *SetupService) PreviewSetup(ctx context.Context, request SetupPreviewRequest) (SetupPreview, error) {
@@ -135,6 +196,7 @@ func (service *SetupService) PreviewSetup(ctx context.Context, request SetupPrev
 		return SetupPreview{}, model.Wrap(model.CodeInvalidInput, "inspect setup project", err)
 	}
 	preview := SetupPreview{Facts: mapProjectFacts(facts)}
+	preview.ImageOptions = setupImageOptions(facts, service.standardImage)
 	preview.Diagnostics = append(preview.Diagnostics, mapInspectDiagnostics(facts.Diagnostics)...)
 	if diagnosticsHaveErrors(preview.Diagnostics) {
 		sortDiagnostics(preview.Diagnostics)
@@ -146,13 +208,16 @@ func (service *SetupService) PreviewSetup(ctx context.Context, request SetupPrev
 	rendered := append([]byte(nil), request.RenderedConfig...)
 	if len(rendered) == 0 {
 		if generatedSuggestion {
-			document = suggestConfig(facts)
+			document, preview.SelectedImageOption = suggestConfig(facts, preview.ImageOptions)
 		}
 		rendered, err = json.MarshalIndent(document, "", "  ")
 		if err != nil {
 			return preview, model.Wrap(model.CodeInvalidInput, "render setup configuration", err)
 		}
 		rendered = append(rendered, '\n')
+	}
+	if preview.SelectedImageOption == "" {
+		preview.SelectedImageOption = selectedSetupImageOption(document.Image, preview.ImageOptions)
 	}
 	if generatedSuggestion && renderedImageUnset(document.Image) {
 		preview.Config = document
@@ -161,7 +226,7 @@ func (service *SetupService) PreviewSetup(ctx context.Context, request SetupPrev
 			Severity: "warning",
 			Code:     "image_required",
 			Path:     "/image",
-			Message:  "no project image or build was detected; enter a digest-pinned image before review",
+			Message:  "no usable standard or detected project image is available; select a custom digest-pinned image before review",
 		})
 		preview.ProjectState, err = projectStateDigest(facts)
 		if err != nil {
@@ -208,7 +273,7 @@ func (service *SetupService) PreviewSetup(ctx context.Context, request SetupPrev
 			ResourceName: "dsx-" + string(projectID) + "-main",
 		},
 		Imported:  imported,
-		Defaults:  plan.DefaultValues{Agent: "codex", Internet: true, CPUs: 2, MemoryBytes: 2 << 30, MaxConcurrentClones: 1},
+		Defaults:  plan.DefaultValues{Agent: "codex", Internet: true, CPUs: DefaultWorkspaceCPUs, MemoryBytes: DefaultWorkspaceMemoryBytes, MaxConcurrentClones: 1},
 		Authority: authority,
 	})
 	preview.Diagnostics = append(preview.Diagnostics, resolveDiagnostics...)
@@ -244,10 +309,16 @@ func (service *SetupService) PreviewExisting(ctx context.Context, request BareSt
 	if !inspected.Facts.ConfigExists {
 		return SetupPreview{}, model.NewError(model.CodeInvalidInput, "project configuration does not exist", nil)
 	}
-	configPath := filepath.Join(inspected.Facts.CanonicalRoot, filepath.FromSlash(projectConfigPath))
-	file, err := os.Open(configPath)
+	location, found, err := service.inspection.activeConfig(inspected.Facts.CanonicalRoot)
 	if err != nil {
-		return SetupPreview{}, model.Wrap(model.CodeInvalidInput, "open existing project configuration", err)
+		return SetupPreview{}, err
+	}
+	if !found || location.display != inspected.Facts.ConfigPath {
+		return SetupPreview{}, model.NewError(model.CodeConflict, "active DSX configuration changed during launcher review", nil)
+	}
+	file, err := os.Open(location.absolute)
+	if err != nil {
+		return SetupPreview{}, model.Wrap(model.CodeInvalidInput, "open existing DSX configuration", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
@@ -332,6 +403,9 @@ func (service *SetupService) Initialize(ctx context.Context, request InitializeR
 	if !contentDigestsEqual(request.ExpectedImportedContentDigests, preview.ImportedContentDigests) {
 		return InitializeResult{}, model.NewError(model.CodeUnapproved, "setup imported content changed since preview", nil)
 	}
+	if err := service.checkContainerSystem(ctx); err != nil {
+		return InitializeResult{}, err
+	}
 	projectID, err := model.NewProjectID(preview.Facts.CanonicalRoot)
 	if err != nil {
 		return InitializeResult{}, model.Wrap(model.CodeInvalidInput, "derive project identity", err)
@@ -352,10 +426,30 @@ func (service *SetupService) Initialize(ctx context.Context, request InitializeR
 	if err := state.ValidateApprovalRecord(record); err != nil {
 		return InitializeResult{}, model.NewError(model.CodeUnapproved, "cannot persist invalid setup approval", err)
 	}
-	configPath := filepath.Join(preview.Facts.CanonicalRoot, filepath.FromSlash(projectConfigPath))
+	local, shared, err := service.inspection.configLocations(preview.Facts.CanonicalRoot)
+	if err != nil {
+		return InitializeResult{}, err
+	}
+	configLocation := local
+	if configLocation.absolute == "" {
+		configLocation = shared
+	}
+	if _, found, locateErr := service.inspection.activeConfig(preview.Facts.CanonicalRoot); locateErr != nil {
+		return InitializeResult{}, locateErr
+	} else if found {
+		return InitializeResult{}, model.NewError(model.CodeInvalidInput, "a DSX configuration appeared after setup preview", nil)
+	}
+	configPath := configLocation.absolute
 	created, err := writeNewConfig(ctx, configPath, preview.RenderedConfig)
 	if err != nil {
 		return InitializeResult{}, err
+	}
+	if active, found, locateErr := service.inspection.activeConfig(preview.Facts.CanonicalRoot); locateErr != nil || !found || active.absolute != configPath {
+		_ = os.Remove(configPath)
+		if locateErr != nil {
+			return InitializeResult{}, locateErr
+		}
+		return InitializeResult{}, model.NewError(model.CodeConflict, "DSX configuration selection changed while setup was saved", nil)
 	}
 	if err := service.approvals.SaveApproval(ctx, record); err != nil {
 		rollbackContext := context.WithoutCancel(ctx)
@@ -382,7 +476,13 @@ func (service *SetupService) Initialize(ctx context.Context, request InitializeR
 		}
 		return InitializeResult{}, err
 	}
-	return InitializeResult{ConfigPath: configPath, Hash: preview.Hash, Created: created}, nil
+	result := InitializeResult{ConfigPath: configPath, Hash: preview.Hash, Created: created}
+	if preview.Plan.Image.Standard && service.imagePreparer != nil {
+		if err := service.imagePreparer.PrepareStandardImage(ctx, preview.Plan); err != nil {
+			return result, model.Wrap(model.CodeUnavailable, "prepare DSX Standard image after saving setup", err)
+		}
+	}
+	return result, nil
 }
 
 // ApproveExisting persists a reviewed, already-committed project configuration
@@ -413,6 +513,9 @@ func (service *SetupService) ApproveExisting(ctx context.Context, request Initia
 	if !contentDigestsEqual(request.ExpectedImportedContentDigests, preview.ImportedContentDigests) {
 		return InitializeResult{}, model.NewError(model.CodeUnapproved, "imported content changed since launcher review", nil)
 	}
+	if err := service.checkContainerSystem(ctx); err != nil {
+		return InitializeResult{}, err
+	}
 	projectID, err := model.NewProjectID(preview.Facts.CanonicalRoot)
 	if err != nil {
 		return InitializeResult{}, model.Wrap(model.CodeInvalidInput, "derive project identity", err)
@@ -431,8 +534,23 @@ func (service *SetupService) ApproveExisting(ctx context.Context, request Initia
 	}); err != nil {
 		return InitializeResult{}, err
 	}
-	configPath := filepath.Join(preview.Facts.CanonicalRoot, filepath.FromSlash(projectConfigPath))
-	return InitializeResult{ConfigPath: configPath, Hash: preview.Hash, Created: false}, nil
+	location, found, err := service.inspection.activeConfig(preview.Facts.CanonicalRoot)
+	if err != nil {
+		return InitializeResult{}, err
+	}
+	if !found {
+		return InitializeResult{}, model.NewError(model.CodeConflict, "approved DSX configuration disappeared", nil)
+	}
+	return InitializeResult{ConfigPath: location.absolute, Hash: preview.Hash, Created: false}, nil
+}
+func (service *SetupService) checkContainerSystem(ctx context.Context) error {
+	if service.containerSystem == nil {
+		return model.NewError(model.CodeUnavailable, "Apple container system status check is not configured", nil)
+	}
+	if err := service.containerSystem.CheckSystemStatus(ctx); err != nil {
+		return model.Wrap(model.CodeUnavailable, "check Apple container system after final confirmation", err)
+	}
+	return nil
 }
 
 func contentDigestsEqual(left, right []state.ContentDigest) bool {
@@ -454,41 +572,97 @@ func wrapRollbackError(operation string, err error) error {
 	return fmt.Errorf("%s: %w", operation, err)
 }
 
-func suggestConfig(facts projectinspect.Facts) config.ConfigDocument {
+func suggestConfig(facts projectinspect.Facts, options []SetupImageOption) (config.ConfigDocument, string) {
 	document := config.ConfigDocument{
 		SchemaVersion: 1,
 		Workspace:     config.WorkspaceConfig{Root: "."},
 		Agents:        config.AgentConfig{Default: "codex", Allowed: []string{"codex"}},
+		Resources:     config.ResourceLimits{CPUs: DefaultWorkspaceCPUs, Memory: DefaultWorkspaceMemory},
 	}
+	for _, option := range options {
+		if option.Available && option.ID != "custom" {
+			document.Image = option.Image
+			return document, option.ID
+		}
+	}
+	return document, "custom"
+}
+
+func setupImageOptions(facts projectinspect.Facts, standardImage string) []SetupImageOption {
+	options := make([]SetupImageOption, 0, len(facts.Containerfiles)+len(facts.DevContainers)+2)
+	_, publishedStandard := pinnedImageDigest(standardImage)
+	standardDescription := "Built locally on first use with Codex, Claude, OMP, and OpenCode"
+	standardConfig := config.ImageConfig{Standard: true}
+	if publishedStandard {
+		standardDescription = "Ready to use with Codex, Claude, OMP, and OpenCode"
+		standardConfig = config.ImageConfig{Ref: standardImage}
+	}
+	options = append(options, SetupImageOption{
+		ID: "standard", Name: "DSX Standard — Ubuntu (Recommended)", Description: standardDescription, Available: true,
+		Image: standardConfig,
+	})
 	for _, candidate := range facts.Containerfiles {
 		if candidate != "Containerfile" && candidate != "Dockerfile" {
 			continue
 		}
-		document.Image = config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: candidate}}
-		return document
+		options = append(options, SetupImageOption{
+			ID: "dockerfile:" + candidate, Name: "Use this project's " + candidate,
+			Description: "Detected in the project root", Available: true,
+			Image: config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: candidate}},
+		})
 	}
 	for _, devcontainer := range facts.DevContainers {
 		if devcontainer.Path != ".devcontainer/devcontainer.json" {
 			continue
 		}
+		option := SetupImageOption{
+			ID: "devcontainer:" + devcontainer.Path, Name: "Use this project's Dev Container",
+			Description: "Detected at " + devcontainer.Path, Available: true,
+		}
 		switch {
 		case devcontainer.Image != "":
-			document.Image = config.ImageConfig{Ref: devcontainer.Image}
-			return document
+			option.Image = config.ImageConfig{Ref: devcontainer.Image}
 		case devcontainer.Build.Dockerfile != "":
 			contextPath := devcontainer.Build.Context
 			if contextPath == "" {
 				contextPath = "."
 			}
-			document.Image = config.ImageConfig{Build: &config.ImageBuild{Context: contextPath, File: devcontainer.Build.Dockerfile}}
-			return document
+			option.Image = config.ImageConfig{Build: &config.ImageBuild{Context: contextPath, File: devcontainer.Build.Dockerfile}}
+		default:
+			continue
+		}
+		options = append(options, option)
+	}
+	options = append(options, SetupImageOption{
+		ID: "custom", Name: "Use another image", Description: "Advanced", Available: true,
+	})
+	return options
+}
+
+func selectedSetupImageOption(image config.ImageConfig, options []SetupImageOption) string {
+	for _, option := range options {
+		if option.ID == "custom" {
+			continue
+		}
+		if image.Standard && option.Image.Standard {
+			return option.ID
+		}
+		if image.Ref != "" && image.Ref == option.Image.Ref {
+			return option.ID
+		}
+		if image.Build != nil && option.Image.Build != nil &&
+			image.Build.Context == option.Image.Build.Context &&
+			image.Build.File == option.Image.Build.File &&
+			image.Build.Target == option.Image.Build.Target &&
+			maps.Equal(image.Build.Args, option.Image.Build.Args) {
+			return option.ID
 		}
 	}
-	return document
+	return "custom"
 }
 
 func renderedImageUnset(image config.ImageConfig) bool {
-	return image.Ref == "" && image.Build == nil
+	return image.Ref == "" && image.Build == nil && !image.Standard
 }
 
 func selectedCapabilities(resolved plan.ExecutionPlan) []string {

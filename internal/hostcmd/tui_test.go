@@ -244,14 +244,9 @@ func TestTUIIntentsInvokeLifecycleServices(t *testing.T) {
 		action string
 		check  func(*testing.T, *lifecycleStub)
 	}{
-		{action: "create", check: checkTUIStart},
-		{action: "start", check: checkTUIStart},
-		{action: "attach", check: func(t *testing.T, service *lifecycleStub) {
-			t.Helper()
-			if len(service.shellRequests) != 1 || !service.shellRequests[0].Terminal || service.shellRequests[0].RunInteractive == nil {
-				t.Fatalf("shell requests = %#v", service.shellRequests)
-			}
-		}},
+		{action: "create", check: checkTUIShell},
+		{action: "start", check: checkTUIShell},
+		{action: "attach", check: checkTUIShell},
 		{action: "stop", check: func(t *testing.T, service *lifecycleStub) {
 			t.Helper()
 			if len(service.stopRequests) != 1 || service.stopRequests[0].Root != "/tmp/project" {
@@ -297,10 +292,13 @@ func TestTUIDashboardStopPassesSelectedClone(t *testing.T) {
 	}
 }
 
-func checkTUIStart(t *testing.T, service *lifecycleStub) {
+func checkTUIShell(t *testing.T, service *lifecycleStub) {
 	t.Helper()
-	if len(service.startRequests) != 1 || service.startRequests[0].Root != "/tmp/project" || !service.startRequests[0].Interactive || service.startRequests[0].FinalConfirmed {
-		t.Fatalf("start requests = %#v", service.startRequests)
+	if len(service.shellRequests) != 1 || !service.shellRequests[0].Terminal || service.shellRequests[0].RunInteractive == nil {
+		t.Fatalf("shell requests = %#v", service.shellRequests)
+	}
+	if len(service.startRequests) != 0 {
+		t.Fatalf("start requests = %#v, want none", service.startRequests)
 	}
 }
 

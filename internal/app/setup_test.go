@@ -12,10 +12,12 @@ import (
 	"testing"
 	"time"
 
+	agentimage "github.com/srimajji/dsx/images/agent"
 	"github.com/srimajji/dsx/internal/config"
 	projectinspect "github.com/srimajji/dsx/internal/inspect"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
+	"github.com/srimajji/dsx/internal/runtime"
 	"github.com/srimajji/dsx/internal/state"
 )
 
@@ -73,6 +75,44 @@ func (inventory setupInventory) CountOwnedResources(context.Context, model.Proje
 	return inventory.count, nil
 }
 
+type setupImagePreparer struct {
+	calls     int
+	execution plan.ExecutionPlan
+	err       error
+}
+
+func (preparer *setupImagePreparer) PrepareStandardImage(_ context.Context, execution plan.ExecutionPlan) error {
+	preparer.calls++
+	preparer.execution = execution
+	return preparer.err
+}
+
+type setupContainerSystem struct {
+	calls       int
+	statusCalls int
+	startCalls  int
+	status      runtime.SystemStatus
+	err         error
+}
+
+func (system *setupContainerSystem) CheckSystemStatus(context.Context) error {
+	system.calls++
+	return system.err
+}
+
+func (system *setupContainerSystem) Status(context.Context) (runtime.SystemStatus, error) {
+	system.statusCalls++
+	if system.status.State == "" {
+		return runtime.SystemStatus{State: runtime.SystemStateRunning}, nil
+	}
+	return system.status, nil
+}
+
+func (system *setupContainerSystem) StartSystem(context.Context) error {
+	system.startCalls++
+	return system.err
+}
+
 func setupTestService(t *testing.T, root string, approvals state.ApprovalRepository, inventory OwnedResourceInventory) *SetupService {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(root, "Containerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
@@ -85,11 +125,12 @@ func setupTestService(t *testing.T, root string, approvals state.ApprovalReposit
 		Resolver: plan.NewResolver(),
 	})
 	return NewSetupServiceWithDependencies(SetupDependencies{
-		Inspection: inspection,
-		Approvals:  approvals,
-		Inventory:  inventory,
-		Now:        func() time.Time { return time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC) },
-		DSXVersion: "test",
+		Inspection:      inspection,
+		Approvals:       approvals,
+		Inventory:       inventory,
+		ContainerSystem: &setupContainerSystem{},
+		Now:             func() time.Time { return time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC) },
+		DSXVersion:      "test",
 	})
 }
 
@@ -116,11 +157,35 @@ func TestSetupLauncherDashboardSelection(t *testing.T) {
 		t.Fatalf("resource state = %#v, err = %v", stateResult, err)
 	}
 }
+func TestBareStateReportsContainerSystemAndStartsItExplicitly(t *testing.T) {
+	root := t.TempDir()
+	service := setupTestService(t, root, &setupApprovalRepository{}, setupInventory{})
+	controller := &setupContainerSystem{status: runtime.SystemStatus{
+		State: runtime.SystemStateStopped, Remediation: "Run `container system start` to continue.",
+	}}
+	service.containerSystem = controller
+
+	stateResult, err := service.BareState(context.Background(), BareStateRequest{Root: root})
+	if err != nil || stateResult.ContainerSystem.State != runtime.SystemStateStopped {
+		t.Fatalf("BareState() = %#v, %v", stateResult, err)
+	}
+	if controller.statusCalls != 1 || controller.startCalls != 0 {
+		t.Fatalf("read-only state calls: status=%d start=%d", controller.statusCalls, controller.startCalls)
+	}
+	if err := service.StartContainerSystem(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if controller.statusCalls != 2 || controller.startCalls != 1 || controller.calls != 1 {
+		t.Fatalf("explicit start calls: status=%d start=%d check=%d", controller.statusCalls, controller.startCalls, controller.calls)
+	}
+}
 
 func TestApproveExistingPersistsReviewedHashWithoutRewritingConfiguration(t *testing.T) {
 	root := t.TempDir()
 	approvals := &setupApprovalRepository{}
 	service := setupTestService(t, root, approvals, setupInventory{})
+	containerSystem := &setupContainerSystem{}
+	service.containerSystem = containerSystem
 	generated, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root})
 	if err != nil {
 		t.Fatal(err)
@@ -162,6 +227,9 @@ func TestApproveExistingPersistsReviewedHashWithoutRewritingConfiguration(t *tes
 	if approvals.saves != 1 || !approvals.found || approvals.record.Hash != preview.Hash {
 		t.Fatalf("approval repository = %#v", approvals)
 	}
+	if containerSystem.calls != 1 {
+		t.Fatalf("container status checks = %d, want 1", containerSystem.calls)
+	}
 }
 
 func TestSetupCancelCreatesNothing(t *testing.T) {
@@ -179,7 +247,7 @@ func TestSetupCancelCreatesNothing(t *testing.T) {
 		t.Fatalf("approval saves = %d, want 0", repository.saves)
 	}
 }
-func TestSetupWithoutDetectedImageRequiresExplicitInput(t *testing.T) {
+func TestSetupWithoutDetectedImageSelectsManagedStandard(t *testing.T) {
 	root := t.TempDir()
 	service := NewSetupServiceWithDependencies(SetupDependencies{
 		Inspection: NewInspectionServiceWithDependencies(InspectionDependencies{
@@ -194,11 +262,112 @@ func TestSetupWithoutDetectedImageRequiresExplicitInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.Hash != "" || preview.Config.Image.Ref != "" || preview.Config.Image.Build != nil {
-		t.Fatalf("setup invented an image or executable plan: %#v", preview)
+	if !preview.Config.Image.Standard || preview.Config.Image.Ref != "" || preview.Config.Image.Build != nil {
+		t.Fatalf("standard image suggestion = %#v", preview.Config.Image)
 	}
-	if len(preview.Diagnostics) != 1 || preview.Diagnostics[0].Code != "image_required" {
+	if preview.SelectedImageOption != "standard" || preview.Plan.Image.InputDigest != agentimage.InputDigest() || preview.Hash == "" {
+		t.Fatalf("standard image preview = %#v", preview)
+	}
+	if len(preview.Diagnostics) != 0 {
 		t.Fatalf("diagnostics = %#v", preview.Diagnostics)
+	}
+}
+
+func TestStageStandardImageMatchesEmbeddedAuthority(t *testing.T) {
+	projectRoot := t.TempDir()
+	stageRoot, digest, err := stageStandardImage(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stageRoot)
+	if digest != agentimage.InputDigest() {
+		t.Fatalf("staged digest = %q, want %q", digest, agentimage.InputDigest())
+	}
+	for _, name := range []string{agentimage.BuildFile, "harnesses.lock.json"} {
+		info, statErr := os.Stat(filepath.Join(stageRoot, name))
+		if statErr != nil || !info.Mode().IsRegular() {
+			t.Fatalf("staged asset %q: info=%#v err=%v", name, info, statErr)
+		}
+	}
+}
+
+func TestSetupListsStandardAndDetectedImageOptions(t *testing.T) {
+	standard := "ghcr.io/example/dsx-agent@sha256:" + strings.Repeat("a", 64)
+	facts := projectinspect.Facts{
+		Containerfiles: []string{"Dockerfile"},
+		DevContainers: []projectinspect.DevContainer{{
+			Path: ".devcontainer/devcontainer.json", Image: "ghcr.io/example/project@sha256:" + strings.Repeat("b", 64),
+		}},
+	}
+	options := setupImageOptions(facts, standard)
+	if len(options) != 4 {
+		t.Fatalf("image options = %#v", options)
+	}
+	document, selected := suggestConfig(facts, options)
+	if selected != "standard" || document.Image.Ref != standard {
+		t.Fatalf("selected option = %q, image = %#v", selected, document.Image)
+	}
+	if document.Resources.CPUs != DefaultWorkspaceCPUs || document.Resources.Memory != DefaultWorkspaceMemory {
+		t.Fatalf("suggested resources = %#v", document.Resources)
+	}
+	for index, id := range []string{"standard", "dockerfile:Dockerfile", "devcontainer:.devcontainer/devcontainer.json", "custom"} {
+		if options[index].ID != id {
+			t.Fatalf("option %d = %#v, want %q", index, options[index], id)
+		}
+	}
+}
+
+func TestSetupWritesNamespacedHomeConfigAndRejectsSharedAmbiguity(t *testing.T) {
+	root := t.TempDir()
+	configRoot := filepath.Join(t.TempDir(), ".dsx")
+	if err := os.WriteFile(filepath.Join(root, "Containerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspection := NewInspectionServiceWithDependencies(InspectionDependencies{
+		InspectProject: func(string) (projectinspect.Facts, error) {
+			return projectinspect.Facts{WorkspaceRoot: root, Containerfiles: []string{"Containerfile"}}, nil
+		},
+		Resolver:   plan.NewResolver(),
+		ConfigRoot: configRoot,
+	})
+	repository := &setupApprovalRepository{}
+	service := NewSetupServiceWithDependencies(SetupDependencies{
+		Inspection: inspection, Approvals: repository, ContainerSystem: &setupContainerSystem{},
+	})
+	preview, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Initialize(context.Background(), InitializeRequest{
+		Root: root, ExpectedHash: preview.Hash, ExpectedConfigDigest: preview.ConfigContentDigest,
+		ExpectedProjectState: preview.ProjectState, Confirmed: true, RenderedConfig: preview.RenderedConfig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := model.NewProjectID(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(configRoot, "projects", projectConfigNamespace(filepath.Base(root))+"-"+string(projectID), "config.jsonc")
+	if result.ConfigPath != want {
+		t.Fatalf("config path = %q, want %q", result.ConfigPath, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, projectConfigPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup wrote repository config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".dsx"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(result.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, projectConfigPath), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BareState(context.Background(), BareStateRequest{Root: root}); model.ErrorCodeOf(err) != model.CodeAmbiguous {
+		t.Fatalf("ambiguous configs error = %v", err)
 	}
 }
 
@@ -227,10 +396,10 @@ func TestSetupIgnoresNestedImageRecipesWhenSuggestingProjectImage(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.Config.Image.Ref != "" || preview.Config.Image.Build != nil {
-		t.Fatalf("nested container recipe selected as project image: %#v", preview.Config.Image)
+	if !preview.Config.Image.Standard || preview.Config.Image.Ref != "" || preview.Config.Image.Build != nil {
+		t.Fatalf("nested container recipe affected standard image selection: %#v", preview.Config.Image)
 	}
-	if len(preview.Diagnostics) != 1 || preview.Diagnostics[0].Code != "image_required" {
+	if len(preview.Diagnostics) != 0 {
 		t.Fatalf("diagnostics = %#v", preview.Diagnostics)
 	}
 }
@@ -239,6 +408,8 @@ func TestSetupFinalConfirmationWritesConfigAndApproval(t *testing.T) {
 	root := t.TempDir()
 	repository := &setupApprovalRepository{}
 	service := setupTestService(t, root, repository, nil)
+	preparer := &setupImagePreparer{}
+	service.imagePreparer = preparer
 	preview, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root})
 	if err != nil {
 		t.Fatal(err)
@@ -257,6 +428,9 @@ func TestSetupFinalConfirmationWritesConfigAndApproval(t *testing.T) {
 	if !result.Created || repository.saves != 1 || repository.record.Hash != preview.Hash {
 		t.Fatalf("result = %#v, saves = %d, approval = %#v", result, repository.saves, repository.record)
 	}
+	if preparer.calls != 1 || !preparer.execution.Image.Standard || preparer.execution.ExecutableHash != preview.Hash {
+		t.Fatalf("standard image preparation: calls=%d execution=%#v", preparer.calls, preparer.execution)
+	}
 	info, err := os.Stat(result.ConfigPath)
 	if err != nil {
 		t.Fatal(err)
@@ -272,6 +446,59 @@ func TestSetupFinalConfirmationWritesConfigAndApproval(t *testing.T) {
 	_ = file.Close()
 	if diagnosticsHaveErrors(diagnostics) {
 		t.Fatalf("written configuration diagnostics = %#v", diagnostics)
+	}
+}
+func TestSetupChecksContainerSystemBeforePersisting(t *testing.T) {
+	root := t.TempDir()
+	repository := &setupApprovalRepository{}
+	service := setupTestService(t, root, repository, nil)
+	checkFailure := errors.New("container API service is stopped; run `container system start` and retry")
+	containerSystem := &setupContainerSystem{err: checkFailure}
+	imagePreparer := &setupImagePreparer{}
+	service.containerSystem = containerSystem
+	service.imagePreparer = imagePreparer
+	preview, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.Initialize(context.Background(), confirmedInitializeRequest(root, preview))
+	if model.ErrorCodeOf(err) != model.CodeUnavailable || !errors.Is(err, checkFailure) {
+		t.Fatalf("Initialize() = %#v, %v; want unavailable container status error", result, err)
+	}
+	if containerSystem.calls != 1 {
+		t.Fatalf("container status checks = %d, want 1", containerSystem.calls)
+	}
+	if repository.saves != 0 || imagePreparer.calls != 0 || result.ConfigPath != "" || result.Created {
+		t.Fatalf("preflight failure mutated setup: result=%#v saves=%d image prepares=%d", result, repository.saves, imagePreparer.calls)
+	}
+}
+
+func TestSetupStandardBuildFailureKeepsReviewedConfigurationForRetry(t *testing.T) {
+	root := t.TempDir()
+	repository := &setupApprovalRepository{}
+	service := setupTestService(t, root, repository, nil)
+	service.imagePreparer = &setupImagePreparer{err: errors.New("builder unavailable")}
+	preview, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Initialize(context.Background(), InitializeRequest{
+		Root:                 root,
+		ExpectedHash:         preview.Hash,
+		ExpectedConfigDigest: preview.ConfigContentDigest,
+		ExpectedProjectState: preview.ProjectState,
+		Confirmed:            true,
+		RenderedConfig:       preview.RenderedConfig,
+	})
+	if model.ErrorCodeOf(err) != model.CodeUnavailable || !result.Created {
+		t.Fatalf("Initialize() = %#v, %v", result, err)
+	}
+	if _, statErr := os.Stat(result.ConfigPath); statErr != nil {
+		t.Fatalf("saved configuration after build failure: %v", statErr)
+	}
+	if repository.saves != 1 || repository.record.Hash != preview.Hash {
+		t.Fatalf("saved approval after build failure = %#v", repository.record)
 	}
 }
 
@@ -454,10 +681,11 @@ func TestImportedDigestPersistenceAndConfirmation(t *testing.T) {
 	inspection := NewInspectionService(plan.NewResolver())
 	repository := &setupApprovalRepository{}
 	service := NewSetupServiceWithDependencies(SetupDependencies{
-		Inspection: inspection,
-		Approvals:  repository,
-		Now:        func() time.Time { return time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC) },
-		DSXVersion: "test",
+		Inspection:      inspection,
+		Approvals:       repository,
+		ContainerSystem: &setupContainerSystem{},
+		Now:             func() time.Time { return time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC) },
+		DSXVersion:      "test",
 	})
 	document := config.ConfigDocument{
 		SchemaVersion: 1,

@@ -147,9 +147,9 @@ When a project already uses a process manager such as `process-compose`, DSX may
 
 Agents will normally be launched through `container exec` after required services become healthy.
 
-### 6. Use explicit JSONC project configuration
+### 6. Use explicit JSONC configuration with home-local ownership by default
 
-The project contract will be `.dsx/config.jsonc`.
+Setup writes the project contract to `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`. The readable project name is paired with the canonical-root-derived project ID to prevent collisions. A repository `.dsx/config.jsonc` remains an explicit, shareable team contract. DSX accepts exactly one location and fails closed when both exist; it does not merge them.
 
 Configuration will describe:
 
@@ -169,7 +169,7 @@ Configuration precedence is:
 
 ```text
 CLI flags
-  > .dsx/config.jsonc
+  > one active DSX configuration (home-local or shared)
   > explicitly imported supported configuration
   > DSX defaults
 ```
@@ -187,9 +187,9 @@ Pinned Ubuntu base
   → selected project image
 ```
 
-Supported agent harnesses may be included in the standard agent-ready image for fast switching. If image size or release cadence becomes material, harnesses may move to thin derived images without changing the runtime contract. `dsx-guest` is still mounted at runtime so custom images and host/guest versions stay aligned.
+Supported agent harnesses are included in the standard agent-ready image for fast switching. A release binary resolves that image through its published immutable digest. When release metadata is absent, a development binary embeds the DSX-owned Containerfile and harness lock, includes their complete build-context digest in the approved execution plan, materializes them in a private directory outside the project, builds a content-addressed `dsx.local/standard:<input-digest-prefix>` image after final confirmation, and reuses that tag on subsequent starts. Harness attestation accepts this path only when the plan selects the managed standard image and its input digest matches the embedded authority. Project and custom builds remain outside that trust path.
 
-Project setup state is reusable only when its declared inputs and configuration hash have not changed.
+`dsx-guest` is still mounted at runtime so custom images and host/guest versions stay aligned. Project setup state is reusable only when its declared inputs and configuration hash have not changed.
 
 ### 8. Support live mounts and multiple named private clones
 
@@ -258,10 +258,9 @@ Initial p95 budgets on a warm host are: `dsx inspect` within 500 ms, DSX plannin
 When stdin and stdout are interactive terminals, bare `dsx` will launch a terminal UI in the same executable:
 
 - No project configuration and no DSX resources: setup wizard.
-- Configuration but no resources: project launcher.
-- Existing project resources: sandbox dashboard.
+- A configured project: one state-driven project screen reports whether Apple Container is installed, stopped, running, or unavailable and whether the live workspace is absent, stopped, running, or unverifiable.
 
-`dsx init` opens the same setup flow directly. Without an interactive terminal, bare `dsx` prints help and exits without prompting or changing state.
+The project screen derives one primary action from those states. It never renders inapplicable lifecycle or Git commands. Advanced clone, stop, cleanup, and named-clone Git operations live under a secondary **More options** view. Starting the Apple container system is an explicit user action. `dsx init` opens the setup flow directly. Without an interactive terminal, bare `dsx` prints help and exits without prompting or changing state.
 
 The TUI will use [Bubble Tea](https://github.com/charmbracelet/bubbletea) as its state/update/view framework and [Huh](https://github.com/charmbracelet/huh) for setup forms, with Bubbles and Lip Gloss components only where needed. Huh's accessible mode supplies the initial screen-reader path.
 
@@ -273,9 +272,9 @@ Explicit CLI commands ─┐
 TUI actions ───────────┘
 ```
 
-The setup flow performs detection and planning without mutation, then shows the effective configuration, executable commands, mounts, credentials, network grants, ports, and configuration hash. Only final confirmation may write `.dsx/config.jsonc` or invoke resource creation. Configuration approval and destructive cleanup rules are identical in CLI and TUI paths.
+The setup flow performs detection and planning without mutation, then shows selectable DSX-standard and detected project image sources, the effective configuration, executable commands, mounts, credentials, network grants, ports, and configuration hash. Final confirmation first triggers a read-only Apple container-system status check. A missing CLI or service state other than `running` fails before configuration or approval persistence and directs the user to install the supported runtime or run `container system start`. Only after that preflight may setup write the home-local project configuration, persist approval, build the managed standard image, or invoke other resource creation. The standard-image build uses only embedded DSX-owned inputs and never includes project files. A repository `.dsx/config.jsonc` is an explicit shared alternative. Configuration approval and destructive cleanup rules are identical in CLI and TUI paths.
 
-The MVP dashboard supports project/sandbox listing, create, attach, start, stop, clean, and the existing `dsx git status`, `dsx git diff`, and `dsx git fetch` operations. It does not embed logs, agent chat, task scheduling, or a full configuration editor.
+The project screen supports project/workspace status, create, attach, start, stop, clean, and the existing `dsx git status`, `dsx git diff`, and `dsx git fetch` operations through contextual actions. It does not embed logs, agent chat, task scheduling, or a full configuration editor.
 
 Before handing the terminal to `container exec -it`, the TUI exits its alternate screen and restores normal terminal state; it may restore the dashboard after the child exits. Ctrl-C before confirmation is side-effect free, while interruption during creation invokes the same rollback path as explicit commands.
 
@@ -441,6 +440,7 @@ The subprocess overhead is insignificant compared with VM boot, image build, dep
 - Treat repository names, paths, configuration text, process labels, and runtime output as untrusted display input; strip or escape ANSI and control sequences before rendering.
 - Never display secret values and mask secret input.
 - Do not create configuration or runtime resources before final confirmation.
+- Resource selectors update the in-memory configuration submitted to `PreviewSetup`; returning from review reconstructs the form from those in-memory choices and performs no write or runtime mutation.
 - Restore terminal state on normal exit, cancellation, child-process handoff, and recoverable errors.
 - Respect `NO_COLOR`, narrow terminals, resize events, and Huh's accessible mode.
 - In non-interactive contexts, print help and exit rather than opening prompts.

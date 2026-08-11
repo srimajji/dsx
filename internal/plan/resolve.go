@@ -173,7 +173,7 @@ func resolveImage(input ResolveInput, imports importedLayer, provenance config.P
 		rank   int
 		source config.SourceRef
 	}
-	branches := make([]branch, 0, 3)
+	branches := make([]branch, 0, 4)
 	if input.Defaults.ImageRef != "" {
 		branches = append(branches, branch{name: "ref", rank: PriorityDefault, source: standardSource})
 	}
@@ -190,14 +190,24 @@ func resolveImage(input ResolveInput, imports importedLayer, provenance config.P
 	}
 	projectRef := projectDeclares(input.Config, "/image/ref", input.Config.Document.Image.Ref != "")
 	projectBuild := projectDeclares(input.Config, "/image/build", input.Config.Document.Image.Build != nil)
-	if projectRef && projectBuild {
-		return ResolvedImage{}, fmt.Errorf("project image cannot declare both ref and build")
+	projectStandard := projectDeclares(input.Config, "/image/standard", input.Config.Document.Image.Standard)
+	selectedProjectImages := 0
+	for _, selected := range []bool{projectRef, projectBuild, projectStandard} {
+		if selected {
+			selectedProjectImages++
+		}
+	}
+	if selectedProjectImages > 1 {
+		return ResolvedImage{}, fmt.Errorf("project image cannot declare more than one of ref, build, or standard")
 	}
 	if projectRef {
 		branches = append(branches, branch{name: "ref", rank: PriorityProject, source: projectSource(input.Config, "/image/ref")})
 	}
 	if projectBuild {
 		branches = append(branches, branch{name: "build", rank: PriorityProject, source: projectSource(input.Config, "/image/build")})
+	}
+	if projectStandard {
+		branches = append(branches, branch{name: "standard", rank: PriorityProject, source: projectSource(input.Config, "/image/standard")})
 	}
 	if len(branches) == 0 {
 		return ResolvedImage{}, fmt.Errorf("no image was supplied by project, import, or defaults")
@@ -209,7 +219,8 @@ func resolveImage(input ResolveInput, imports importedLayer, provenance config.P
 		}
 	}
 	image := ResolvedImage{}
-	if chosen.name == "ref" {
+	switch chosen.name {
+	case "ref":
 		var reference selected[string]
 		if input.Defaults.ImageRef != "" {
 			reference.choose(input.Defaults.ImageRef, standardSource, PriorityDefault)
@@ -227,7 +238,18 @@ func resolveImage(input ResolveInput, imports importedLayer, provenance config.P
 		}
 		image.InputDigest = digest
 		putSource(provenance, "/image/reference", reference.source)
-	} else {
+	case "standard":
+		if err := validateDigest("standard image", input.Authority.StandardImageDigest); err != nil {
+			return ResolvedImage{}, err
+		}
+		image.Standard = true
+		image.Context = "@dsx/standard"
+		image.File = "Containerfile"
+		image.InputDigest = input.Authority.StandardImageDigest
+		putSource(provenance, "/image/standard", chosen.source)
+		putSource(provenance, "/image/context", chosen.source)
+		putSource(provenance, "/image/file", chosen.source)
+	default:
 		var contextValue, file, target selected[string]
 		args := make(map[string]selected[string])
 		if importBuild && imports.document.Image.Build != nil {

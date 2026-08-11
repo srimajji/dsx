@@ -5,38 +5,59 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/srimajji/dsx/internal/app"
+	"github.com/srimajji/dsx/internal/config"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
+	"github.com/srimajji/dsx/internal/runtime"
 	"github.com/srimajji/dsx/internal/terminal"
 )
 
 type setupApplicationStub struct {
-	initializes   int
-	previews      int
-	approvals     int
-	request       app.InitializeRequest
-	cloneRequest  app.ClonePreviewRequest
-	preview       app.SetupPreview
-	previewErr    error
-	initializeErr error
+	initializes    int
+	previews       int
+	approvals      int
+	systemStarts   int
+	request        app.InitializeRequest
+	cloneRequest   app.ClonePreviewRequest
+	setupRequest   app.SetupPreviewRequest
+	preview        app.SetupPreview
+	bareState      app.BareState
+	previewErr     error
+	initializeErr  error
+	systemStartErr error
 }
 
 func (stub *setupApplicationStub) BareState(context.Context, app.BareStateRequest) (app.BareState, error) {
-	return app.BareState{Screen: app.BareSetup}, nil
+	if stub.bareState.Screen == "" {
+		return app.BareState{Screen: app.BareSetup}, nil
+	}
+	return stub.bareState, nil
 }
 
-func (stub *setupApplicationStub) PreviewSetup(context.Context, app.SetupPreviewRequest) (app.SetupPreview, error) {
+func (stub *setupApplicationStub) StartContainerSystem(context.Context) error {
+	stub.systemStarts++
+	if stub.systemStartErr == nil {
+		stub.bareState.ContainerSystem.State = runtime.SystemStateRunning
+	}
+	return stub.systemStartErr
+}
+
+func (stub *setupApplicationStub) PreviewSetup(_ context.Context, request app.SetupPreviewRequest) (app.SetupPreview, error) {
 	stub.previews++
+	stub.setupRequest = request
 	return stub.preview, stub.previewErr
 }
 
@@ -84,6 +105,346 @@ func TestSetupCancelDoesNotCallApplicationCommand(t *testing.T) {
 	}
 }
 
+func TestSetupRejectsBlankCustomImage(t *testing.T) {
+	if err := validateCustomImage(" \t"); err == nil || !strings.Contains(err.Error(), "digest-pinned") {
+		t.Fatalf("blank custom image validation = %v", err)
+	}
+}
+
+func TestSetupOmitsUnavailableImageOptions(t *testing.T) {
+	preview := app.SetupPreview{
+		Config: config.ConfigDocument{SchemaVersion: 1},
+		ImageOptions: []app.SetupImageOption{
+			{ID: "standard", Name: "DSX Standard", Available: false},
+			{ID: "custom", Name: "Use another image", Available: true},
+		},
+		SelectedImageOption: "custom",
+	}
+	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
+	if len(model.imageOptions) != 1 || model.imageOptions[0].ID != "custom" {
+		t.Fatalf("image options = %#v, want only custom", model.imageOptions)
+	}
+	if model.imageChoice != "custom" {
+		t.Fatalf("selected image option = %q, want custom", model.imageChoice)
+	}
+}
+
+func TestSetupFormShowsConciseImageAndSupportedAgentChoices(t *testing.T) {
+	preview := app.SetupPreview{
+		Config: config.ConfigDocument{
+			SchemaVersion: 1,
+			Agents:        config.AgentConfig{Default: "codex", Allowed: []string{"codex"}},
+		},
+		ImageOptions: []app.SetupImageOption{
+			{
+				ID:          "standard",
+				Name:        "DSX Standard — Ubuntu (Recommended)",
+				Description: "Built locally on first use with Codex, Claude, OMP, and OpenCode",
+				Available:   true,
+				Image:       config.ImageConfig{Standard: true},
+			},
+			{ID: "custom", Name: "Use another image — Advanced", Available: true},
+		},
+		SelectedImageOption: "standard",
+	}
+	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
+	model.form.Init()
+	imageView := ansi.Strip(model.form.View())
+	for _, expected := range []string{"DSX Standard — Ubuntu (Recommended)", "Use another image — Advanced"} {
+		if !strings.Contains(imageView, expected) {
+			t.Fatalf("image choices omitted %q:\n%s", expected, imageView)
+		}
+	}
+	for _, unwanted := range []string{"Choose a starting environment", "Built locally on first use"} {
+		if strings.Contains(imageView, unwanted) {
+			t.Fatalf("image choices retained redundant copy %q:\n%s", unwanted, imageView)
+		}
+	}
+
+	model.form.NextGroup()
+	agentView := ansi.Strip(model.form.View())
+	for _, expected := range []string{"Codex", "Claude Code", "OMP", "OpenCode"} {
+		if !strings.Contains(agentView, expected) {
+			t.Fatalf("coding assistant choices omitted %q:\n%s", expected, agentView)
+		}
+	}
+	if strings.Contains(agentView, "OpenCode  Let this workspace") {
+		t.Fatalf("internet question ran into the final coding assistant option:\n%s", agentView)
+	}
+	for _, line := range strings.Split(agentView, "\n") {
+		if strings.Contains(line, "Allow") && strings.Contains(line, "Keep offline") {
+			if strings.Index(line, "Allow") > 4 {
+				t.Fatalf("internet choices are centered instead of form-aligned: %q", line)
+			}
+			return
+		}
+	}
+	t.Fatalf("internet choices were not rendered together:\n%s", agentView)
+}
+
+func TestSetupShowsManagedStandardBuildProgressAfterConfirmation(t *testing.T) {
+	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", app.SetupPreview{
+		Plan: plan.ExecutionPlan{Image: plan.ResolvedImage{Standard: true}},
+	}, false)
+	model.stage = setupSaving
+	model.confirming = true
+	view := ansi.Strip(model.View().Content)
+	if !strings.Contains(view, "Building DSX Standard") || !strings.Contains(view, "building and verifying") {
+		t.Fatalf("managed standard progress view:\n%s", view)
+	}
+	model.stage = setupPreview
+	model.reviewPage = model.reviewPageCount() - 1
+	confirmation := ansi.Strip(model.renderReviewPage())
+	if normalized := strings.Join(strings.Fields(confirmation), " "); !strings.Contains(normalized, "build DSX Standard") {
+		t.Fatalf("managed standard confirmation view: %q", confirmation)
+	}
+}
+
+func TestSetupAppliesSelectedDetectedImage(t *testing.T) {
+	detected := config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: "Dockerfile"}}
+	preview := app.SetupPreview{
+		Config: config.ConfigDocument{SchemaVersion: 1},
+		ImageOptions: []app.SetupImageOption{
+			{ID: "standard", Name: "DSX Standard", Available: true, Image: config.ImageConfig{Ref: "example@sha256:" + strings.Repeat("a", 64)}},
+			{ID: "dockerfile:Dockerfile", Name: "Project build", Available: true, Image: detected},
+			{ID: "custom", Name: "Custom", Available: true},
+		},
+		SelectedImageOption: "standard",
+	}
+	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
+	model.imageChoice = "dockerfile:Dockerfile"
+	model.applyForm()
+	if model.document.Image.Build == nil ||
+		model.document.Image.Build.Context != detected.Build.Context ||
+		model.document.Image.Build.File != detected.Build.File ||
+		model.document.Image.Ref != "" {
+		t.Fatalf("selected image = %#v", model.document.Image)
+	}
+}
+
+func TestSetupAllowsSelectedSupportedAgent(t *testing.T) {
+	preview := app.SetupPreview{
+		Config: config.ConfigDocument{
+			SchemaVersion: 1,
+			Agents:        config.AgentConfig{Default: "codex", Allowed: []string{"codex"}},
+		},
+	}
+	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
+	model.agent = "claude"
+	model.applyForm()
+	if model.document.Agents.Default != "claude" || !slices.Contains(model.document.Agents.Allowed, "claude") {
+		t.Fatalf("selected agent configuration = %#v", model.document.Agents)
+	}
+}
+
+func TestSetupResourceScreenDefaultsAndAppliesSelections(t *testing.T) {
+	application := &setupApplicationStub{}
+	model := NewSetupModel(context.Background(), application, "/tmp/project", app.SetupPreview{
+		Config: config.ConfigDocument{SchemaVersion: 1},
+	}, false)
+	if model.cpus != 4 || model.memory != "6GiB" {
+		t.Fatalf("resource defaults = %d CPU, %q memory", model.cpus, model.memory)
+	}
+	model.form.Init()
+	model.form.NextGroup()
+	model.form.NextGroup()
+	resourceView := ansi.Strip(model.form.View())
+	for _, expected := range []string{
+		"CPU allocation", "4 CPUs (Recommended)", "Memory allocation", "6GiB (Recommended)",
+	} {
+		if !strings.Contains(resourceView, expected) {
+			t.Fatalf("resource screen omitted %q:\n%s", expected, resourceView)
+		}
+	}
+
+	model.cpus = 8
+	model.memory = "12GiB"
+	model.applyForm()
+	if model.document.Resources.CPUs != 8 || model.document.Resources.Memory != "12GiB" {
+		t.Fatalf("selected resources = %#v", model.document.Resources)
+	}
+	message := model.previewCommand()()
+	if _, ok := message.(previewMessage); !ok ||
+		application.setupRequest.Config.Resources.CPUs != 8 ||
+		application.setupRequest.Config.Resources.Memory != "12GiB" {
+		t.Fatalf("resource preview request = %#v, message = %#v", application.setupRequest, message)
+	}
+}
+
+func TestSetupReviewBackReturnsToEnvironmentWithSelections(t *testing.T) {
+	preview := app.SetupPreview{
+		Config: config.ConfigDocument{
+			SchemaVersion: 1,
+			Agents:        config.AgentConfig{Default: "omp", Allowed: []string{"omp"}},
+			Resources:     config.ResourceLimits{CPUs: 8, Memory: "12GiB"},
+		},
+		ImageOptions: []app.SetupImageOption{
+			{ID: "standard", Name: "DSX Standard — Ubuntu (Recommended)", Available: true, Image: config.ImageConfig{Standard: true}},
+			{ID: "custom", Name: "Use another image", Available: true},
+		},
+		SelectedImageOption: "standard",
+	}
+	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
+	model.stage = setupPreview
+	model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	review := ansi.Strip(model.View().Content)
+	if !strings.Contains(review, "[b] back to environment") {
+		t.Fatalf("review omitted environment back action:\n%s", review)
+	}
+
+	updated, command := model.Update(tea.KeyPressMsg(tea.Key{Text: "b", Code: 'b'}))
+	model = updated.(*SetupModel)
+	if command == nil || model.stage != setupForm {
+		t.Fatalf("back result: stage=%d command=%v", model.stage, command)
+	}
+	environment := ansi.Strip(model.form.View())
+	if !strings.Contains(environment, "DSX Standard — Ubuntu (Recommended)") {
+		t.Fatalf("back did not return to environment screen:\n%s", environment)
+	}
+	if model.agent != "omp" || model.cpus != 8 || model.memory != "12GiB" {
+		t.Fatalf("back lost selections: agent=%q resources=%d/%q", model.agent, model.cpus, model.memory)
+	}
+}
+func TestCompleteReviewUsesReadableCardsWithoutRawJSON(t *testing.T) {
+	internet := true
+	hostPort := uint16(8080)
+	preview := app.SetupPreview{
+		Facts: app.ProjectFacts{
+			CanonicalRoot: "/tmp/project",
+			GitRoots:      []app.DetectedPath{{Path: ".", Kind: "git"}},
+			Lockfiles:     []app.DetectedPath{{Path: "package-lock.json", Kind: "javascript"}},
+			Dockerfiles:   []app.DetectedPath{{Path: "Dockerfile", Kind: "container"}},
+		},
+		Config:               config.ConfigDocument{Network: config.NetworkConfig{Internet: &internet}},
+		SelectedCapabilities: []string{"workspace", "commands", "credentials", "network", "ports"},
+		RenderedConfig:       []byte(`{"raw-json-must-not-render":true}`),
+		ConfigContentDigest:  "config-digest",
+		ProjectState:         "project-state",
+		Hash:                 "approved-hash",
+		Plan: plan.ExecutionPlan{
+			ContractVersion: plan.ContractVersion,
+			Project:         plan.ProjectIdentity{ID: model.ProjectID("project-id"), CanonicalRoot: "/tmp/project"},
+			Sandbox:         plan.SandboxIdentity{Name: model.SandboxName("main"), RunID: model.RunID("run-id")},
+			Mode:            model.ModeLive,
+			Agent:           "codex",
+			Image: plan.ResolvedImage{
+				Context: ".", File: "Dockerfile", Target: "development", InputDigest: "image-input",
+				BuildArgs: []plan.KeyValue{{Key: "FEATURE", Value: "enabled"}},
+			},
+			Repositories: []plan.RepositoryPlan{{Name: "main", HostPath: "/tmp/project", GuestPath: "/workspace/main", SourceRef: "refs/heads/main", SourceCommit: "commit", TrackedDigest: "tracked"}},
+			Setup: []plan.ResolvedCommand{{
+				Argv: []string{"npm", "install"}, Cwd: "/workspace/main",
+				Env: []plan.EnvGrant{{Name: "NPM_TOKEN", Reference: "secret://npm", Secret: true}},
+			}},
+			Processes: []plan.ResolvedProcess{{
+				Name: "web", Command: plan.ResolvedCommand{Argv: []string{"npm", "run", "dev"}, Cwd: "/workspace/main"},
+				Required: true, Health: &plan.ResolvedHealth{
+					Kind: "command", Command: &plan.ResolvedCommand{Argv: []string{"healthcheck"}},
+					IntervalMS: 1000, TimeoutMS: 500, Retries: 3,
+				},
+			}},
+			Mounts:  []plan.ResolvedMount{{SourceType: "host", Source: "/tmp/project", SourceIdentity: "project-id", Target: "/workspace/main", ReadOnly: false}},
+			Volumes: []plan.ResolvedVolume{{Name: "cache", Target: "/cache", Scope: "project", Persistent: true}},
+			Auth:    []plan.ResolvedAuthGrant{{Harness: "codex", Profile: "default", Persistence: "global"}},
+			Ports: []plan.PortRequest{{
+				Name: "web", GuestPort: 3000, Protocol: "tcp", HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: &hostPort,
+			}},
+			Browser: &plan.BrowserPlan{Enabled: true, ImageReference: "browser@example", ImageDigest: "browser-digest"},
+			Bridges: []plan.BridgeGrant{{Kind: "tcp", Name: "database", Destination: "db.internal", Port: 5432, ReadOnly: true}},
+			Limits:  plan.ResourceLimits{CPUs: 2, MemoryBytes: 2 << 30, MaxConcurrentClones: 1},
+			Ownership: plan.OwnershipPlan{
+				ResourceName: "owned-resource",
+				Labels:       []plan.KeyValue{{Key: "project", Value: "project-id"}},
+			},
+			Provenance: map[string]config.SourceRef{"agent": {Kind: "config", Path: ".dsx/config.jsonc", Line: 12}},
+		},
+	}
+	review, err := buildCompleteReview(preview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"WORKSPACE", "Where DSX will run", "DETECTED PROJECT", "package-lock.json",
+		"ACCESS & ISOLATION", "Credentials codex/default", "db.internal:5432", "127.0.0.1:8080",
+		"COMMANDS & SERVICES", `"npm" "install"`, "NPM_TOKEN = secret reference secret://npm", "healthcheck",
+		"FILES & PERSISTENCE", "refs/heads/main", "cache → /cache", "APPROVAL",
+		"owned-resource", "Source agent ← config .dsx/config.jsonc:12", "approved-hash",
+		"development", "FEATURE=enabled", "browser@example", "browser-digest",
+	} {
+		if !strings.Contains(review, expected) {
+			t.Fatalf("readable review omitted %q:\n%s", expected, review)
+		}
+	}
+	for _, raw := range []string{`"raw-json-must-not-render"`, `"canonical_root"`, `"contract_version"`} {
+		if strings.Contains(review, raw) {
+			t.Fatalf("readable review exposed raw JSON field %q:\n%s", raw, review)
+		}
+	}
+}
+
+func TestReviewSectionsUseSeparateColoredViews(t *testing.T) {
+	review := strings.Join([]string{
+		"WORKSPACE\nWhere DSX will run.\n  Project: /tmp/project\n  Internet: Allowed",
+		"DETECTED PROJECT\nWhat DSX found without running code.\n  Diagnostics: 1\n  • warning — unsupported field",
+	}, "\n\n")
+	pages := reviewSectionPages(review, 100, 40)
+	if len(pages) != 2 || pages[0].title != "WORKSPACE" || pages[1].title != "DETECTED PROJECT" {
+		t.Fatalf("section pages = %#v", pages)
+	}
+
+	theme := newVisualTheme(true)
+	workspace := renderReviewSectionPage(pages[0], theme)
+	detected := renderReviewSectionPage(pages[1], theme)
+	if strings.Contains(ansi.Strip(workspace), "DETECTED PROJECT") || strings.Contains(ansi.Strip(detected), "Where DSX will run") {
+		t.Fatalf("review sections shared a view:\nworkspace=%q\ndetected=%q", workspace, detected)
+	}
+	for _, styled := range []string{
+		theme.section.Render("WORKSPACE"),
+		theme.label.Render("Project:"),
+		theme.value.Render("/tmp/project"),
+		theme.success.Render("Allowed"),
+		theme.warning.Render("warning — unsupported field"),
+	} {
+		if !strings.Contains(workspace+detected, styled) {
+			t.Fatalf("colored review omitted styled element %q", styled)
+		}
+	}
+	if !strings.Contains(workspace+detected, "\x1b[") {
+		t.Fatal("colored review emitted no ANSI styling")
+	}
+}
+
+func TestLongReviewSectionContinuesWithoutMixingNextSection(t *testing.T) {
+	details := make([]string, 18)
+	for index := range details {
+		details[index] = fmt.Sprintf("  • detected-%02d", index)
+	}
+	review := "DETECTED PROJECT\nWhat DSX found.\n" + strings.Join(details, "\n") +
+		"\n\nAPPROVAL\nExact identity and hashes.\n  Executable hash: approved"
+	pages := reviewSectionPages(review, 80, 25)
+	if len(pages) < 3 {
+		t.Fatalf("long section pages = %d, want continuation pages", len(pages))
+	}
+	approvalSeen := false
+	for _, page := range pages {
+		if page.title == "APPROVAL" {
+			approvalSeen = true
+			continue
+		}
+		if approvalSeen || page.title != "DETECTED PROJECT" || page.parts < 2 {
+			t.Fatalf("mixed or unordered section page: %#v", page)
+		}
+		for _, line := range page.lines {
+			if strings.Contains(line, "APPROVAL") {
+				t.Fatalf("approval leaked into detected-project view: %#v", page)
+			}
+		}
+	}
+	if !approvalSeen {
+		t.Fatal("approval section was lost after continuation pages")
+	}
+}
+
 func TestSetupFinalConfirmationCallsApplicationCommandOnce(t *testing.T) {
 	application := &setupApplicationStub{}
 	preview := app.SetupPreview{Hash: strings.Repeat("a", 64), ConfigContentDigest: strings.Repeat("b", 64), ProjectState: strings.Repeat("c", 64), RenderedConfig: []byte("{}\n")}
@@ -113,152 +474,189 @@ func TestSetupFinalConfirmationCallsApplicationCommandOnce(t *testing.T) {
 	}
 }
 
-func TestLauncherAndDashboardExposeIntentsWithoutSuccess(t *testing.T) {
-	state := app.BareState{Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true, OwnedResources: 1}
-	for name, model := range map[string]*ActionModel{"launcher": NewLauncherModel(state), "dashboard": NewDashboardModel(state)} {
-		t.Run(name, func(t *testing.T) {
-			updated, command := model.Update(tea.KeyPressMsg(tea.Key{Text: "a", Code: 'a'}))
-			if command == nil {
-				t.Fatal("attach did not exit with an intent")
+func TestProjectScreenExplainsRuntimeAndWorkspaceState(t *testing.T) {
+	tests := []struct {
+		name       string
+		state      app.BareState
+		sandboxes  []app.SandboxSummary
+		expected   []string
+		unexpected []string
+	}{
+		{
+			name: "stopped runtime without workspace",
+			state: app.BareState{
+				Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
+				ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateStopped},
+			},
+			expected:   []string{"Container system", "Stopped", "Workspace", "Not created", "Start container system"},
+			unexpected: []string{"attach", "git status", "managed resources"},
+		},
+		{
+			name: "running runtime without workspace",
+			state: app.BareState{
+				Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
+				ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+			},
+			expected:   []string{"Container system", "Running", "No workspace exists for this project yet", "Create & open", "More options"},
+			unexpected: []string{"attach", "stop", "git status", "managed resources"},
+		},
+		{
+			name: "runtime not installed",
+			state: app.BareState{
+				Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
+				ContainerSystem: runtime.SystemStatus{
+					State: runtime.SystemStateNotInstalled, Remediation: "Install Apple Container 1.2.2 to continue.",
+				},
+			},
+			expected:   []string{"Not installed", "Install Apple Container 1.2.2"},
+			unexpected: []string{"Create & open", "More options", "attach"},
+		},
+		{
+			name: "running live workspace",
+			state: app.BareState{
+				Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true, OwnedResources: 1,
+				ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+			},
+			sandboxes: []app.SandboxSummary{{Sandbox: "main", Mode: model.ModeLive, State: model.StateRunning}},
+			expected:  []string{"Workspace", "main — Running", "workspace is ready", "Attach"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := ansi.Strip(NewLauncherModel(test.state, test.sandboxes...).View().Content)
+			for _, expected := range test.expected {
+				if !strings.Contains(got, expected) {
+					t.Fatalf("view missing %q: %q", expected, got)
+				}
 			}
-			intent, ok := updated.(*ActionModel).Intent()
-			if !ok || intent.Action != "attach" || intent.Project != "/tmp/project" {
-				t.Fatalf("intent = %#v, found = %t", intent, ok)
-			}
-			if strings.Contains(updated.(*ActionModel).View().Content, "success") {
-				t.Fatal("action model rendered fake success")
+			for _, unexpected := range test.unexpected {
+				if strings.Contains(strings.ToLower(got), strings.ToLower(unexpected)) {
+					t.Fatalf("view unexpectedly contains %q: %q", unexpected, got)
+				}
 			}
 		})
 	}
 }
 
-func TestConfiguredLauncherCanSelectNamedCloneCreation(t *testing.T) {
-	state := app.BareState{Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true}
-	updated, command := NewLauncherModel(state).Update(tea.KeyPressMsg(tea.Key{Text: "n", Code: 'n'}))
-	if command == nil {
-		t.Fatal("named clone creation did not exit with an intent")
-	}
-	intent, found := updated.(*ActionModel).Intent()
-	want := Intent{Action: "new-clone", Project: "/tmp/project"}
-	if !found || intent != want {
-		t.Fatalf("intent = %#v, found = %t, want %#v", intent, found, want)
-	}
-	if !strings.Contains(NewLauncherModel(state).View().Content, "[n] new clone") {
-		t.Fatal("launcher omitted named clone action")
-	}
-}
-
-func TestDashboardGitStatusSelectsExactNamedClone(t *testing.T) {
-	state := app.BareState{Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true, OwnedResources: 3}
-	action := NewDashboardModel(state,
-		app.SandboxSummary{Sandbox: "z-task", Mode: model.ModeClone, State: model.StateStopped},
-		app.SandboxSummary{Sandbox: "main", Mode: model.ModeLive, State: model.StateRunning},
-		app.SandboxSummary{Sandbox: "api-task", Mode: model.ModeClone, State: model.StateRunning},
-	)
-	updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: "g", Code: 'g'}))
-	if command == nil {
-		t.Fatal("git status did not quit with an intent")
-	}
-	intent, found := updated.(*ActionModel).Intent()
-	want := Intent{Action: "git-status", Project: "/tmp/project", Sandbox: "api-task"}
-	if !found || intent != want {
-		t.Fatalf("git status intent = %#v, found = %t, want %#v", intent, found, want)
-	}
-
-	action = NewDashboardModel(state,
-		app.SandboxSummary{Sandbox: "z-task", Mode: model.ModeClone},
-		app.SandboxSummary{Sandbox: "api-task", Mode: model.ModeClone},
-	)
-	updated, _ = action.Update(tea.KeyPressMsg(tea.Key{Text: "j", Code: 'j'}))
-	updated, _ = updated.(*ActionModel).Update(tea.KeyPressMsg(tea.Key{Text: "g", Code: 'g'}))
-	intent, found = updated.(*ActionModel).Intent()
-	if !found || intent.Sandbox != "z-task" {
-		t.Fatalf("selected git status intent = %#v, found = %t", intent, found)
-	}
-}
-
-func TestDashboardGitDiffAndFetchSelectExactNamedClone(t *testing.T) {
-	state := app.BareState{Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true, OwnedResources: 2}
-	for _, test := range []struct {
-		key string
-
-		action string
+func TestProjectPrimaryActionMatchesCurrentState(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   runtime.SystemState
+		sandbox *app.SandboxSummary
+		action  string
+		label   string
 	}{
-		{key: "v", action: "git-diff"},
-		{key: "f", action: "git-fetch"},
-	} {
-		t.Run(test.action, func(t *testing.T) {
-			action := NewDashboardModel(state, app.SandboxSummary{Sandbox: "review", Mode: model.ModeClone})
-			updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: test.key, Code: rune(test.key[0])}))
+		{name: "start container", state: runtime.SystemStateStopped, action: "start-container-system", label: "Start container system"},
+		{name: "create workspace", state: runtime.SystemStateRunning, action: "create", label: "Create & open"},
+		{name: "attach running", state: runtime.SystemStateRunning, sandbox: &app.SandboxSummary{Sandbox: "main", Mode: model.ModeLive, State: model.StateRunning}, action: "attach", label: "Attach"},
+		{name: "start stopped", state: runtime.SystemStateRunning, sandbox: &app.SandboxSummary{Sandbox: "main", Mode: model.ModeLive, State: model.StateStopped}, action: "start", label: "Start & open"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := app.BareState{
+				Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
+				ContainerSystem: runtime.SystemStatus{State: test.state},
+			}
+			var sandboxes []app.SandboxSummary
+			if test.sandbox != nil {
+				state.OwnedResources = 1
+				sandboxes = append(sandboxes, *test.sandbox)
+			}
+			action := NewLauncherModel(state, sandboxes...)
+			if gotAction, gotLabel := action.primaryAction(); gotAction != test.action || gotLabel != test.label {
+				t.Fatalf("primaryAction() = %q, %q; want %q, %q", gotAction, gotLabel, test.action, test.label)
+			}
+			updated, command := action.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 			if command == nil {
-				t.Fatalf("%s did not quit with an intent", test.action)
+				t.Fatal("primary action did not exit with an intent")
 			}
 			intent, found := updated.(*ActionModel).Intent()
-			want := Intent{Action: test.action, Project: "/tmp/project", Sandbox: "review"}
-			if !found || intent != want {
-				t.Fatalf("intent = %#v, found = %t, want %#v", intent, found, want)
+			if !found || intent.Action != test.action || intent.Project != "/tmp/project" {
+				t.Fatalf("intent = %#v, found = %t, want action %q", intent, found, test.action)
 			}
 		})
 	}
 }
-func TestDashboardStopSelectsExactNamedClone(t *testing.T) {
-	state := app.BareState{Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true, OwnedResources: 2}
+
+func TestProjectScreenIgnoresHiddenActionShortcuts(t *testing.T) {
+	state := app.BareState{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
+		ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+	}
+	for _, key := range []string{"a", "s", "x", "d", "g", "v", "f", "n"} {
+		action := NewLauncherModel(state)
+		updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: key, Code: rune(key[0])}))
+		if command != nil {
+			t.Fatalf("hidden key %q exited", key)
+		}
+		if _, found := updated.(*ActionModel).Intent(); found {
+			t.Fatalf("hidden key %q created an intent", key)
+		}
+	}
+}
+
+func TestProjectMoreOptionsShowsOnlyApplicableActions(t *testing.T) {
+	state := app.BareState{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
+		ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+	}
+	action := NewLauncherModel(state)
+	updated, _ := action.Update(tea.KeyPressMsg(tea.Key{Text: "m", Code: 'm'}))
+	action = updated.(*ActionModel)
+	view := ansi.Strip(action.View().Content)
+	if !strings.Contains(view, "Create isolated clone") || strings.Contains(view, "Stop selected workspace") || strings.Contains(view, "Git status") || strings.Contains(view, "Clean DSX resources") {
+		t.Fatalf("empty-project options = %q", view)
+	}
+	updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: "n", Code: 'n'}))
+	intent, found := updated.(*ActionModel).Intent()
+	if command == nil || !found || intent.Action != "new-clone" {
+		t.Fatalf("new clone intent = %#v, found=%t, command=%v", intent, found, command)
+	}
+}
+
+func TestProjectManageActionsTargetSelectedWorkspace(t *testing.T) {
+	state := app.BareState{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true, OwnedResources: 2,
+		ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+	}
 	action := NewDashboardModel(state,
 		app.SandboxSummary{Sandbox: "z-task", Mode: model.ModeClone, State: model.StateRunning},
 		app.SandboxSummary{Sandbox: "api-task", Mode: model.ModeClone, State: model.StateRunning},
 	)
-	updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: "x", Code: 'x'}))
-	if command == nil {
-		t.Fatal("stop did not quit with an intent")
-	}
-	intent, found := updated.(*ActionModel).Intent()
-	want := Intent{Action: "stop", Project: "/tmp/project", Sandbox: "api-task"}
-	if !found || intent != want {
-		t.Fatalf("intent = %#v, found = %t, want %#v", intent, found, want)
-	}
-}
-
-func TestDashboardGitStatusRejectsLiveOrMissingSelection(t *testing.T) {
-	hostile := model.SandboxName("task\x1b]52;c;Y2xpcA==\a\u202e")
-	action := NewDashboardModel(
-		app.BareState{Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}},
-		app.SandboxSummary{Sandbox: "main", Mode: model.ModeLive},
-		app.SandboxSummary{Sandbox: hostile, Mode: model.ModeClone},
-	)
-	updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: "g", Code: 'g'}))
+	updated, _ := action.Update(tea.KeyPressMsg(tea.Key{Text: "m", Code: 'm'}))
 	action = updated.(*ActionModel)
-	if command != nil {
-		t.Fatal("git status quit without a named clone selection")
+	updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: "g", Code: 'g'}))
+	intent, found := updated.(*ActionModel).Intent()
+	if command == nil || !found || intent != (Intent{Action: "git-status", Project: "/tmp/project", Sandbox: "api-task"}) {
+		t.Fatalf("git intent = %#v, found=%t", intent, found)
 	}
-	if _, found := action.Intent(); found {
-		t.Fatal("git status intent existed without a named clone selection")
+
+	action = NewDashboardModel(state, app.SandboxSummary{Sandbox: "api-task", Mode: model.ModeClone, State: model.StateRunning})
+	updated, _ = action.Update(tea.KeyPressMsg(tea.Key{Text: "m", Code: 'm'}))
+	updated, command = updated.(*ActionModel).Update(tea.KeyPressMsg(tea.Key{Text: "x", Code: 'x'}))
+	intent, found = updated.(*ActionModel).Intent()
+	if command == nil || !found || intent != (Intent{Action: "stop", Project: "/tmp/project", Sandbox: "api-task"}) {
+		t.Fatalf("stop intent = %#v, found=%t", intent, found)
 	}
-	if !strings.Contains(action.View().Content, "Git status unavailable") {
-		t.Fatalf("missing-selection view = %q", action.View().Content)
-	}
-	assertTerminalSafe(t, action.View().Content)
 }
 
-func TestDashboardCleanRequiresExplicitConfirmation(t *testing.T) {
-	model := NewDashboardModel(app.BareState{Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true, OwnedResources: 2})
-	updated, command := model.Update(tea.KeyPressMsg(tea.Key{Text: "d", Code: 'd'}))
-	model = updated.(*ActionModel)
-	if command != nil {
-		t.Fatal("clean key quit before confirmation")
+func TestProjectCleanRequiresManageViewAndConfirmation(t *testing.T) {
+	state := app.BareState{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true, OwnedResources: 2,
+		ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
 	}
-	if _, found := model.Intent(); found {
-		t.Fatal("clean intent existed before confirmation")
+	action := NewDashboardModel(state)
+	updated, _ := action.Update(tea.KeyPressMsg(tea.Key{Text: "m", Code: 'm'}))
+	action = updated.(*ActionModel)
+	updated, command := action.Update(tea.KeyPressMsg(tea.Key{Text: "d", Code: 'd'}))
+	action = updated.(*ActionModel)
+	if command != nil || !strings.Contains(ansi.Strip(action.View().Content), "Confirm cleanup") {
+		t.Fatalf("cleanup confirmation view = %q", action.View().Content)
 	}
-	if !strings.Contains(model.View().Content, "confirm cleanup") {
-		t.Fatalf("confirmation view = %q", model.View().Content)
-	}
-	updated, command = model.Update(tea.KeyPressMsg(tea.Key{Text: "y", Code: 'y'}))
-	if command == nil {
-		t.Fatal("confirmed clean did not quit with an intent")
-	}
+	updated, command = action.Update(tea.KeyPressMsg(tea.Key{Text: "y", Code: 'y'}))
 	intent, found := updated.(*ActionModel).Intent()
-	if !found || intent.Action != "clean" || intent.Project != "/tmp/project" {
-		t.Fatalf("clean intent = %#v, found = %t", intent, found)
+	if command == nil || !found || intent.Action != "clean" {
+		t.Fatalf("clean intent = %#v, found=%t", intent, found)
 	}
 }
 
@@ -271,7 +669,7 @@ func TestSanitizeAllDynamicTUIFields(t *testing.T) {
 		Hash:                 hostile,
 	}
 	preview.Config.Image.Ref = hostile
-	preview.Config.Agents.Default = hostile
+	preview.Config.Agents.Default = "codex"
 	model := NewSetupModel(context.Background(), &setupApplicationStub{}, hostile, preview, false)
 	for _, forbidden := range []string{"\x1b[2J", "\x1b]0", "\a", "\u202e"} {
 		if strings.Contains(model.form.View(), forbidden) {
@@ -295,9 +693,14 @@ func TestSanitizeAllDynamicTUIFields(t *testing.T) {
 	model.result = app.InitializeResult{ConfigPath: hostile, Hash: hostile}
 	assertTerminalSafe(t, model.View().Content)
 
-	action := NewLauncherModel(app.BareState{Facts: app.ProjectFacts{CanonicalRoot: hostile}})
+	action := NewLauncherModel(app.BareState{
+		Facts: app.ProjectFacts{CanonicalRoot: hostile}, ConfigExists: true,
+		ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+	})
 	assertTerminalSafe(t, action.View().Content)
-	if intentModel, _ := action.Update(tea.KeyPressMsg(tea.Key{Text: "a", Code: 'a'})); intentModel.(*ActionModel).intent.Project != hostile {
+	intentModel, _ := action.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	intent, found := intentModel.(*ActionModel).Intent()
+	if !found || intent.Project != hostile {
 		t.Fatal("display sanitization corrupted the functional project intent")
 	}
 }
@@ -315,26 +718,40 @@ func TestResizeNarrowLayoutsRetainConfirmationAndControls(t *testing.T) {
 			model.stage = setupPreview
 			updated, _ := model.Update(tea.WindowSizeMsg{Width: width, Height: 24})
 			model = updated.(*SetupModel)
-			content := model.View().Content
+			content := ansi.Strip(model.View().Content)
 			assertLinesFit(t, content, width)
-			if !strings.Contains(content, "Review page 1/") || !strings.Contains(content, "Approval is locked") {
-				t.Fatalf("width %d lost paged review position and controls: %q", width, content)
+			normalized := strings.Join(strings.Fields(content), " ")
+			if !strings.Contains(content, "REVIEW") || !strings.Contains(content, "More") || !strings.Contains(content, "below") {
+				t.Fatalf("width %d lost paginator direction: %q", width, content)
+			}
+			if width >= 40 && (!strings.Contains(normalized, "REVIEW 1 /") || !strings.Contains(normalized, "Approval locked")) {
+				t.Fatalf("width %d lost paginator position or approval status: %q", width, content)
+			}
+			if width >= 80 && strings.Count(content, "\n")+1 > 24 {
+				t.Fatalf("width %d review exceeds terminal height: %d lines\n%s", width, strings.Count(content, "\n")+1, content)
 			}
 			for model.reviewPage+1 < model.reviewPageCount() {
 				updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyPgDown}))
 				model = updated.(*SetupModel)
 			}
-			content = model.View().Content
+			content = ansi.Strip(model.View().Content)
 			assertLinesFit(t, content, width)
 			if !strings.Contains(content, "Final confirmation:") || !strings.Contains(content, "[y/N]") {
 				t.Fatalf("width %d lost final confirmation: %q", width, content)
 			}
 
-			action := NewDashboardModel(app.BareState{Facts: preview.Facts})
+			action := NewDashboardModel(app.BareState{
+				Facts: preview.Facts, ConfigExists: true,
+				ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+			})
 			updatedAction, _ := action.Update(tea.WindowSizeMsg{Width: width, Height: 24})
-			actionContent := updatedAction.(*ActionModel).View().Content
+			actionContent := ansi.Strip(updatedAction.(*ActionModel).View().Content)
 			assertLinesFit(t, actionContent, width)
-			for _, control := range []string{"[c] new clone", "[d] clean", "[q] quit"} {
+			controls := []string{"[Enter]", "[m]", "[q]"}
+			if width >= 40 {
+				controls = []string{"[Enter] Create & open", "[m] More options", "[q] Quit"}
+			}
+			for _, control := range controls {
 				if !strings.Contains(actionContent, control) {
 					t.Fatalf("width %d lost %q: %q", width, control, actionContent)
 				}
@@ -343,10 +760,65 @@ func TestResizeNarrowLayoutsRetainConfirmationAndControls(t *testing.T) {
 	}
 }
 
+func TestWideLayoutsCenterSharedChromeAndFooters(t *testing.T) {
+	const width = 120
+	leading := func(t *testing.T, content, fragment string) int {
+		t.Helper()
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, fragment) {
+				return len(line) - len(strings.TrimLeft(line, " "))
+			}
+		}
+		t.Fatalf("missing %q in layout:\n%s", fragment, content)
+		return -1
+	}
+
+	setup := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", app.SetupPreview{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"},
+		Hash:  strings.Repeat("a", 64),
+	}, false)
+	setup.color = false
+	setup.stage = setupPreview
+	updated, _ := setup.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+	setup = updated.(*SetupModel)
+	review := ansi.Strip(setup.View().Content)
+	assertLinesFit(t, review, width)
+	if got := leading(t, review, "╭"); got != 4 {
+		t.Fatalf("review panel left padding = %d, want 4:\n%s", got, review)
+	}
+	if got := leading(t, review, "DSX"); got < 4 {
+		t.Fatalf("review header was outside centered column: %d", got)
+	}
+	if got := leading(t, review, "Environment"); got <= 4 {
+		t.Fatalf("stepper was not centered over the panel: %d", got)
+	}
+	if got := leading(t, review, "Approval locked"); got <= 4 {
+		t.Fatalf("review footer was not centered under the panel: %d", got)
+	}
+
+	dashboard := NewDashboardModel(app.BareState{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project"}, ConfigExists: true,
+		ContainerSystem: runtime.SystemStatus{State: runtime.SystemStateRunning},
+	})
+	updatedDashboard, _ := dashboard.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+	dashboardView := ansi.Strip(updatedDashboard.(*ActionModel).View().Content)
+	assertLinesFit(t, dashboardView, width)
+	if got := leading(t, dashboardView, "╭"); got != 4 {
+		t.Fatalf("dashboard panel left padding = %d, want 4:\n%s", got, dashboardView)
+	}
+	if got := leading(t, dashboardView, "[Enter] Create & open"); got != 4 {
+		t.Fatalf("project controls left padding = %d, want shared panel padding 4", got)
+	}
+}
+
 func TestAccessibleSetupUsesPlainPromptsAndSanitizedReview(t *testing.T) {
 	hostile := "/tmp/project\x1b]52;c;Y2xpcA==\a\u202e"
 	preview := app.SetupPreview{
-		Facts:               app.ProjectFacts{CanonicalRoot: hostile},
+		Facts: app.ProjectFacts{CanonicalRoot: hostile},
+		Config: config.ConfigDocument{
+			SchemaVersion: 1,
+			Image:         config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: "Dockerfile"}},
+		},
 		RenderedConfig:      []byte("{}\n"),
 		Hash:                strings.Repeat("a", 64),
 		ConfigContentDigest: strings.Repeat("b", 64),
@@ -361,7 +833,7 @@ func TestAccessibleSetupUsesPlainPromptsAndSanitizedReview(t *testing.T) {
 	var output bytes.Buffer
 	runner := &Runner{
 		Application: application,
-		Input:       strings.NewReader("\n\n\n" + strings.Repeat("\n", pageCount-1) + "y\n"),
+		Input:       strings.NewReader("1\n\n\n\n\n" + strings.Repeat("\n", pageCount-1) + "y\n"),
 		Output:      &output,
 	}
 	_, found, err := runner.Run(context.Background(), RunRequest{Root: hostile, ForceSetup: true, Accessible: true})
@@ -369,11 +841,11 @@ func TestAccessibleSetupUsesPlainPromptsAndSanitizedReview(t *testing.T) {
 		t.Fatalf("accessible Run() error = %v", err)
 	}
 	if found || application.initializes != 1 {
-		t.Fatalf("found = %t, initialize calls = %d", found, application.initializes)
+		t.Fatalf("found = %t, initialize calls = %d, output = %q", found, application.initializes, output.String())
 	}
 	got := output.String()
 	assertTerminalSafe(t, got)
-	for _, expected := range []string{"Pinned image reference", "Default coding agent", "Allow internet access?", "Final confirmation:", "DSX setup complete", `\u001b]52`, `\u0007`, `\u202e`} {
+	for _, expected := range []string{"Configured image", "Coding assistant", "Codex", "Claude Code", "OMP", "OpenCode", "Let this workspace access the internet?", "Final confirmation:", "DSX setup complete", `\x1b]52`, `\a`, `\u202e`} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("accessible output missing %q: %q", expected, got)
 		}
@@ -411,8 +883,8 @@ func TestConfiguredLauncherActionRequiresCompleteAccessibleApproval(t *testing.T
 	if !found || got != intent || application.approvals != 1 || application.initializes != 0 {
 		t.Fatalf("intent = %#v, found = %t, approvals = %d, initializes = %d", got, found, application.approvals, application.initializes)
 	}
-	if !strings.Contains(output.String(), "Complete effective plan") || !strings.Contains(output.String(), "Final confirmation:") {
-		t.Fatalf("approval output omitted complete review: %q", output.String())
+	if !strings.Contains(output.String(), "ACCESS & ISOLATION") || !strings.Contains(output.String(), "Executable hash") || !strings.Contains(output.String(), "Final confirmation:") {
+		t.Fatalf("approval output omitted readable complete review: %q", output.String())
 	}
 }
 
@@ -449,7 +921,7 @@ func TestAccessibleDashboardCloneCreateReturnsReviewedRunIntent(t *testing.T) {
 	if !found || intent != want {
 		t.Fatalf("intent = %#v, found = %t, want %#v, output = %q", intent, found, want, output.String())
 	}
-	if !strings.Contains(output.String(), "Complete effective plan") || !strings.Contains(output.String(), "DSX execution approved") {
+	if !strings.Contains(output.String(), "ACCESS & ISOLATION") || !strings.Contains(output.String(), "Executable hash") || !strings.Contains(output.String(), "DSX execution approved") {
 		t.Fatalf("clone approval output = %q", output.String())
 	}
 }
@@ -525,10 +997,12 @@ func TestCompleteReviewRequiresTailGrantAndRejectsOverBound(t *testing.T) {
 	tailVisible := false
 	for {
 		content := model.View().Content
-		tailVisible = tailVisible || strings.Contains(content, tailGrant)
+		pages := reviewSectionPages(model.review, model.width, model.height)
+		sectionView := renderReviewSectionPage(pages[model.reviewPage], newVisualTheme(model.color))
+		tailVisible = tailVisible || strings.Contains(sectionView, tailGrant)
 		if model.reviewPage+1 == model.reviewPageCount() {
 			if !tailVisible {
-				t.Fatal("reached final confirmation without displaying the tail trust grant")
+				t.Fatal("reached final confirmation without displaying the complete tail trust grant")
 			}
 			if !strings.Contains(content, "Final confirmation:") {
 				t.Fatal("final page did not expose confirmation")
@@ -548,12 +1022,16 @@ func TestCompleteReviewRequiresTailGrantAndRejectsOverBound(t *testing.T) {
 	}
 
 	tooLarge := preview
-	tooLarge.RenderedConfig = []byte(strings.Repeat("z", maxSetupReviewBytes+1))
+	tooLarge.Plan.Bridges = append(tooLarge.Plan.Bridges, plan.BridgeGrant{Name: "oversized", Destination: strings.Repeat("z", maxSetupReviewBytes+1)})
 	refused := NewSetupModel(context.Background(), application, "/tmp/project", tooLarge, false)
 	refused.stage = setupPreview
-	content := refused.View().Content
-	if !strings.Contains(content, "Nothing was truncated") || !strings.Contains(content, "Approval is disabled") || strings.Contains(content, "[y/N]") {
-		t.Fatalf("over-bound review refusal = %q", content)
+	content := ansi.Strip(refused.View().Content)
+	normalized := strings.Join(strings.Fields(content), " ")
+	hasNothing := strings.Contains(normalized, "Nothing") && strings.Contains(normalized, "was truncated")
+	hasDisabled := strings.Contains(normalized, "Approval is disabled")
+	hasConfirmation := strings.Contains(content, "[y/N]")
+	if !hasNothing || !hasDisabled || hasConfirmation {
+		t.Fatalf("over-bound review refusal: nothing=%t disabled=%t confirmation=%t normalized=%q", hasNothing, hasDisabled, hasConfirmation, normalized)
 	}
 	if _, command := refused.Update(tea.KeyPressMsg(tea.Key{Text: "y", Code: 'y'})); command != nil {
 		t.Fatal("over-bound review accepted confirmation")
@@ -571,6 +1049,7 @@ func TestNoColorSetupViewHasNoSGR(t *testing.T) {
 
 func assertTerminalSafe(t *testing.T, value string) {
 	t.Helper()
+	value = ansi.Strip(value)
 	for _, forbidden := range []string{"\x1b", "\a", "\r", "\u202e", "\u2066", "\u2069"} {
 		if strings.Contains(value, forbidden) {
 			t.Fatalf("terminal output contains raw control %q: %q", forbidden, value)
@@ -629,7 +1108,8 @@ func TestHandoffHostileSetupPTYSmoke(t *testing.T) {
 	if strings.Contains(raw, "\x1b]52;c;Y2xpcA==") || strings.Contains(raw, "\u202e") {
 		t.Fatalf("hostile setup executed raw OSC/bidi content: %q", raw)
 	}
-	if !strings.Contains(raw, `\u001b]52;c;Y2xpcA==`) || !strings.Contains(raw, `\u202e`) {
+	escapedOSC := strings.Contains(raw, `\u001b]52;c;Y2xpcA==`) || strings.Contains(raw, `\x1b]52;c;Y2xpcA==`)
+	if !escapedOSC || !strings.Contains(raw, `\u202e`) {
 		t.Fatalf("hostile setup did not visibly escape project name: %q", raw)
 	}
 	enter, leave := strings.Index(raw, "\x1b[?1049h"), strings.LastIndex(raw, "\x1b[?1049l")

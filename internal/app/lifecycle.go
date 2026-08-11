@@ -506,7 +506,13 @@ func (service *LifecycleService) createLive(ctx context.Context, request StartRe
 	var approvedStagedDigest string
 	if approved.Image.Reference == "" {
 		build := config.ImageBuild{Context: approved.Image.Context, File: approved.Image.File}
-		stagedRoot, stagedDigest, err := stageBuildInput(ctx, approved.Project.CanonicalRoot, build)
+		var stagedRoot, stagedDigest string
+		if approved.Image.Standard {
+			build = config.ImageBuild{Context: ".", File: "Containerfile"}
+			stagedRoot, stagedDigest, err = stageStandardImage(ctx, approved.Project.CanonicalRoot)
+		} else {
+			stagedRoot, stagedDigest, err = stageBuildInput(ctx, approved.Project.CanonicalRoot, build)
+		}
 		if err != nil {
 			return false, nil, model.NewError(model.CodeUnapproved, "build input changed while staging", err)
 		}
@@ -1638,6 +1644,42 @@ func plannedLiveManifest(execution plan.ExecutionPlan, runID model.RunID, now ti
 	return manifest, volumeResources, nil
 }
 
+func (service *LifecycleService) PrepareStandardImage(ctx context.Context, execution plan.ExecutionPlan) (returnErr error) {
+	if ctx == nil {
+		return model.NewError(model.CodeInvalidInput, "prepare standard image: context is nil", nil)
+	}
+	if service == nil || service.runtime == nil {
+		return model.NewError(model.CodeInternal, "prepare standard image runtime is unavailable", nil)
+	}
+	if !execution.Image.Standard || execution.Image.InputDigest == "" {
+		return model.NewError(model.CodeInvalidInput, "prepare standard image requires a managed standard plan", nil)
+	}
+	stageRoot, stagedDigest, err := stageStandardImage(ctx, execution.Project.CanonicalRoot)
+	if err != nil {
+		return model.Wrap(model.CodeUnapproved, "stage standard image", err)
+	}
+	defer func() {
+		if cleanupErr := os.RemoveAll(stageRoot); cleanupErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("remove staged standard image: %w", cleanupErr))
+		}
+	}()
+	if stagedDigest != execution.Image.InputDigest {
+		return model.NewError(model.CodeUnapproved, "staged standard image does not match the approved digest", nil)
+	}
+	spec, err := imageSpecForPlan(execution, stageRoot)
+	if err != nil {
+		return err
+	}
+	if _, err := service.runtime.EnsureImage(ctx, spec); err != nil {
+		return err
+	}
+	consumedDigest, err := digestBuildInputInto(ctx, stageRoot, config.ImageBuild{Context: ".", File: "Containerfile"}, "")
+	if err != nil || consumedDigest != stagedDigest {
+		return model.NewError(model.CodeUnapproved, "staged standard image changed while the image builder consumed it", err)
+	}
+	return nil
+}
+
 func imageSpecForPlan(execution plan.ExecutionPlan, buildRoot string) (runtime.ImageSpec, error) {
 	spec := runtime.ImageSpec{Reference: execution.Image.Reference}
 	if execution.Image.Reference != "" {
@@ -1649,15 +1691,25 @@ func imageSpecForPlan(execution plan.ExecutionPlan, buildRoot string) (runtime.I
 	if buildRoot == "" || !filepath.IsAbs(buildRoot) || filepath.Clean(buildRoot) != buildRoot || pathWithin(execution.Project.CanonicalRoot, buildRoot) {
 		return spec, model.NewError(model.CodeInvalidInput, "build image staging root is not a clean absolute path outside the project", nil)
 	}
-	contextPath, err := projectAbsolutePath(buildRoot, execution.Image.Context)
+	contextName, fileName := execution.Image.Context, execution.Image.File
+	if execution.Image.Standard {
+		contextName, fileName = ".", "Containerfile"
+	}
+	contextPath, err := projectAbsolutePath(buildRoot, contextName)
 	if err != nil {
 		return spec, model.NewError(model.CodeInvalidInput, "staged build context is invalid", err)
 	}
-	filePath, err := projectAbsolutePath(buildRoot, execution.Image.File)
+	filePath, err := projectAbsolutePath(buildRoot, fileName)
 	if err != nil {
 		return spec, model.NewError(model.CodeInvalidInput, "staged build file is invalid", err)
 	}
-	spec.Reference = fmt.Sprintf("dsx.local/%s:%s", execution.Project.ID, execution.Image.InputDigest[:12])
+	if execution.Image.Standard {
+		spec.Reference = fmt.Sprintf("dsx.local/standard:%s", execution.Image.InputDigest[:12])
+		spec.Labels = append(spec.Labels, runtime.Label{Key: "dev.dsx.standard-input", Value: execution.Image.InputDigest})
+		spec.Reuse = true
+	} else {
+		spec.Reference = fmt.Sprintf("dsx.local/%s:%s", execution.Project.ID, execution.Image.InputDigest[:12])
+	}
 	spec.Context = runtime.HostPath(contextPath)
 	spec.File = runtime.HostPath(filePath)
 	spec.Target = execution.Image.Target

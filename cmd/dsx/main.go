@@ -38,15 +38,24 @@ func main() {
 			os.Exit(bridge.RunLeappMirrorCommand())
 		}
 	}
-	inspection := app.NewInspectionService(plan.NewResolver())
+	inspectionDependencies := app.InspectionDependencies{Resolver: plan.NewResolver()}
+	if configRoot, err := dsxConfigRoot(); err == nil {
+		inspectionDependencies.ConfigRoot = configRoot
+	}
+	inspection := app.NewInspectionServiceWithDependencies(inspectionDependencies)
 	var adapter *apple.Adapter
 	var containerExecutable string
-	if executable, err := apple.DiscoverContainerExecutable(); err == nil {
+	executable, containerRuntimeErr := apple.DiscoverContainerExecutable()
+	if containerRuntimeErr == nil {
 		runtimeRunner := apple.OSRunner{}
-		if discovered, adapterErr := apple.NewAdapter(runtimeRunner, executable); adapterErr == nil {
-			adapter = discovered
+		adapter, containerRuntimeErr = apple.NewAdapter(runtimeRunner, executable)
+		if containerRuntimeErr == nil {
 			containerExecutable = executable
 		}
+	}
+	var containerSystem app.ContainerSystemController = unavailableContainerSystem{cause: containerRuntimeErr}
+	if adapter != nil {
+		containerSystem = adapter
 	}
 	var doctor *app.DoctorService
 	if adapter != nil {
@@ -65,7 +74,6 @@ func main() {
 				manifests = repository
 				inventory = repository
 			}
-			setup = app.NewSetupService(inspection, approvals, inventory)
 			var bridgeLeases bridge.LeaseManager
 			var leappMirrors bridge.LeappMirrorManager
 			if executable, executableErr := os.Executable(); executableErr == nil {
@@ -110,6 +118,10 @@ func main() {
 					}
 				}
 			}
+			setup = app.NewSetupServiceWithDependencies(app.SetupDependencies{
+				Inspection: inspection, Approvals: approvals, Inventory: inventory,
+				ContainerSystem: containerSystem, ImagePreparer: lifecycle,
+			})
 		}
 	}
 	runner := &tui.Runner{Application: setup, Input: os.Stdin, Output: os.Stdout}
@@ -134,6 +146,32 @@ func main() {
 	stopSignals()
 	os.Exit(exit)
 }
+
+type unavailableContainerSystem struct {
+	cause error
+}
+
+func (system unavailableContainerSystem) CheckSystemStatus(context.Context) error {
+	return model.Wrap(
+		model.CodeUnavailable,
+		"Apple container runtime is not installed at a supported path; install container 1.2.2 and retry",
+		system.cause,
+	)
+}
+func (system unavailableContainerSystem) Status(context.Context) (runtime.SystemStatus, error) {
+	return runtime.SystemStatus{
+		State: runtime.SystemStateNotInstalled, Remediation: "Install Apple Container 1.2.2 to continue.",
+	}, nil
+}
+
+func (system unavailableContainerSystem) StartSystem(context.Context) error {
+	return model.Wrap(
+		model.CodeUnavailable,
+		"Apple container runtime is not installed at a supported path; install container 1.2.2 and retry",
+		system.cause,
+	)
+}
+
 func productionLoginBrowserOpener() (app.LoginBrowserOpener, error) {
 	opener, err := hostopen.New(hostopen.OSRunner{})
 	if err != nil {
@@ -159,6 +197,14 @@ func canonicalGitExecutable() (string, error) {
 		return "", fmt.Errorf("resolved git executable is not canonical: %q", canonical)
 	}
 	return canonical, nil
+}
+
+func dsxConfigRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".dsx"), nil
 }
 
 func dsxStateRoot() (string, error) {

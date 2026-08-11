@@ -102,6 +102,15 @@ func (a *Adapter) EnsureImage(ctx context.Context, s runtime.ImageSpec) (runtime
 		if e := validBuild(s); e != nil {
 			return runtime.Image{}, bad("build image", e)
 		}
+		if s.Reuse {
+			observed, inspectErr := a.image(ctx, s.Reference)
+			if inspectErr == nil && observed.hasLabels(s.Labels) {
+				return runtime.Image{Reference: observed.reference, Digest: observed.descriptorDigest, Local: true}, nil
+			}
+			if inspectErr != nil && !missing(inspectErr, "image", s.Reference) {
+				return runtime.Image{}, inspectErr
+			}
+		}
 		args := []string{"build", "--progress", "plain", "--tag", s.Reference, "--file", string(s.File)}
 		if s.Target != "" {
 			args = append(args, "--target", s.Target)
@@ -117,6 +126,9 @@ func (a *Adapter) EnsureImage(ctx context.Context, s runtime.ImageSpec) (runtime
 		observed, e := a.image(ctx, s.Reference)
 		if e != nil {
 			return runtime.Image{}, e
+		}
+		if s.Reuse && !observed.hasLabels(s.Labels) {
+			return runtime.Image{}, unavailable("verify built image", errors.New("managed image labels do not match the approved build input"))
 		}
 		return runtime.Image{Reference: observed.reference, Digest: observed.descriptorDigest, Local: true}, nil
 	}
@@ -163,6 +175,7 @@ type inspectedImage struct {
 	reference        string
 	descriptorDigest string
 	variantDigests   []string
+	variantLabels    []map[string]string
 }
 
 func (image inspectedImage) hasDigest(expected string) bool {
@@ -174,6 +187,25 @@ func (image inspectedImage) hasDigest(expected string) bool {
 	}
 	for _, digest := range image.variantDigests {
 		if digest == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func (image inspectedImage) hasLabels(expected []runtime.Label) bool {
+	if len(expected) == 0 {
+		return true
+	}
+	for _, labels := range image.variantLabels {
+		matches := true
+		for _, label := range expected {
+			if labels[label.Key] != label.Value {
+				matches = false
+				break
+			}
+		}
+		if matches {
 			return true
 		}
 	}
@@ -194,6 +226,11 @@ func (a *Adapter) image(ctx context.Context, ref string) (inspectedImage, error)
 		} `json:"configuration"`
 		Variants []struct {
 			Digest string `json:"digest"`
+			Config struct {
+				Config struct {
+					Labels map[string]string `json:"Labels"`
+				} `json:"config"`
+			} `json:"config"`
 		} `json:"variants"`
 	}
 	if e = decodeJSON(r.Stdout, &x, false); e != nil {
@@ -206,12 +243,14 @@ func (a *Adapter) image(ctx context.Context, ref string) (inspectedImage, error)
 		reference:        x[0].Configuration.Name,
 		descriptorDigest: x[0].Configuration.Descriptor.Digest,
 		variantDigests:   make([]string, 0, len(x[0].Variants)),
+		variantLabels:    make([]map[string]string, 0, len(x[0].Variants)),
 	}
 	for _, variant := range x[0].Variants {
 		if !digestRE.MatchString(variant.Digest) {
 			return inspectedImage{}, unavailable("decode image", fmt.Errorf("invalid variant digest %q", variant.Digest))
 		}
 		observed.variantDigests = append(observed.variantDigests, variant.Digest)
+		observed.variantLabels = append(observed.variantLabels, variant.Config.Config.Labels)
 	}
 	return observed, nil
 }

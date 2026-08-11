@@ -78,7 +78,7 @@ The frozen command surface now includes read-only `dsx status` and bounded `dsx 
 | Topology | One integrated workspace VM per sandbox; one separate browser VM only when requested. |
 | Control plane | Direct CLI with temporary leased helpers only; no permanent DSX daemon. |
 | Guest control | Read-only mounted helper at `/usr/local/libexec/dsx/dsx-guest`; Unix socket `/run/dsx/control.sock`; host reaches it only through `container exec … dsx-guest ctl … --json`. |
-| Configuration | `.dsx/config.jsonc`; CLI > project > explicitly imported supported fields > defaults; unsupported security-relevant input fails closed. |
+| Configuration | Home-local `~/.dsx/projects/<project-name>-<project-id>/config.jsonc` by default or explicit shared `.dsx/config.jsonc`, never both; CLI > active configuration > explicitly imported supported fields > defaults; unsupported security-relevant input fails closed. |
 | TUI | Bubble Tea v2 and Huh v2 as presentation adapters over the same application services as explicit CLI commands. |
 | Source modes | `shell` uses one live mount; `run --name` uses guest-owned clones from restrictive Git bundles; modes do not coexist. |
 | State | Atomic JSON manifests and stable file locks; no SQLite host registry in the MVP. |

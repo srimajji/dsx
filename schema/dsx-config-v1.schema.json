@@ -33,7 +33,7 @@
       "$ref": "#/$defs/workspace"
     },
     "image": {
-      "description": "Pinned Linux ARM64 image reference or reviewed build definition.",
+      "description": "Pinned Linux ARM64 image reference, reviewed project build, or DSX-owned standard image.",
       "$ref": "#/$defs/image"
     },
     "setup": {
@@ -186,7 +186,7 @@
       }
     },
     "image": {
-      "description": "Exactly one prebuilt image reference or local build definition.",
+      "description": "Exactly one prebuilt image reference, reviewed local build definition, or DSX-owned standard image.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -200,9 +200,13 @@
         "build": {
           "description": "Reviewed local OCI image build inputs.",
           "$ref": "#/$defs/imageBuild"
+        },
+        "standard": {
+          "description": "Build or reuse the DSX-owned standard Ubuntu agent image.",
+          "const": true
         }
       },
-      "oneOf": [ { "required": ["ref"] }, { "required": ["build"] } ]
+      "oneOf": [ { "required": ["ref"] }, { "required": ["build"] }, { "required": ["standard"] } ]
     },
     "imageBuild": {
       "description": "Project-relative build context, file, optional target, and nonsecret build arguments.",

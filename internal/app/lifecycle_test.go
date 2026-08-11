@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	agentimage "github.com/srimajji/dsx/images/agent"
 	"github.com/srimajji/dsx/internal/bridge"
 	"github.com/srimajji/dsx/internal/config"
 	"github.com/srimajji/dsx/internal/guestproto"
@@ -288,6 +289,38 @@ func (fake *lifecycleRuntime) Delete(_ context.Context, snapshot runtime.Resourc
 	fake.calls = append(fake.calls, "delete:"+string(resource.Kind))
 	delete(fake.resources, resource.ID)
 	return nil
+}
+
+func TestLifecycleBuildsManagedStandardImageFromEmbeddedInputs(t *testing.T) {
+	service, root, _, fake, _ := lifecycleFixture(t)
+	configuration := []byte(`{"schemaVersion":1,"workspace":{"root":"."},"image":{"standard":true}}`)
+	if err := os.WriteFile(filepath.Join(root, ".dsx", "config.jsonc"), configuration, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hash := inspectLifecycleHash(t, service.inspection, root)
+	fake.ensureImage = func(spec runtime.ImageSpec) error {
+		if spec.Reference != "dsx.local/standard:"+agentimage.InputDigest()[:12] || !spec.Reuse {
+			t.Fatalf("managed standard image spec = %#v", spec)
+		}
+		if pathWithin(root, string(spec.Context)) {
+			t.Fatalf("managed standard context is inside project: %q", spec.Context)
+		}
+		digest, err := digestBuildInput(string(spec.Context), config.ImageBuild{Context: ".", File: "Containerfile"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if digest != agentimage.InputDigest() {
+			t.Fatalf("builder input digest = %q, want %q", digest, agentimage.InputDigest())
+		}
+		return nil
+	}
+	started, err := service.Start(context.Background(), StartRequest{Root: root, ApproveConfig: hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.State != model.StateRunning {
+		t.Fatalf("Start() = %#v", started)
+	}
 }
 
 func TestLifecycleStartStopResumeShellAndClean(t *testing.T) {
@@ -1271,6 +1304,32 @@ func TestLivePublicationOnlyRestartFailureStopsPersistentLease(t *testing.T) {
 	stored, found, err := manifests.LoadManifest(context.Background(), started.ProjectID, started.Sandbox, started.RunID)
 	if err != nil || !found || stored.State != model.StateStopped {
 		t.Fatalf("publication-only rollback manifest: found=%t state=%q err=%v", found, stored.State, err)
+	}
+}
+
+func TestManagedStandardImageSpecUsesGlobalReusableTag(t *testing.T) {
+	projectRoot := t.TempDir()
+	stageRoot, digest, err := stageStandardImage(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stageRoot)
+	execution := plan.ExecutionPlan{
+		Project: plan.ProjectIdentity{ID: "abcdefghijklmnopqrst", CanonicalRoot: projectRoot},
+		Image: plan.ResolvedImage{
+			Context: "@dsx/standard", File: "Containerfile", InputDigest: digest, Standard: true,
+		},
+	}
+	spec, err := imageSpecForPlan(execution, stageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Reference != "dsx.local/standard:"+digest[:12] || !spec.Reuse ||
+		string(spec.Context) != stageRoot || string(spec.File) != filepath.Join(stageRoot, "Containerfile") {
+		t.Fatalf("managed standard image spec = %#v", spec)
+	}
+	if len(spec.Labels) != 1 || spec.Labels[0].Key != "dev.dsx.standard-input" || spec.Labels[0].Value != digest {
+		t.Fatalf("managed standard labels = %#v", spec.Labels)
 	}
 }
 

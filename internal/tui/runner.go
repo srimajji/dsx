@@ -59,7 +59,7 @@ func (runner *Runner) Run(ctx context.Context, request RunRequest) (Intent, bool
 		}
 		model = setup
 	case app.BareLauncher:
-		action := NewLauncherModel(state)
+		action := NewLauncherModel(state, request.Sandboxes...)
 		action.accessible = request.Accessible
 		model = action
 	case app.BareDashboard:
@@ -80,6 +80,12 @@ func (runner *Runner) Run(ctx context.Context, request RunRequest) (Intent, bool
 	intent, found := action.Intent()
 	if !found {
 		return Intent{}, false, nil
+	}
+	if intent.Action == "start-container-system" {
+		if err := runner.Application.StartContainerSystem(ctx); err != nil {
+			return Intent{}, false, err
+		}
+		return runner.Run(ctx, request)
 	}
 	if intent.Action == "new-clone" {
 		return runner.runCloneCreate(ctx, request)
@@ -225,6 +231,19 @@ func (runner *Runner) runAccessibleSetup(ctx context.Context, model *SetupModel)
 			}
 			return Intent{}, false, err
 		}
+		if model.imageChoice == "custom" {
+			model.customForm.
+				WithInput(input).
+				WithOutput(runner.Output).
+				WithAccessible(true).
+				WithTheme(huh.ThemeFunc(huh.ThemeBase))
+			if err := model.customForm.RunWithContext(ctx); err != nil {
+				if errors.Is(err, huh.ErrUserAborted) {
+					return Intent{}, false, nil
+				}
+				return Intent{}, false, err
+			}
+		}
 		model.applyForm()
 		preview, err := runner.Application.PreviewSetup(ctx, app.SetupPreviewRequest{Root: model.root, Config: model.document})
 		if err != nil {
@@ -272,7 +291,11 @@ func (runner *Runner) runAccessibleSetup(ctx context.Context, model *SetupModel)
 			}
 			continue
 		}
-		prompt := page + "\n\n" + position + "\nFinal confirmation: write configuration and persist this approval? [y/N]\n"
+		confirmation := "write configuration and persist this approval"
+		if model.preview.Plan.Image.Standard && !model.reviewOnly && !model.approveOnly {
+			confirmation = "write configuration, persist this approval, and build DSX Standard"
+		}
+		prompt := page + "\n\n" + position + "\nFinal confirmation: " + confirmation + "? [y/N]\n"
 		if _, err := io.WriteString(runner.Output, "\n"+terminal.Wrap(prompt, model.width)); err != nil {
 			return Intent{}, false, fmt.Errorf("write accessible setup final review page: %w", err)
 		}
@@ -282,6 +305,11 @@ func (runner *Runner) runAccessibleSetup(ctx context.Context, model *SetupModel)
 		}
 		if answer != "y" && answer != "yes" {
 			return Intent{}, false, nil
+		}
+	}
+	if model.preview.Plan.Image.Standard && !model.reviewOnly && !model.approveOnly {
+		if _, err := io.WriteString(runner.Output, "\nBuilding and verifying DSX Standard...\n"); err != nil {
+			return Intent{}, false, fmt.Errorf("write accessible standard image progress: %w", err)
 		}
 	}
 	request := model.approvalRequest()

@@ -123,8 +123,18 @@ func pathsOverlap(a, b string) bool {
 }
 
 func (v *semanticValidator) validateImage(image ImageConfig) {
-	if (image.Ref == "") == (image.Build == nil) {
-		v.add("/image", "image must declare exactly one of ref or build")
+	selected := 0
+	if image.Ref != "" {
+		selected++
+	}
+	if image.Build != nil {
+		selected++
+	}
+	if image.Standard {
+		selected++
+	}
+	if selected != 1 {
+		v.add("/image", "image must declare exactly one of ref, build, or standard")
 	}
 	if image.Ref != "" {
 		at := strings.LastIndex(image.Ref, "@sha256:")

@@ -424,6 +424,43 @@ func jsonIndex(index int) string {
 	return string(reversed[position:])
 }
 
+func TestResolveManagedStandardImage(t *testing.T) {
+	validated, diagnostics := config.ParseBytes("standard.jsonc", []byte(`{
+		"schemaVersion": 1,
+		"workspace": {"root": "."},
+		"image": {"standard": true}
+	}`))
+	if len(diagnostics) != 0 {
+		t.Fatalf("ParseBytes() diagnostics = %#v", diagnostics)
+	}
+	inputDigest := strings.Repeat("a", 64)
+	resolved, diagnostics, err := NewResolver().Resolve(context.Background(), ResolveInput{
+		Config:  validated,
+		Project: ProjectIdentity{ID: "abcdefghijklmnopqrst", CanonicalRoot: "/project"},
+		Sandbox: SandboxIdentity{Name: "main"},
+		Mode:    model.ModeLive,
+		Defaults: DefaultValues{
+			Agent: "codex", Internet: true, CPUs: 2, MemoryBytes: 2 << 30, MaxConcurrentClones: 1,
+		},
+		Authority: AuthorityInputs{
+			StandardImageDigest:   inputDigest,
+			BrowserImageReference: "example/browser@sha256:" + strings.Repeat("b", 64),
+			BrowserImageDigest:    strings.Repeat("b", 64),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("Resolve() diagnostics = %#v", diagnostics)
+	}
+	if !resolved.Image.Standard || resolved.Image.Reference != "" ||
+		resolved.Image.Context != "@dsx/standard" || resolved.Image.File != "Containerfile" ||
+		resolved.Image.InputDigest != inputDigest {
+		t.Fatalf("managed standard image = %#v", resolved.Image)
+	}
+}
+
 func reverse[T any](values []T) {
 	for left, right := 0, len(values)-1; left < right; left, right = left+1, right-1 {
 		values[left], values[right] = values[right], values[left]

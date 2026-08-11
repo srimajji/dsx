@@ -48,6 +48,7 @@ type ResolvedImage struct {
 	Target      string     `json:"target,omitempty"`
 	BuildArgs   []KeyValue `json:"build_args,omitempty"`
 	InputDigest string     `json:"input_digest"`
+	Standard    bool       `json:"standard,omitempty"`
 }
 
 type RepositoryPlan struct {

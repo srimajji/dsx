@@ -46,8 +46,9 @@ type RepositoryMember struct {
 }
 
 type ImageConfig struct {
-	Ref   string      `json:"ref,omitempty"`
-	Build *ImageBuild `json:"build,omitempty"`
+	Ref      string      `json:"ref,omitempty"`
+	Build    *ImageBuild `json:"build,omitempty"`
+	Standard bool        `json:"standard,omitempty"`
 }
 
 type ImageBuild struct {

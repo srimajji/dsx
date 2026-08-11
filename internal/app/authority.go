@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	agentimage "github.com/srimajji/dsx/images/agent"
 	"github.com/srimajji/dsx/internal/bridge"
 	"github.com/srimajji/dsx/internal/buildinfo"
 	"github.com/srimajji/dsx/internal/config"
@@ -41,6 +42,9 @@ func collectAuthorityInputs(root string, validated config.ValidatedConfig, impor
 	authority := plan.AuthorityInputs{
 		BrowserImageReference: browserReference,
 		BrowserImageDigest:    browserDigest,
+	}
+	if validated.Document.Image.Standard {
+		authority.StandardImageDigest = agentimage.InputDigest()
 	}
 	if selection := validated.Document.Imports.Devcontainer; selection != nil {
 		selected := normalizeProjectPath(selection.Path)
@@ -122,6 +126,9 @@ func browserImageAuthority() (string, string, error) {
 }
 
 func selectedBuild(document config.ConfigDocument, imported []plan.ImportedValue) *config.ImageBuild {
+	if document.Image.Standard {
+		return nil
+	}
 	if document.Image.Ref != "" {
 		return nil
 	}
@@ -260,6 +267,35 @@ func stageBuildInput(ctx context.Context, projectRoot string, build config.Image
 		return "", "", fmt.Errorf("staged build input digest mismatch: copied %s, staged %s", copiedDigest, stagedDigest)
 	}
 	return stageRoot, stagedDigest, nil
+}
+
+func stageStandardImage(ctx context.Context, projectRoot string) (string, string, error) {
+	stageRoot, err := newPrivateBuildStage(projectRoot)
+	if err != nil {
+		return "", "", err
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(stageRoot)
+	}
+	if err := ctx.Err(); err != nil {
+		cleanup()
+		return "", "", err
+	}
+	if err := agentimage.Materialize(stageRoot); err != nil {
+		cleanup()
+		return "", "", err
+	}
+	build := config.ImageBuild{Context: agentimage.BuildContext, File: agentimage.BuildFile}
+	digest, err := digestBuildInputInto(ctx, stageRoot, build, "")
+	if err != nil {
+		cleanup()
+		return "", "", fmt.Errorf("verify staged standard image: %w", err)
+	}
+	if digest != agentimage.InputDigest() {
+		cleanup()
+		return "", "", fmt.Errorf("staged standard image digest mismatch: got %s want %s", digest, agentimage.InputDigest())
+	}
+	return stageRoot, digest, nil
 }
 
 func newPrivateBuildStage(projectRoot string) (string, error) {
