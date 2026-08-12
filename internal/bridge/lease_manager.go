@@ -102,7 +102,7 @@ type helperReady struct {
 }
 
 type leasePaths struct {
-	root, project, sandbox, run          string
+	root, project, workspace, run        string
 	ledger, token, failure, socket, lock string
 }
 
@@ -516,24 +516,24 @@ func (manager *ProductionLeaseManager) ensurePaths(identity LeaseIdentity) (leas
 	if err != nil {
 		return leasePaths{}, err
 	}
-	sandbox, err := ensurePrivateChildDirectory(project, string(identity.Sandbox))
+	workspace, err := ensurePrivateChildDirectory(project, string(identity.Workspace))
 	if err != nil {
 		return leasePaths{}, err
 	}
-	run, err := ensurePrivateChildDirectory(sandbox, string(identity.RunID))
+	run, err := ensurePrivateChildDirectory(workspace, string(identity.RunID))
 	if err != nil {
 		return leasePaths{}, err
 	}
-	paths := makeLeasePaths(root, project, sandbox, run)
+	paths := makeLeasePaths(root, project, workspace, run)
 	return paths, nil
 }
 
 func (manager *ProductionLeaseManager) existingPaths(identity LeaseIdentity) (leasePaths, bool, error) {
 	root := filepath.Join(manager.stateRoot, bridgeDirectoryName)
 	project := filepath.Join(root, string(identity.ProjectID))
-	sandbox := filepath.Join(project, string(identity.Sandbox))
-	run := filepath.Join(sandbox, string(identity.RunID))
-	for _, path := range []string{manager.stateRoot, root, project, sandbox} {
+	workspace := filepath.Join(project, string(identity.Workspace))
+	run := filepath.Join(workspace, string(identity.RunID))
+	for _, path := range []string{manager.stateRoot, root, project, workspace} {
 		if err := verifyPrivateDirectory(path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return leasePaths{}, false, nil
@@ -547,11 +547,11 @@ func (manager *ProductionLeaseManager) existingPaths(identity LeaseIdentity) (le
 		}
 		return leasePaths{}, false, model.NewError(model.CodeAmbiguous, "bridge lease directory is unsafe", err)
 	}
-	return makeLeasePaths(root, project, sandbox, run), true, nil
+	return makeLeasePaths(root, project, workspace, run), true, nil
 }
 
-func makeLeasePaths(root, project, sandbox, run string) leasePaths {
-	return leasePaths{root: root, project: project, sandbox: sandbox, run: run, ledger: filepath.Join(run, ledgerFileName), token: filepath.Join(run, tokenFileName), failure: filepath.Join(run, failureFileName), socket: filepath.Join(run, controlSocketName), lock: filepath.Join(sandbox, leaseLockName)}
+func makeLeasePaths(root, project, workspace, run string) leasePaths {
+	return leasePaths{root: root, project: project, workspace: workspace, run: run, ledger: filepath.Join(run, ledgerFileName), token: filepath.Join(run, tokenFileName), failure: filepath.Join(run, failureFileName), socket: filepath.Join(run, controlSocketName), lock: filepath.Join(workspace, leaseLockName)}
 }
 
 func relaySpecsRequireContainer(specs []RelaySpec) bool {

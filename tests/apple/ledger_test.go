@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srimajji/dsx/internal/gitx"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/ownership"
 	"github.com/srimajji/dsx/internal/runtime"
@@ -39,12 +40,13 @@ type appleInventoryEvidence struct {
 }
 
 type appleResourceEvidence struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Project string `json:"project"`
-	Sandbox string `json:"sandbox"`
-	Run     string `json:"run"`
-	Role    string `json:"role"`
+	ID            string `json:"id"`
+	Kind          string `json:"kind"`
+	Project       string `json:"project"`
+	CanonicalRoot string `json:"canonical_root"`
+	Workspace     string `json:"workspace"`
+	Run           string `json:"run"`
+	Role          string `json:"role"`
 }
 
 type appleScenarioEvidence struct {
@@ -202,8 +204,8 @@ func (ledger *appleResourceLedger) Evidence() []appleResourceEvidence {
 	for _, proof := range ledger.byID {
 		resources = append(resources, appleResourceEvidence{
 			ID: string(proof.observed.ID), Kind: proof.record.Kind,
-			Project: string(proof.manifest.ProjectID), Sandbox: string(proof.manifest.Sandbox),
-			Run: string(proof.manifest.RunID), Role: proof.record.Role,
+			Project: string(proof.manifest.ProjectID), CanonicalRoot: proof.manifest.CanonicalRoot,
+			Workspace: string(proof.manifest.Workspace), Run: string(proof.manifest.RunID), Role: proof.record.Role,
 		})
 	}
 	sort.Slice(resources, func(i, j int) bool { return resources[i].ID < resources[j].ID })
@@ -225,12 +227,14 @@ func validateScenarioEvidence(scenarios []appleScenarioEvidence) error {
 		}
 		for _, resource := range scenario.Resources {
 			projectID, projectErr := model.ParseProjectID(resource.Project)
-			sandbox, sandboxErr := model.ParseSandboxName(resource.Sandbox)
+			workspace, workspaceErr := model.ParseWorkspaceName(resource.Workspace)
 			runID, runErr := model.ParseRunID(resource.Run)
-			if projectErr != nil || sandboxErr != nil || runErr != nil {
+			canonical, nameErr := state.CanonicalResourceName(resource.CanonicalRoot, workspace, resource.Role)
+			rootProjectID, rootErr := model.NewProjectID(resource.CanonicalRoot)
+			if projectErr != nil || workspaceErr != nil || runErr != nil || nameErr != nil || rootErr != nil {
 				return fmt.Errorf("scenario %q resource %q has invalid ownership tuple", scenario.Name, resource.ID)
 			}
-			if resource.ID != state.CanonicalResourceName(projectID, sandbox, resource.Role) || resource.Kind == "" || runID == "" {
+			if resource.ID != canonical || resource.Kind == "" || runID == "" || projectID != rootProjectID {
 				return fmt.Errorf("scenario %q resource %q is not a canonical exact identity", scenario.Name, resource.ID)
 			}
 			if _, duplicate := resourceIDs[resource.ID]; duplicate {
@@ -360,9 +364,9 @@ func TestAppleLedgerGuardRejectsUnsafeDeletionAuthority(t *testing.T) {
 				}
 			}
 		}},
-		{name: "conflicting sandbox", mutate: func(_ *state.Manifest, _ *state.ResourceRecord, snapshot *runtime.ResourceSnapshot) {
+		{name: "conflicting workspace", mutate: func(_ *state.Manifest, _ *state.ResourceRecord, snapshot *runtime.ResourceSnapshot) {
 			for index := range snapshot.Labels {
-				if snapshot.Labels[index].Key == state.OwnershipSandboxLabel {
+				if snapshot.Labels[index].Key == state.OwnershipWorkspaceLabel {
 					snapshot.Labels[index].Value = "other"
 				}
 			}
@@ -462,11 +466,15 @@ func ledgerContractFixture(t *testing.T) (state.Manifest, state.ResourceRecord, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	gitDir := filepath.Join(root, ".git")
+	if err := os.Mkdir(gitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	projectID, err := model.NewProjectID(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sandbox, err := model.ParseSandboxName("main")
+	workspace, err := model.ParseWorkspaceName("main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,13 +482,27 @@ func ledgerContractFixture(t *testing.T) (state.Manifest, state.ResourceRecord, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := state.CanonicalResourceName(projectID, sandbox, "network")
-	labels := state.ResourceOwnershipLabels(projectID, sandbox, runID, string(runtime.ResourceNetwork), "network")
+	name, err := state.CanonicalResourceName(root, workspace, "network")
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := state.ResourceOwnershipLabels(projectID, workspace, runID, string(runtime.ResourceNetwork), "network")
 	record := state.ResourceRecord{Kind: string(runtime.ResourceNetwork), Role: "network", Name: name, ExpectedID: name, RuntimeID: name, Labels: labels, Created: true}
+	identity := gitx.RepositoryIdentity{
+		ApprovedRoot: ledgerPhysicalIdentity(root),
+		Worktree:     ledgerPhysicalIdentity(root),
+		GitDir:       ledgerPhysicalIdentity(gitDir),
+	}
 	manifest := state.Manifest{
 		Version: state.ManifestVersion, Generation: 1, ProjectID: projectID, CanonicalRoot: root,
-		Sandbox: sandbox, RunID: runID, Mode: model.ModeLive, PlanHash: strings.Repeat("a", 64),
-		State: model.StateRunning, Operation: "create", Resources: []state.ResourceRecord{record},
+		Workspace: workspace, RunID: runID, PlanHash: strings.Repeat("a", 64),
+		State: model.StateRunning, Resources: []state.ResourceRecord{record},
+		Git: []state.GitRecord{{
+			Repository: "workspace", HostPath: root, GuestPath: "/workspace", Identity: identity,
+			SourceBranch: "refs/heads/main", SourceRevision: strings.Repeat("1", 40),
+			TrackedFingerprint: strings.Repeat("2", 64), WorkspaceBranch: "dsx/" + string(workspace),
+			SourceBundleDigest: strings.Repeat("3", 64),
+		}},
 		CreatedAt: fixedEvidenceTime, UpdatedAt: fixedEvidenceTime,
 	}
 	runtimeLabels := make([]runtime.Label, len(labels))
@@ -489,6 +511,19 @@ func ledgerContractFixture(t *testing.T) (state.Manifest, state.ResourceRecord, 
 	}
 	snapshot := runtime.ResourceSnapshot{Resource: runtime.Resource{ID: runtime.ResourceID(name), Name: name, Kind: runtime.ResourceNetwork}, Labels: runtimeLabels}
 	return manifest, record, snapshot
+}
+
+func ledgerPhysicalIdentity(value string) gitx.PhysicalPathIdentity {
+	current := string(filepath.Separator)
+	components := []gitx.PathComponentIdentity{{Path: current, Device: 1, Inode: 1}}
+	for _, component := range strings.Split(strings.TrimPrefix(value, current), current) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		components = append(components, gitx.PathComponentIdentity{Path: current, Device: 1, Inode: uint64(len(components) + 1)})
+	}
+	return gitx.PhysicalPathIdentity{CanonicalPath: value, Components: components}
 }
 
 var fixedEvidenceTime = time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC)

@@ -44,14 +44,10 @@ func main() {
 	}
 	inspection := app.NewInspectionServiceWithDependencies(inspectionDependencies)
 	var adapter *apple.Adapter
-	var containerExecutable string
 	executable, containerRuntimeErr := apple.DiscoverContainerExecutable()
 	if containerRuntimeErr == nil {
 		runtimeRunner := apple.OSRunner{}
 		adapter, containerRuntimeErr = apple.NewAdapter(runtimeRunner, executable)
-		if containerRuntimeErr == nil {
-			containerExecutable = executable
-		}
 	}
 	var containerSystem app.ContainerSystemController = unavailableContainerSystem{cause: containerRuntimeErr}
 	if adapter != nil {
@@ -63,9 +59,11 @@ func main() {
 	}
 
 	var setup *app.SetupService
-	var lifecycle *app.LifecycleService
-	var harnesses *app.HarnessService
-	var clones app.CloneManager
+	var workspaces *app.WorkspaceService
+	var authentication *app.AuthService
+	var agents *app.AgentService
+	var workspaceGit app.WorkspaceGitManager
+	var workspaceInventory hostcmd.WorkspaceInventory
 	if stateRoot, err := dsxStateRoot(); err == nil {
 		if approvals, approvalErr := statefs.NewApprovalRepository(stateRoot); approvalErr == nil {
 			var manifests *statefs.ManifestRepository
@@ -73,72 +71,58 @@ func main() {
 			if repository, manifestErr := statefs.NewManifestRepository(stateRoot); manifestErr == nil {
 				manifests = repository
 				inventory = repository
-			}
-			var bridgeLeases bridge.LeaseManager
-			var leappMirrors bridge.LeappMirrorManager
-			if executable, executableErr := os.Executable(); executableErr == nil {
-				bridgeLeases, _ = bridge.NewProductionLeaseManagerWithContainer(stateRoot, executable, containerExecutable)
-				leappMirrors, _ = bridge.NewProductionLeappMirrorManager(stateRoot, executable)
+				workspaceInventory = repository
 			}
 			if manifests != nil && adapter != nil {
-				authRepository, authErr := authrepo.NewRepository(filepath.Join(stateRoot, "auth"))
-				cleanSandboxAuth := func(ctx context.Context, projectID model.ProjectID, sandbox model.SandboxName) error {
-					if authErr != nil {
-						return authErr
+				gitExecutable, gitPathErr := canonicalGitExecutable()
+				if gitPathErr == nil {
+					if gitService, gitErr := gitx.NewService(gitx.OSRunner{}, gitExecutable); gitErr == nil {
+						workspaces = app.NewWorkspaceService(app.WorkspaceDependencies{
+							Inspection:        inspection,
+							Approvals:         approvals,
+							Manifests:         manifests,
+							Locks:             manifests,
+							Runtime:           adapter,
+							Git:               gitService,
+							TempRoot:          filepath.Clean(os.TempDir()),
+							GuestHelperSource: func() (runtime.HostPath, error) { return installedGuestHelper(stateRoot) },
+						})
+						workspaceGit = workspaces
 					}
-					err := authRepository.PurgeCleanedSandbox(ctx, projectID, string(sandbox))
-					return err
 				}
-				lifecycle = app.NewLifecycleService(app.LifecycleDependencies{
-					Inspection:        inspection,
-					Approvals:         approvals,
-					Manifests:         manifests,
-					Locks:             manifests,
-					Runtime:           adapter,
-					Guest:             app.NewGuestClient(adapter),
-					GuestHelperSource: func() (runtime.HostPath, error) { return installedGuestHelper(stateRoot) },
-					CleanSandboxAuth:  cleanSandboxAuth,
-					BridgeLeases:      bridgeLeases,
-					LeappMirrors:      leappMirrors,
-				})
-				if authErr == nil {
-					harnesses, _ = app.NewHarnessService(lifecycle, authRepository, catalog.All()...)
-				}
-				if harnesses != nil {
-					gitExecutable, gitPathErr := canonicalGitExecutable()
-					if gitPathErr == nil {
-						if gitService, gitErr := gitx.NewService(gitx.OSRunner{}, gitExecutable); gitErr == nil {
-							clones, _ = app.NewCloneService(app.CloneDependencies{
-								Lifecycle: lifecycle,
-								Harness:   harnesses,
-								Git:       gitService,
-								TempRoot:  os.TempDir(),
-							})
+				if workspaces != nil {
+					if authRepository, authErr := authrepo.NewRepository(filepath.Join(stateRoot, "auth")); authErr == nil {
+						if home, homeErr := os.UserHomeDir(); homeErr == nil {
+							if discovery, discoveryErr := authrepo.NewHostDiscovery(home); discoveryErr == nil {
+								if authRunner, runnerErr := app.NewRuntimeAuthSessionRunner(workspaces, authRepository, catalog.All()...); runnerErr == nil {
+									authentication, _ = app.NewAuthService(authRepository, discovery, authRunner, catalog.All()...)
+								}
+							}
 						}
 					}
+				}
+				if workspaces != nil && authentication != nil {
+					agents, _ = app.NewAgentService(workspaces, authentication, catalog.All()...)
 				}
 			}
 			setup = app.NewSetupServiceWithDependencies(app.SetupDependencies{
 				Inspection: inspection, Approvals: approvals, Inventory: inventory,
-				ContainerSystem: containerSystem, ImagePreparer: lifecycle,
+				ContainerSystem: containerSystem, ImagePreparer: workspaces,
 			})
 		}
 	}
 	runner := &tui.Runner{Application: setup, Input: os.Stdin, Output: os.Stdout}
-	loginBrowser, err := productionLoginBrowserOpener()
-	if err != nil {
-		panic(fmt.Sprintf("initialize host login opener: %v", err))
-	}
 	dispatcher := hostcmd.NewDispatcher(hostcmd.Dependencies{
 		Inspector:     inspection,
 		Doctor:        doctor,
-		Lifecycle:     lifecycle,
-		Harness:       harnesses,
-		Clones:        clones,
+		Workspaces:    workspaces,
+		Git:           workspaceGit,
+		Agents:        agents,
+		Auth:          authentication,
+		Inventory:     workspaceInventory,
 		TUI:           runner,
 		Stdin:         os.Stdin,
 		TerminalState: terminal.NewRawState(os.Stdin),
-		LoginBrowser:  loginBrowser,
 		Accessible:    os.Getenv("DSX_ACCESSIBLE") == "1",
 	})
 	ctx, stopSignals := terminal.CommandSignalContext(context.Background())
@@ -172,7 +156,7 @@ func (system unavailableContainerSystem) StartSystem(context.Context) error {
 	)
 }
 
-func productionLoginBrowserOpener() (app.LoginBrowserOpener, error) {
+func productionLoginBrowserOpener() (func(context.Context, string) error, error) {
 	opener, err := hostopen.New(hostopen.OSRunner{})
 	if err != nil {
 		return nil, err

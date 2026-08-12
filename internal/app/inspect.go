@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -179,6 +180,7 @@ func (service *InspectionService) Inspect(ctx context.Context, request InspectRe
 		return InspectResult{}, model.Wrap(model.CodeInvalidInput, "inspect project", err)
 	}
 	result := InspectResult{Facts: mapProjectFacts(facts)}
+	result.Facts.Branch, result.Facts.Revision, result.Facts.Clean = inspectCheckout(ctx, result.Facts.CanonicalRoot)
 	result.Diagnostics = append(result.Diagnostics, mapInspectDiagnostics(facts.Diagnostics)...)
 
 	location, found, err := service.activeConfig(facts.WorkspaceRoot)
@@ -217,32 +219,18 @@ func (service *InspectionService) Inspect(ctx context.Context, request InspectRe
 	if err != nil {
 		return result, model.Wrap(model.CodeInvalidInput, "derive project identity", err)
 	}
-	mode := model.ModeLive
-	if request.Mode != "" {
-		mode, err = model.ParseWorkspaceMode(request.Mode)
-		if err != nil {
-			return result, model.Wrap(model.CodeInvalidInput, "inspect mode", err)
-		}
-	}
-	sandboxName := model.SandboxName("main")
-	if request.SandboxName != "" {
-		sandboxName, err = model.ParseSandboxName(request.SandboxName)
-		if err != nil {
-			return result, model.Wrap(model.CodeInvalidInput, "inspect sandbox", err)
-		}
-	}
 	planning := beginPhase(service.timingRecorder, service.timingClock, PhasePlanning)
 	resolved, resolveDiagnostics, err := service.resolver.Resolve(ctx, plan.ResolveInput{
 		Config:  validated,
 		Project: plan.ProjectIdentity{ID: projectID, CanonicalRoot: facts.WorkspaceRoot},
-		Sandbox: plan.SandboxIdentity{Name: sandboxName},
-		Mode:    mode,
-		Ownership: plan.OwnershipPlan{
-			Labels:       []plan.KeyValue{{Key: "dsx.project", Value: string(projectID)}, {Key: "dsx.sandbox", Value: string(sandboxName)}},
-			ResourceName: "dsx-" + string(projectID) + "-" + string(sandboxName),
+		CLI:     plan.CLIOverrides{CPUs: request.CLIOverrides.CPUs, Memory: request.CLIOverrides.Memory},
+		Defaults: plan.DefaultValues{
+			DefaultAgent:            "codex",
+			Internet:                true,
+			CPUs:                    DefaultWorkspaceCPUs,
+			MemoryBytes:             DefaultWorkspaceMemoryBytes,
+			MaxConcurrentWorkspaces: 1,
 		},
-		CLI:       plan.CLIOverrides{Agent: request.CLIOverrides.Agent, Browser: request.CLIOverrides.Browser, CPUs: request.CLIOverrides.CPUs, Memory: request.CLIOverrides.Memory},
-		Defaults:  plan.DefaultValues{Agent: "codex", Internet: true, CPUs: DefaultWorkspaceCPUs, MemoryBytes: DefaultWorkspaceMemoryBytes, MaxConcurrentClones: 1},
 		Authority: authority,
 	})
 	planning.Stop()
@@ -256,6 +244,43 @@ func (service *InspectionService) Inspect(ctx context.Context, request InspectRe
 		return result, invalidDiagnosticsError(result.Diagnostics)
 	}
 	return result, nil
+}
+
+func inspectCheckout(ctx context.Context, root string) (string, string, bool) {
+	executable, err := exec.LookPath("git")
+	if err != nil {
+		return "", "", false
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil || !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+		return "", "", false
+	}
+	command := exec.CommandContext(ctx, executable, "-C", root, "status", "--porcelain=v2", "--branch", "--untracked-files=no", "-z")
+	var output cappedBuffer
+	output.limit = 64 * 1024
+	command.Stdout = &output
+	var stderr cappedBuffer
+	stderr.limit = 4 * 1024
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil || output.exceeded {
+		return "", "", false
+	}
+	clean := true
+	var branch, revision string
+	for _, record := range strings.Split(output.String(), "\x00") {
+		switch {
+		case strings.HasPrefix(record, "# branch.head "):
+			branch = strings.TrimPrefix(record, "# branch.head ")
+		case strings.HasPrefix(record, "# branch.oid "):
+			revision = strings.TrimPrefix(record, "# branch.oid ")
+		case record != "" && record[0] != '#':
+			clean = false
+		}
+	}
+	if branch == "(detached)" || revision == "(initial)" || branch == "" || revision == "" {
+		return branch, revision, false
+	}
+	return branch, revision, clean
 }
 
 func parseProjectConfig(absolutePath, displayPath string) (config.ValidatedConfig, []config.Diagnostic) {

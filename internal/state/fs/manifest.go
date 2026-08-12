@@ -24,7 +24,7 @@ import (
 const (
 	manifestDirectory      = "manifests"
 	projectLockDirectory   = "locks"
-	sandboxLockDirectory   = "sandbox-locks"
+	workspaceLockDirectory = "workspace-locks"
 	manifestLockDirectory  = "manifest-locks"
 	maxManifestBytes       = 4 << 20
 	maxManifestEntries     = 10_000
@@ -74,9 +74,9 @@ func (repository *ManifestRepository) CreateIntent(ctx context.Context, manifest
 		return model.NewError(model.CodeInvalidInput, "invalid manifest intent", err)
 	}
 	if manifest.Version != state.ManifestVersion || manifest.Generation != 1 || manifest.State != model.StatePlanned || manifest.Operation != "create" {
-		return model.NewError(model.CodeInvalidInput, "manifest intent must be version 1, generation 1, planned, and operation create", nil)
+		return model.NewError(model.CodeInvalidInput, "manifest intent must be version 2, generation 1, planned, and operation create", nil)
 	}
-	path, err := repository.manifestPath(manifest.ProjectID, manifest.Sandbox, manifest.RunID)
+	path, err := repository.manifestPath(manifest.ProjectID, manifest.Workspace, manifest.RunID)
 	if err != nil {
 		return err
 	}
@@ -84,10 +84,10 @@ func (repository *ManifestRepository) CreateIntent(ctx context.Context, manifest
 	if err != nil {
 		return err
 	}
-	if err := repository.ensureManifestParents(manifest.ProjectID, manifest.Sandbox); err != nil {
+	if err := repository.ensureManifestParents(manifest.ProjectID, manifest.Workspace); err != nil {
 		return model.Wrap(model.CodeInternal, "create manifest directories", err)
 	}
-	lock, err := repository.lockRun(ctx, manifest.ProjectID, manifest.Sandbox, manifest.RunID)
+	lock, err := repository.lockRun(ctx, manifest.ProjectID, manifest.Workspace, manifest.RunID)
 	if err != nil {
 		return err
 	}
@@ -104,21 +104,21 @@ func (repository *ManifestRepository) CreateIntent(ctx context.Context, manifest
 	return nil
 }
 
-func (repository *ManifestRepository) LoadManifest(ctx context.Context, projectID model.ProjectID, sandbox model.SandboxName, runID model.RunID) (state.Manifest, bool, error) {
+func (repository *ManifestRepository) LoadManifest(ctx context.Context, projectID model.ProjectID, workspace model.WorkspaceName, runID model.RunID) (state.Manifest, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return state.Manifest{}, false, model.Wrap(model.CodeUnavailable, "load manifest", err)
 	}
-	path, err := repository.manifestPath(projectID, sandbox, runID)
+	path, err := repository.manifestPath(projectID, workspace, runID)
 	if err != nil {
 		return state.Manifest{}, false, err
 	}
-	if err := repository.verifyManifestParents(projectID, sandbox); err != nil {
+	if err := repository.verifyManifestParents(projectID, workspace); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return state.Manifest{}, false, nil
 		}
 		return state.Manifest{}, false, model.Wrap(model.CodeInternal, "verify manifest directories", err)
 	}
-	manifest, found, err := loadManifestFile(path, projectID, sandbox, runID)
+	manifest, found, err := loadManifestFile(path, projectID, workspace, runID)
 	if err != nil {
 		return state.Manifest{}, false, err
 	}
@@ -135,16 +135,16 @@ func (repository *ManifestRepository) ReplaceManifest(ctx context.Context, repla
 	if expectedGeneration == 0 || replacement.Generation != expectedGeneration || expectedGeneration == ^uint64(0) {
 		return model.NewError(model.CodeInvalidInput, "replacement generation must equal the positive expected generation and be incrementable", nil)
 	}
-	path, err := repository.manifestPath(replacement.ProjectID, replacement.Sandbox, replacement.RunID)
+	path, err := repository.manifestPath(replacement.ProjectID, replacement.Workspace, replacement.RunID)
 	if err != nil {
 		return err
 	}
-	lock, err := repository.lockRun(ctx, replacement.ProjectID, replacement.Sandbox, replacement.RunID)
+	lock, err := repository.lockRun(ctx, replacement.ProjectID, replacement.Workspace, replacement.RunID)
 	if err != nil {
 		return err
 	}
 	defer lock.Unlock()
-	current, found, err := repository.LoadManifest(ctx, replacement.ProjectID, replacement.Sandbox, replacement.RunID)
+	current, found, err := repository.LoadManifest(ctx, replacement.ProjectID, replacement.Workspace, replacement.RunID)
 	if err != nil {
 		return err
 	}
@@ -269,26 +269,26 @@ func (repository *ManifestRepository) ListAllManifests(ctx context.Context) ([]s
 	return result, nil
 }
 
-func (repository *ManifestRepository) DeleteManifest(ctx context.Context, projectID model.ProjectID, sandbox model.SandboxName, runID model.RunID) error {
+func (repository *ManifestRepository) DeleteManifest(ctx context.Context, projectID model.ProjectID, workspace model.WorkspaceName, runID model.RunID) error {
 	if err := ctx.Err(); err != nil {
 		return model.Wrap(model.CodeUnavailable, "delete manifest", err)
 	}
-	path, err := repository.manifestPath(projectID, sandbox, runID)
+	path, err := repository.manifestPath(projectID, workspace, runID)
 	if err != nil {
 		return err
 	}
-	lock, err := repository.lockRun(ctx, projectID, sandbox, runID)
+	lock, err := repository.lockRun(ctx, projectID, workspace, runID)
 	if err != nil {
 		return err
 	}
 	defer lock.Unlock()
-	if err := repository.verifyManifestParents(projectID, sandbox); err != nil {
+	if err := repository.verifyManifestParents(projectID, workspace); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return model.Wrap(model.CodeInternal, "verify manifest directories for deletion", err)
 	}
-	if _, found, err := loadManifestFile(path, projectID, sandbox, runID); err != nil {
+	if _, found, err := loadManifestFile(path, projectID, workspace, runID); err != nil {
 		return err
 	} else if !found {
 		return nil
@@ -324,57 +324,57 @@ func (repository *ManifestRepository) LockProject(ctx context.Context, projectID
 	return repository.acquireLock(lockContext, path, projectID, "", "project")
 }
 
-func (repository *ManifestRepository) LockSandbox(ctx context.Context, projectID model.ProjectID, sandbox model.SandboxName) (state.ProjectLock, error) {
+func (repository *ManifestRepository) LockWorkspace(ctx context.Context, projectID model.ProjectID, workspace model.WorkspaceName) (state.ProjectLock, error) {
 	if err := validateProjectID(projectID); err != nil {
 		return nil, err
 	}
-	parsedSandbox, err := model.ParseSandboxName(string(sandbox))
-	if err != nil || parsedSandbox != sandbox {
-		return nil, model.NewError(model.CodeInvalidInput, "invalid sandbox lock name", err)
+	parsedWorkspace, err := model.ParseWorkspaceName(string(workspace))
+	if err != nil || parsedWorkspace != workspace {
+		return nil, model.NewError(model.CodeInvalidInput, "invalid workspace lock name", err)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, model.Wrap(model.CodeUnavailable, "lock sandbox", err)
+		return nil, model.Wrap(model.CodeUnavailable, "lock workspace", err)
 	}
-	if err := repository.ensureDirectoryPath(sandboxLockDirectory); err != nil {
-		return nil, model.Wrap(model.CodeInternal, "create sandbox lock directory", err)
+	if err := repository.ensureDirectoryPath(workspaceLockDirectory); err != nil {
+		return nil, model.Wrap(model.CodeInternal, "create workspace lock directory", err)
 	}
-	if err := repository.ensureDirectoryPath(sandboxLockDirectory, string(projectID)); err != nil {
-		return nil, model.Wrap(model.CodeInternal, "create sandbox project lock directory", err)
+	if err := repository.ensureDirectoryPath(workspaceLockDirectory, string(projectID)); err != nil {
+		return nil, model.Wrap(model.CodeInternal, "create workspace project lock directory", err)
 	}
-	directory := filepath.Join(repository.root, sandboxLockDirectory, string(projectID))
-	path := filepath.Join(directory, string(sandbox)+".lock")
+	directory := filepath.Join(repository.root, workspaceLockDirectory, string(projectID))
+	path := filepath.Join(directory, string(workspace)+".lock")
 	if filepath.Dir(path) != directory {
-		return nil, model.NewError(model.CodeInvalidInput, "sandbox lock path escapes state root", nil)
+		return nil, model.NewError(model.CodeInvalidInput, "workspace lock path escapes state root", nil)
 	}
 	lockContext, cancel := context.WithTimeout(ctx, repository.projectLockWait)
 	defer cancel()
-	return repository.acquireLock(lockContext, path, projectID, sandbox, "sandbox")
+	return repository.acquireLock(lockContext, path, projectID, workspace, "workspace")
 }
 
 func (repository *ManifestRepository) listProject(ctx context.Context, projectID model.ProjectID, projectPath string, budget *int) ([]state.Manifest, error) {
-	sandboxEntries, err := readDirectoryBounded(projectPath)
+	workspaceEntries, err := readDirectoryBounded(projectPath)
 	if err != nil {
 		return nil, model.Wrap(model.CodeInternal, "read project manifest directory", err)
 	}
 	result := make([]state.Manifest, 0)
-	for _, sandboxEntry := range sandboxEntries {
+	for _, workspaceEntry := range workspaceEntries {
 		if err := ctx.Err(); err != nil {
 			return nil, model.Wrap(model.CodeUnavailable, "list project manifests", err)
 		}
 		if err := consumeEntryBudget(budget); err != nil {
 			return nil, err
 		}
-		sandbox, parseErr := model.ParseSandboxName(sandboxEntry.Name())
+		workspace, parseErr := model.ParseWorkspaceName(workspaceEntry.Name())
 		if parseErr != nil {
-			return nil, corruptManifest(fmt.Errorf("unexpected entry %q in project manifest directory", sandboxEntry.Name()))
+			return nil, corruptManifest(fmt.Errorf("unexpected entry %q in project manifest directory", workspaceEntry.Name()))
 		}
-		sandboxPath := filepath.Join(projectPath, sandboxEntry.Name())
-		if err := verifySecureDirectory(sandboxPath); err != nil {
-			return nil, corruptManifest(fmt.Errorf("sandbox entry %q: %w", sandboxEntry.Name(), err))
+		workspacePath := filepath.Join(projectPath, workspaceEntry.Name())
+		if err := verifySecureDirectory(workspacePath); err != nil {
+			return nil, corruptManifest(fmt.Errorf("workspace entry %q: %w", workspaceEntry.Name(), err))
 		}
-		runEntries, err := readDirectoryBounded(sandboxPath)
+		runEntries, err := readDirectoryBounded(workspacePath)
 		if err != nil {
-			return nil, model.Wrap(model.CodeInternal, "read sandbox manifest directory", err)
+			return nil, model.Wrap(model.CodeInternal, "read workspace manifest directory", err)
 		}
 		for _, runEntry := range runEntries {
 			if err := consumeEntryBudget(budget); err != nil {
@@ -385,19 +385,19 @@ func (repository *ManifestRepository) listProject(ctx context.Context, projectID
 			}
 			name := runEntry.Name()
 			if isAtomicWriteTempName(name) {
-				if err := repository.removeAtomicWriteTemp(sandboxPath, name); err != nil {
+				if err := repository.removeAtomicWriteTemp(workspacePath, name); err != nil {
 					return nil, corruptManifest(fmt.Errorf("atomic-write temporary entry %q: %w", name, err))
 				}
 				continue
 			}
 			if filepath.Ext(name) != ".json" {
-				return nil, corruptManifest(fmt.Errorf("unexpected entry %q in sandbox manifest directory", name))
+				return nil, corruptManifest(fmt.Errorf("unexpected entry %q in workspace manifest directory", name))
 			}
 			runID, parseErr := model.ParseRunID(name[:len(name)-len(".json")])
 			if parseErr != nil {
 				return nil, corruptManifest(fmt.Errorf("invalid run manifest filename %q", name))
 			}
-			manifest, found, err := loadManifestFile(filepath.Join(sandboxPath, name), projectID, sandbox, runID)
+			manifest, found, err := loadManifestFile(filepath.Join(workspacePath, name), projectID, workspace, runID)
 			if err != nil {
 				return nil, err
 			}
@@ -411,19 +411,19 @@ func (repository *ManifestRepository) listProject(ctx context.Context, projectID
 	return result, nil
 }
 
-func (repository *ManifestRepository) manifestPath(projectID model.ProjectID, sandbox model.SandboxName, runID model.RunID) (string, error) {
+func (repository *ManifestRepository) manifestPath(projectID model.ProjectID, workspace model.WorkspaceName, runID model.RunID) (string, error) {
 	if err := validateProjectID(projectID); err != nil {
 		return "", err
 	}
-	parsedSandbox, err := model.ParseSandboxName(string(sandbox))
-	if err != nil || parsedSandbox != sandbox {
-		return "", model.NewError(model.CodeInvalidInput, "invalid manifest sandbox", err)
+	parsedWorkspace, err := model.ParseWorkspaceName(string(workspace))
+	if err != nil || parsedWorkspace != workspace {
+		return "", model.NewError(model.CodeInvalidInput, "invalid manifest workspace", err)
 	}
 	parsedRunID, err := model.ParseRunID(string(runID))
 	if err != nil || parsedRunID != runID {
 		return "", model.NewError(model.CodeInvalidInput, "invalid manifest run ID", err)
 	}
-	directory := filepath.Join(repository.root, manifestDirectory, string(projectID), string(sandbox))
+	directory := filepath.Join(repository.root, manifestDirectory, string(projectID), string(workspace))
 	path := filepath.Join(directory, string(runID)+".json")
 	if filepath.Dir(path) != directory {
 		return "", model.NewError(model.CodeInvalidInput, "manifest path escapes state root", nil)
@@ -439,22 +439,22 @@ func validateProjectID(projectID model.ProjectID) error {
 	return nil
 }
 
-func (repository *ManifestRepository) ensureManifestParents(projectID model.ProjectID, sandbox model.SandboxName) error {
+func (repository *ManifestRepository) ensureManifestParents(projectID model.ProjectID, workspace model.WorkspaceName) error {
 	if err := repository.ensureDirectoryPath(manifestDirectory); err != nil {
 		return err
 	}
 	if err := repository.ensureDirectoryPath(manifestDirectory, string(projectID)); err != nil {
 		return err
 	}
-	return repository.ensureDirectoryPath(manifestDirectory, string(projectID), string(sandbox))
+	return repository.ensureDirectoryPath(manifestDirectory, string(projectID), string(workspace))
 }
 
-func (repository *ManifestRepository) verifyManifestParents(projectID model.ProjectID, sandbox model.SandboxName) error {
+func (repository *ManifestRepository) verifyManifestParents(projectID model.ProjectID, workspace model.WorkspaceName) error {
 	paths := []string{
 		repository.root,
 		filepath.Join(repository.root, manifestDirectory),
 		filepath.Join(repository.root, manifestDirectory, string(projectID)),
-		filepath.Join(repository.root, manifestDirectory, string(projectID), string(sandbox)),
+		filepath.Join(repository.root, manifestDirectory, string(projectID), string(workspace)),
 	}
 	for _, path := range paths {
 		if err := verifySecureDirectory(path); err != nil {
@@ -552,7 +552,7 @@ func encodeManifest(manifest state.Manifest) ([]byte, error) {
 	return data, nil
 }
 
-func loadManifestFile(path string, projectID model.ProjectID, sandbox model.SandboxName, runID model.RunID) (state.Manifest, bool, error) {
+func loadManifestFile(path string, projectID model.ProjectID, workspace model.WorkspaceName, runID model.RunID) (state.Manifest, bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return state.Manifest{}, false, nil
@@ -591,58 +591,38 @@ func loadManifestFile(path string, projectID model.ProjectID, sandbox model.Sand
 	if err := validateStrictJSON(data); err != nil {
 		return state.Manifest{}, false, corruptManifest(err)
 	}
-	var manifest state.Manifest
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil {
+	manifest, err := state.DecodeManifest(data)
+	if err != nil {
 		return state.Manifest{}, false, corruptManifest(err)
 	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			err = errors.New("multiple JSON values")
-		}
-		return state.Manifest{}, false, corruptManifest(err)
-	}
-	if manifest.ProjectID != projectID || manifest.Sandbox != sandbox || manifest.RunID != runID {
+	if manifest.ProjectID != projectID || manifest.Workspace != workspace || manifest.RunID != runID {
 		return state.Manifest{}, false, corruptManifest(errors.New("manifest identity does not match its path"))
-	}
-	if err := state.ValidateManifest(manifest); err != nil {
-		return state.Manifest{}, false, corruptManifest(err)
 	}
 	return manifest, true, nil
 }
 
 func validateReplacement(current, replacement state.Manifest) error {
+	if current.Legacy || replacement.Legacy {
+		return errors.New("legacy manifests are cleanup-only and immutable")
+	}
 	identityChanged := replacement.Version != current.Version ||
 		replacement.ProjectID != current.ProjectID ||
 		replacement.CanonicalRoot != current.CanonicalRoot ||
-		replacement.Sandbox != current.Sandbox ||
+		replacement.Workspace != current.Workspace ||
 		replacement.RunID != current.RunID ||
-		replacement.Mode != current.Mode ||
 		!replacement.CreatedAt.Equal(current.CreatedAt)
-	planChangedWithoutPortReconfiguration := replacement.PlanHash != current.PlanHash && replacement.Operation != "reconfigure-ports"
-	if identityChanged || planChangedWithoutPortReconfiguration {
+	if identityChanged || replacement.PlanHash != current.PlanHash {
 		return errors.New("replacement changes immutable manifest identity")
 	}
 	if replacement.UpdatedAt.Before(current.UpdatedAt) {
 		return errors.New("replacement updated_at precedes current updated_at")
 	}
 	if replacement.State != current.State {
-		if err := current.State.Transition(replacement.State); err != nil && !isCapturePendingTransition(current, replacement) {
+		if err := current.State.Transition(replacement.State); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func isCapturePendingTransition(current, replacement state.Manifest) bool {
-	return current.Mode == model.ModeClone &&
-		(current.State == model.StateRunning || current.State == model.StateStopped) &&
-		!current.UncapturedWork &&
-		replacement.State == model.StateCreating &&
-		replacement.Operation == "capture" &&
-		replacement.UncapturedWork
 }
 
 func (repository *ManifestRepository) atomicWrite(destination string, data []byte, replace bool) (result error) {
@@ -807,8 +787,8 @@ func sortManifests(manifests []state.Manifest) {
 		if manifests[i].ProjectID != manifests[j].ProjectID {
 			return manifests[i].ProjectID < manifests[j].ProjectID
 		}
-		if manifests[i].Sandbox != manifests[j].Sandbox {
-			return manifests[i].Sandbox < manifests[j].Sandbox
+		if manifests[i].Workspace != manifests[j].Workspace {
+			return manifests[i].Workspace < manifests[j].Workspace
 		}
 		return manifests[i].RunID < manifests[j].RunID
 	})
@@ -819,11 +799,11 @@ func corruptManifest(err error) error {
 }
 
 type lockOwner struct {
-	PID        int               `json:"pid"`
-	ProjectID  model.ProjectID   `json:"project_id"`
-	Scope      string            `json:"scope"`
-	Sandbox    model.SandboxName `json:"sandbox,omitempty"`
-	AcquiredAt time.Time         `json:"acquired_at"`
+	PID        int                 `json:"pid"`
+	ProjectID  model.ProjectID     `json:"project_id"`
+	Scope      string              `json:"scope"`
+	Workspace  model.WorkspaceName `json:"workspace,omitempty"`
+	AcquiredAt time.Time           `json:"acquired_at"`
 }
 
 type fileLock struct {
@@ -832,21 +812,21 @@ type fileLock struct {
 	unlocked bool
 }
 
-func (repository *ManifestRepository) lockRun(ctx context.Context, projectID model.ProjectID, sandbox model.SandboxName, runID model.RunID) (*fileLock, error) {
+func (repository *ManifestRepository) lockRun(ctx context.Context, projectID model.ProjectID, workspace model.WorkspaceName, runID model.RunID) (*fileLock, error) {
 	if err := repository.ensureDirectoryPath(manifestLockDirectory); err != nil {
 		return nil, model.Wrap(model.CodeInternal, "create manifest lock directory", err)
 	}
 	if err := repository.ensureDirectoryPath(manifestLockDirectory, string(projectID)); err != nil {
 		return nil, model.Wrap(model.CodeInternal, "create manifest project lock directory", err)
 	}
-	if err := repository.ensureDirectoryPath(manifestLockDirectory, string(projectID), string(sandbox)); err != nil {
-		return nil, model.Wrap(model.CodeInternal, "create manifest sandbox lock directory", err)
+	if err := repository.ensureDirectoryPath(manifestLockDirectory, string(projectID), string(workspace)); err != nil {
+		return nil, model.Wrap(model.CodeInternal, "create manifest workspace lock directory", err)
 	}
-	path := filepath.Join(repository.root, manifestLockDirectory, string(projectID), string(sandbox), string(runID)+".lock")
-	return repository.acquireLock(ctx, path, projectID, sandbox, "manifest")
+	path := filepath.Join(repository.root, manifestLockDirectory, string(projectID), string(workspace), string(runID)+".lock")
+	return repository.acquireLock(ctx, path, projectID, workspace, "manifest")
 }
 
-func (repository *ManifestRepository) acquireLock(ctx context.Context, path string, projectID model.ProjectID, sandbox model.SandboxName, scope string) (*fileLock, error) {
+func (repository *ManifestRepository) acquireLock(ctx context.Context, path string, projectID model.ProjectID, workspace model.WorkspaceName, scope string) (*fileLock, error) {
 	file, created, err := openLockFile(path)
 	if err != nil {
 		return nil, model.Wrap(model.CodeInternal, "open "+scope+" lock", err)
@@ -890,7 +870,7 @@ func (repository *ManifestRepository) acquireLock(ctx context.Context, path stri
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	owner := lockOwner{PID: os.Getpid(), ProjectID: projectID, Sandbox: sandbox, Scope: scope, AcquiredAt: time.Now().UTC()}
+	owner := lockOwner{PID: os.Getpid(), ProjectID: projectID, Workspace: workspace, Scope: scope, AcquiredAt: time.Now().UTC()}
 	data, err := json.Marshal(owner)
 	if err == nil {
 		data = append(data, '\n')

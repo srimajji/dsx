@@ -1,12 +1,12 @@
 package hostcmd
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -18,312 +18,496 @@ import (
 	"github.com/srimajji/dsx/internal/tui"
 )
 
-func (dispatcher *Dispatcher) executeStart(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet("start")
+const workspaceHelp = `Usage:
+  dsx workspace create NAME [--root PATH] [--default-agent AGENT] [--approve-config HASH] [--open]
+  dsx workspace list [--root PATH] [--format text|json]
+  dsx workspace open NAME [--root PATH]
+  dsx workspace start NAME [--root PATH]
+  dsx workspace stop NAME [--root PATH]
+  dsx workspace restart NAME [--root PATH]
+  dsx workspace update NAME [--root PATH]
+  dsx workspace remove NAME [--root PATH] [--force]
+  dsx workspace remove --all|--legacy-resources [--root PATH] [--force]
+`
+
+func (dispatcher *Dispatcher) executeWorkspace(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return usageError(stderr, "dsx workspace", "workspace requires create, list, open, start, stop, restart, update, or remove")
+	}
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		if len(args) != 1 {
+			return usageError(stderr, "dsx workspace", "workspace help does not accept arguments")
+		}
+		if _, err := io.WriteString(stdout, workspaceHelp); err != nil {
+			return reportError(stderr, "dsx workspace", model.Wrap(model.CodeInternal, "write help", err))
+		}
+		return 0
+	}
+	switch args[0] {
+	case "create":
+		return dispatcher.executeWorkspaceCreate(ctx, args[1:], stdout, stderr)
+	case "list":
+		return dispatcher.executeWorkspaceList(ctx, args[1:], stdout, stderr)
+	case "open", "start", "stop", "restart", "update":
+		return dispatcher.executeNamedWorkspace(ctx, args[0], args[1:], stdout, stderr)
+	case "remove":
+		return dispatcher.executeWorkspaceRemove(ctx, args[1:], stdout, stderr)
+	default:
+		return usageError(stderr, "dsx workspace", fmt.Sprintf("unknown workspace command %q", args[0]))
+	}
+}
+
+func (dispatcher *Dispatcher) executeWorkspaceCreate(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return usageError(stderr, "dsx workspace create", "create requires a workspace name")
+	}
+	workspace, err := model.ParseWorkspaceName(args[0])
+	if err != nil {
+		return usageError(stderr, "dsx workspace create", err.Error())
+	}
+	flags := newFlagSet("workspace create")
 	root := flags.String("root", ".", "project root")
-	approval := flags.String("approve-config", "", "approved executable configuration hash")
-	if exit, done := parseFlags(flags, args, stdout, stderr, startHelp); done {
+	defaultAgent := flags.String("default-agent", "", "workspace default agent")
+	approval := flags.String("approve-config", "", "exact executable configuration hash")
+	open := flags.Bool("open", false, "open the workspace after creation")
+	if exit, done := parseFlags(flags, args[1:], stdout, stderr, workspaceHelp); done {
 		return exit
 	}
 	if flags.NArg() != 0 {
-		return usageError(stderr, "dsx start", "start does not accept positional arguments")
+		return usageError(stderr, "dsx workspace create", "create does not accept extra arguments")
 	}
 	if err := validateRoot(*root); err != nil {
-		return reportError(stderr, "dsx start", err)
+		return reportError(stderr, "dsx workspace create", err)
 	}
-	if !validApprovalHash(*approval) {
-		return usageError(stderr, "dsx start", "--approve-config must be exactly 64 lowercase hexadecimal characters")
+	if *defaultAgent != "" {
+		if _, err := harness.ParseName(*defaultAgent); err != nil {
+			return usageError(stderr, "dsx workspace create", err.Error())
+		}
 	}
-	if dispatcher == nil || dispatcher.dependencies.Lifecycle == nil {
-		return reportError(stderr, "dsx start", model.NewError(model.CodeUnavailable, "lifecycle service is unavailable", nil))
+	if *approval != "" && !validApprovalHash(*approval) {
+		return usageError(stderr, "dsx workspace create", "--approve-config must be exactly 64 lowercase hexadecimal characters")
 	}
-	result, err := dispatcher.dependencies.Lifecycle.Start(ctx, app.StartRequest{Root: *root, ApproveConfig: *approval})
+	if *open && !dispatcher.interactive(stdout) {
+		return usageError(stderr, "dsx workspace create", "--open requires an interactive terminal")
+	}
+	if dispatcher == nil || dispatcher.dependencies.Workspaces == nil {
+		return reportError(stderr, "dsx workspace create", model.NewError(model.CodeUnavailable, "workspace service is unavailable", nil))
+	}
+	result, err := dispatcher.dependencies.Workspaces.Create(ctx, app.WorkspaceCreateRequest{Root: *root, Workspace: workspace, DefaultAgent: *defaultAgent, ApproveConfig: *approval, Open: *open, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr, RunInteractive: dispatcher.runInteractive})
 	if err != nil {
-		return reportError(stderr, "dsx start", err)
+		return reportError(stderr, "dsx workspace create", err)
 	}
-	if err := renderStart(stdout, result); err != nil {
-		return reportError(stderr, "dsx start", err)
+	if err := renderWorkspaceResult(stdout, result); err != nil {
+		return reportError(stderr, "dsx workspace create", err)
 	}
 	return 0
 }
 
-func (dispatcher *Dispatcher) executeStop(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet("stop")
+func (dispatcher *Dispatcher) executeWorkspaceList(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlagSet("workspace list")
 	root := flags.String("root", ".", "project root")
-	name := flags.String("name", "", "named clone sandbox")
-	if exit, done := parseFlags(flags, args, stdout, stderr, stopHelp); done {
+	format := flags.String("format", "text", "output format: text or json")
+	if exit, done := parseFlags(flags, args, stdout, stderr, workspaceHelp); done {
 		return exit
 	}
 	if flags.NArg() != 0 {
-		return usageError(stderr, "dsx stop", "stop does not accept positional arguments")
+		return usageError(stderr, "dsx workspace list", "list does not accept positional arguments")
 	}
 	if err := validateRoot(*root); err != nil {
-		return reportError(stderr, "dsx stop", err)
+		return reportError(stderr, "dsx workspace list", err)
 	}
-	if err := validateNamedLifecycleSelector(*name); err != nil {
-		return usageError(stderr, "dsx stop", err.Error())
+	if err := validateFormat(*format); err != nil {
+		return reportError(stderr, "dsx workspace list", err)
 	}
-	if dispatcher == nil || dispatcher.dependencies.Lifecycle == nil {
-		return reportError(stderr, "dsx stop", model.NewError(model.CodeUnavailable, "lifecycle service is unavailable", nil))
+	if dispatcher == nil || dispatcher.dependencies.Workspaces == nil {
+		return reportError(stderr, "dsx workspace list", model.NewError(model.CodeUnavailable, "workspace service is unavailable", nil))
 	}
-	result, err := dispatcher.dependencies.Lifecycle.Stop(ctx, app.StopRequest{Root: *root, Sandbox: *name})
+	result, err := dispatcher.dependencies.Workspaces.List(ctx, app.WorkspaceListRequest{Root: *root})
 	if err != nil {
-		return reportError(stderr, "dsx stop", err)
+		return reportError(stderr, "dsx workspace list", err)
 	}
-	if err := renderStop(stdout, result); err != nil {
-		return reportError(stderr, "dsx stop", err)
+	if err := renderWorkspaceList(stdout, result, *format); err != nil {
+		return reportError(stderr, "dsx workspace list", err)
 	}
 	return 0
 }
 
-func (dispatcher *Dispatcher) executeClean(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet("clean")
+func (dispatcher *Dispatcher) executeNamedWorkspace(ctx context.Context, operation string, args []string, stdout, stderr io.Writer) int {
+	command := "dsx workspace " + operation
+	if len(args) == 0 {
+		return usageError(stderr, command, operation+" requires a workspace name")
+	}
+	workspace, err := model.ParseWorkspaceName(args[0])
+	if err != nil {
+		return usageError(stderr, command, err.Error())
+	}
+	flags := newFlagSet("workspace " + operation)
 	root := flags.String("root", ".", "project root")
-	name := flags.String("name", "", "named clone sandbox")
-	all := flags.Bool("all", false, "remove DSX-owned resources for every project")
-	force := flags.Bool("force", false, "bypass interactive cleanup confirmation")
-	discardUnfetched := flags.Bool("discard-unfetched", false, "permit deletion of unfetched or uncaptured clone work")
-	purgeAuth := flags.Bool("purge-auth", false, "remove the selected persistent harness authentication profile")
-	agent := flags.String("agent", "", "harness owning the authentication profile")
-	profile := flags.String("profile", "default", "persistent authentication profile")
-	if exit, done := parseFlags(flags, args, stdout, stderr, cleanHelp); done {
+	if exit, done := parseFlags(flags, args[1:], stdout, stderr, workspaceHelp); done {
 		return exit
 	}
 	if flags.NArg() != 0 {
-		return usageError(stderr, "dsx clean", "clean does not accept positional arguments")
+		return usageError(stderr, command, operation+" does not accept extra arguments")
 	}
-	if *all && *root != "." {
-		return usageError(stderr, "dsx clean", "--root cannot be combined with --all")
+	if err := validateRoot(*root); err != nil {
+		return reportError(stderr, command, err)
 	}
-	if *all && *name != "" {
-		return usageError(stderr, "dsx clean", "--name cannot be combined with --all")
+	if operation == "update" {
+		if dispatcher == nil || dispatcher.dependencies.Git == nil {
+			return reportError(stderr, command, model.NewError(model.CodeUnavailable, "workspace Git service is unavailable", nil))
+		}
+		result, err := dispatcher.dependencies.Git.Update(ctx, app.WorkspaceUpdateRequest{Root: *root, Workspace: workspace})
+		if err != nil {
+			return reportError(stderr, command, err)
+		}
+		if err := renderWorkspaceResult(stdout, result); err != nil {
+			return reportError(stderr, command, err)
+		}
+		return 0
 	}
-	if err := validateNamedLifecycleSelector(*name); err != nil {
-		return usageError(stderr, "dsx clean", err.Error())
+	if dispatcher == nil || dispatcher.dependencies.Workspaces == nil {
+		return reportError(stderr, command, model.NewError(model.CodeUnavailable, "workspace service is unavailable", nil))
 	}
-	if !*all {
+	switch operation {
+	case "open":
+		if !dispatcher.interactive(stdout) {
+			return usageError(stderr, command, "open requires an interactive terminal")
+		}
+		result, err := dispatcher.dependencies.Workspaces.Open(ctx, app.WorkspaceOpenRequest{Root: *root, Workspace: workspace, Terminal: true, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr, RunInteractive: dispatcher.runInteractive})
+		if err != nil {
+			return reportError(stderr, command, err)
+		}
+		if err := renderWorkspaceResult(stdout, result.WorkspaceResult); err != nil {
+			return reportError(stderr, command, err)
+		}
+		exit, err := runtimeExitCode(result.Exit, "workspace shell")
+		if err != nil {
+			return reportError(stderr, command, err)
+		}
+		return exit
+	case "start":
+		result, err := dispatcher.dependencies.Workspaces.Start(ctx, app.WorkspaceStartRequest{Root: *root, Workspace: workspace})
+		if err != nil {
+			return reportError(stderr, command, err)
+		}
+		if err := renderWorkspaceResult(stdout, result); err != nil {
+			return reportError(stderr, command, err)
+		}
+	case "stop":
+		result, err := dispatcher.dependencies.Workspaces.Stop(ctx, app.WorkspaceStopRequest{Root: *root, Workspace: workspace})
+		if err != nil {
+			return reportError(stderr, command, err)
+		}
+		if err := renderWorkspaceResult(stdout, result); err != nil {
+			return reportError(stderr, command, err)
+		}
+	case "restart":
+		result, err := dispatcher.dependencies.Workspaces.Restart(ctx, app.WorkspaceRestartRequest{Root: *root, Workspace: workspace})
+		if err != nil {
+			return reportError(stderr, command, err)
+		}
+		if err := renderWorkspaceResult(stdout, result); err != nil {
+			return reportError(stderr, command, err)
+		}
+	}
+	return 0
+}
+
+func (dispatcher *Dispatcher) executeWorkspaceRemove(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return usageError(stderr, "dsx workspace remove", "remove requires a workspace name or an explicit cleanup selector")
+	}
+	if !strings.HasPrefix(args[0], "-") {
+		workspace, err := model.ParseWorkspaceName(args[0])
+		if err != nil {
+			return usageError(stderr, "dsx workspace remove", err.Error())
+		}
+		flags := newFlagSet("workspace remove")
+		root := flags.String("root", ".", "project root")
+		force := flags.Bool("force", false, "confirm destructive removal and loss of unfetched work")
+		if exit, done := parseFlags(flags, args[1:], stdout, stderr, workspaceHelp); done {
+			return exit
+		}
+		if flags.NArg() != 0 {
+			return usageError(stderr, "dsx workspace remove", "remove does not accept extra arguments")
+		}
 		if err := validateRoot(*root); err != nil {
-			return reportError(stderr, "dsx clean", err)
+			return reportError(stderr, "dsx workspace remove", err)
 		}
-	}
-	if *purgeAuth {
-		if _, err := harness.ParseName(*agent); err != nil {
-			return usageError(stderr, "dsx clean", "--purge-auth requires --agent omp|codex|claude|opencode")
+		confirmed, exit := dispatcher.confirmDestructive(fmt.Sprintf("Remove workspace %s? [y/N] ", workspace), *force, stdout, stderr)
+		if !confirmed {
+			return exit
 		}
-		if _, err := model.ParseSandboxName(*profile); err != nil {
-			return usageError(stderr, "dsx clean", err.Error())
+		return dispatcher.removeWorkspace(ctx, *root, workspace, false, *force, stdout, stderr)
+	}
+	flags := newFlagSet("workspace remove")
+	root := flags.String("root", ".", "project root")
+	all := flags.Bool("all", false, "remove all current-project workspaces")
+	legacy := flags.Bool("legacy-resources", false, "remove proven current-project legacy resources")
+	allProjects := flags.Bool("all-projects", false, "remove proven workspaces for all projects")
+	force := flags.Bool("force", false, "confirm destructive removal and loss of unfetched work")
+	if exit, done := parseFlags(flags, args, stdout, stderr, workspaceHelp); done {
+		return exit
+	}
+	if flags.NArg() != 0 {
+		return usageError(stderr, "dsx workspace remove", "remove does not accept positional arguments with a cleanup selector")
+	}
+	selected := 0
+	if *all {
+		selected++
+	}
+	if *legacy {
+		selected++
+	}
+	if *allProjects {
+		selected++
+	}
+	if selected != 1 {
+		return usageError(stderr, "dsx workspace remove", "select exactly one of --all, --legacy-resources, or --all-projects")
+	}
+	if *allProjects {
+		if dispatcher == nil || dispatcher.dependencies.Workspaces == nil || dispatcher.dependencies.Inventory == nil {
+			return reportError(stderr, "dsx workspace remove", model.NewError(model.CodeUnavailable, "all-project cleanup inventory is unavailable", nil))
 		}
-		if dispatcher == nil || dispatcher.dependencies.Harness == nil {
-			return reportError(stderr, "dsx clean", model.NewError(model.CodeUnavailable, "authentication service is unavailable", nil))
+		manifests, err := dispatcher.dependencies.Inventory.ListAllManifests(ctx)
+		if err != nil {
+			return reportError(stderr, "dsx workspace remove", err)
 		}
+		sort.SliceStable(manifests, func(i, j int) bool {
+			if manifests[i].CanonicalRoot != manifests[j].CanonicalRoot {
+				return manifests[i].CanonicalRoot < manifests[j].CanonicalRoot
+			}
+			if manifests[i].Workspace != manifests[j].Workspace {
+				return manifests[i].Workspace < manifests[j].Workspace
+			}
+			if manifests[i].Legacy != manifests[j].Legacy {
+				return !manifests[i].Legacy
+			}
+			return manifests[i].RunID < manifests[j].RunID
+		})
+		confirmed, exit := dispatcher.confirmDestructive("Remove proven workspace resources for all projects? [y/N] ", *force, stdout, stderr)
+		if !confirmed {
+			return exit
+		}
+		seen := make(map[string]struct{}, len(manifests))
+		for _, manifest := range manifests {
+			if manifest.State == model.StateDeleted {
+				continue
+			}
+			key := manifest.CanonicalRoot + "\x00" + string(manifest.Workspace) + fmt.Sprint("\x00", manifest.Legacy)
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			if exit := dispatcher.removeWorkspace(ctx, manifest.CanonicalRoot, manifest.Workspace, manifest.Legacy, *force, stdout, stderr); exit != 0 {
+				return exit
+			}
+		}
+		return 0
 	}
-	if dispatcher == nil || dispatcher.dependencies.Lifecycle == nil {
-		return reportError(stderr, "dsx clean", model.NewError(model.CodeUnavailable, "lifecycle service is unavailable", nil))
+	if err := validateRoot(*root); err != nil {
+		return reportError(stderr, "dsx workspace remove", err)
 	}
-	confirmed, confirmationExit := dispatcher.confirmCleanup(*all, *name, *force, stdout, stderr)
-	if confirmationExit != 0 || !confirmed {
-		return confirmationExit
+	if dispatcher == nil || dispatcher.dependencies.Workspaces == nil {
+		return reportError(stderr, "dsx workspace remove", model.NewError(model.CodeUnavailable, "workspace service is unavailable", nil))
 	}
-	result, err := dispatcher.dependencies.Lifecycle.Clean(ctx, app.CleanRequest{
-		Root: *root, Sandbox: *name, All: *all, Confirmed: true, DiscardUnfetched: *discardUnfetched,
-	})
+	listed, err := dispatcher.dependencies.Workspaces.List(ctx, app.WorkspaceListRequest{Root: *root})
 	if err != nil {
-		return reportError(stderr, "dsx clean", err)
+		return reportError(stderr, "dsx workspace remove", err)
 	}
-	if *purgeAuth {
-		if err := dispatcher.dependencies.Harness.PurgeAuth(ctx, app.PurgeAuthRequest{Agent: *agent, Profile: *profile}); err != nil {
-			return reportError(stderr, "dsx clean", err)
+	confirmed, exit := dispatcher.confirmDestructive("Remove the selected workspace resources? [y/N] ", *force, stdout, stderr)
+	if !confirmed {
+		return exit
+	}
+	for _, summary := range listed.Workspaces {
+		if *legacy != summary.Legacy {
+			continue
 		}
-	}
-	if err := renderClean(stdout, result); err != nil {
-		return reportError(stderr, "dsx clean", err)
+		if exit := dispatcher.removeWorkspace(ctx, *root, summary.Workspace, summary.Legacy, *force, stdout, stderr); exit != 0 {
+			return exit
+		}
 	}
 	return 0
 }
 
-func (dispatcher *Dispatcher) confirmCleanup(all bool, name string, force bool, stdout, stderr io.Writer) (bool, int) {
-	if force {
-		return true, 0
+func (dispatcher *Dispatcher) removeWorkspace(ctx context.Context, root string, workspace model.WorkspaceName, legacy, discard bool, stdout, stderr io.Writer) int {
+	if dispatcher == nil || dispatcher.dependencies.Workspaces == nil {
+		return reportError(stderr, "dsx workspace remove", model.NewError(model.CodeUnavailable, "workspace service is unavailable", nil))
 	}
-	if !dispatcher.interactive(stdout) {
-		return false, usageError(stderr, "dsx clean", "cleanup requires an interactive confirmation or --force")
+	result, err := dispatcher.dependencies.Workspaces.Remove(ctx, app.WorkspaceRemoveRequest{Root: root, Workspace: workspace, Confirmed: true, DiscardUnfetched: discard, LegacyResources: legacy})
+	if err != nil {
+		return reportError(stderr, "dsx workspace remove", err)
 	}
-	scope := "this project"
-	if all {
-		scope = "every DSX project"
-	} else if name != "" {
-		scope = fmt.Sprintf("sandbox %q", terminal.SanitizeLine(name))
+	if err := renderWorkspaceRemove(stdout, result); err != nil {
+		return reportError(stderr, "dsx workspace remove", err)
 	}
-	if _, err := fmt.Fprintf(stdout, "Remove all DSX-owned resources for %s? [y/N] ", scope); err != nil {
-		return false, reportError(stderr, "dsx clean", err)
-	}
-	line, err := bufio.NewReader(io.LimitReader(dispatcher.dependencies.Stdin, 32)).ReadString('\n')
-	if err != nil && err != io.EOF {
-		return false, reportError(stderr, "dsx clean", err)
-	}
-	answer := strings.ToLower(strings.TrimSpace(line))
-	if answer != "y" && answer != "yes" {
-		_, _ = fmt.Fprintln(stdout, "Cleanup cancelled.")
-		return false, 0
-	}
-	return true, 0
+	return 0
 }
 
-func validateNamedLifecycleSelector(value string) error {
-	if value == "" {
-		return nil
+func (dispatcher *Dispatcher) loadDashboard(ctx context.Context, root string) (tui.DashboardData, error) {
+	if dispatcher.dependencies.Inspector == nil || dispatcher.dependencies.Workspaces == nil {
+		return tui.DashboardData{}, model.NewError(model.CodeUnavailable, "dashboard services are unavailable", nil)
 	}
-	sandbox, err := model.ParseSandboxName(value)
+	inspected, err := dispatcher.dependencies.Inspector.Inspect(ctx, app.InspectRequest{Root: root})
 	if err != nil {
-		return err
+		return tui.DashboardData{}, err
 	}
-	if sandbox == model.SandboxName("main") {
-		return fmt.Errorf("main is the live workspace and cannot be selected with --name")
+	listed, err := dispatcher.dependencies.Workspaces.List(ctx, app.WorkspaceListRequest{Root: root})
+	if err != nil {
+		return tui.DashboardData{}, err
+	}
+	data := tui.DashboardData{
+		Root: inspected.Facts.CanonicalRoot, Branch: inspected.Facts.Branch,
+		Revision: inspected.Facts.Revision, Clean: inspected.Facts.Clean,
+		AllowedAgents: append([]string(nil), inspected.Plan.Agents.Allowed...),
+		DefaultAgent:  inspected.Plan.Agents.Default,
+	}
+	for _, workspace := range listed.Workspaces {
+		if workspace.Legacy {
+			continue
+		}
+		data.Workspaces = append(data.Workspaces, tui.DashboardWorkspace{Name: string(workspace.Workspace), State: string(workspace.State), DefaultAgent: workspace.DefaultAgent, MutationActive: workspace.MutationActive})
+	}
+	return data, nil
+}
+
+func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Intent, stdout, stderr io.Writer) int {
+	root := intent.Root
+	if strings.TrimSpace(root) == "" {
+		root = "."
+	}
+	workspace, err := model.ParseWorkspaceName(intent.Workspace)
+	if err != nil {
+		return usageError(stderr, "dsx "+intent.Action, err.Error())
+	}
+	if dispatcher.dependencies.Workspaces == nil {
+		return reportError(stderr, "dsx "+intent.Action, model.NewError(model.CodeUnavailable, "workspace service is unavailable", nil))
+	}
+	switch intent.Action {
+	case "workspace-create":
+		result, err := dispatcher.dependencies.Workspaces.Create(ctx, app.WorkspaceCreateRequest{
+			Root: root, Workspace: workspace, SourceBranch: intent.SourceBranch, SourceRevision: intent.SourceRevision,
+			DefaultAgent: intent.Agent, Open: intent.Open, Stdin: dispatcher.dependencies.Stdin,
+			Stdout: stdout, Stderr: stderr, RunInteractive: dispatcher.runInteractive,
+		})
+		if err != nil {
+			return reportError(stderr, "dsx workspace create", err)
+		}
+		if err := renderWorkspaceResult(stdout, result); err != nil {
+			return reportError(stderr, "dsx workspace create", err)
+		}
+	case "workspace-open":
+		return dispatcher.executeNamedWorkspace(ctx, "open", []string{string(workspace), "--root", root}, stdout, stderr)
+	case "workspace-start":
+		return dispatcher.executeNamedWorkspace(ctx, "start", []string{string(workspace), "--root", root}, stdout, stderr)
+	case "workspace-stop":
+		return dispatcher.executeNamedWorkspace(ctx, "stop", []string{string(workspace), "--root", root}, stdout, stderr)
+	case "workspace-restart":
+		return dispatcher.executeNamedWorkspace(ctx, "restart", []string{string(workspace), "--root", root}, stdout, stderr)
+	case "workspace-update":
+		return dispatcher.executeNamedWorkspace(ctx, "update", []string{string(workspace), "--root", root}, stdout, stderr)
+	case "workspace-remove":
+		return dispatcher.removeWorkspace(ctx, root, workspace, false, false, stdout, stderr)
+	case "agent-run":
+		if dispatcher.dependencies.Agents == nil {
+			return reportError(stderr, "dsx agent", model.NewError(model.CodeUnavailable, "agent service is unavailable", nil))
+		}
+		result, err := dispatcher.dependencies.Agents.Run(ctx, app.AgentRunRequest{Root: root, Workspace: string(workspace), Agent: intent.Agent, Browser: intent.Browser, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr, RunInteractive: dispatcher.runInteractive, BeforeExec: func(result app.AgentRunResult) error {
+			return renderAgentIdentity(stdout, result.Agent, result.Version)
+		}})
+		if err != nil {
+			return reportError(stderr, "dsx agent", err)
+		}
+		exit, err := runtimeExitCode(result.Exit, "agent")
+		if err != nil {
+			return reportError(stderr, "dsx agent", err)
+		}
+		return exit
+	case "git-status":
+		return dispatcher.executeGit(ctx, []string{"status", string(workspace), "--root", root}, stdout, stderr)
+	case "git-diff":
+		return dispatcher.executeGit(ctx, []string{"diff", string(workspace), "--root", root}, stdout, stderr)
+	case "git-fetch":
+		return dispatcher.executeGit(ctx, []string{"fetch", string(workspace), "--root", root}, stdout, stderr)
+	case "git-apply":
+		return dispatcher.executeGit(ctx, []string{"apply", string(workspace), "--root", root}, stdout, stderr)
+	default:
+		return usageError(stderr, "dsx", fmt.Sprintf("unknown terminal action %q", intent.Action))
+	}
+	return 0
+}
+
+func renderWorkspaceResult(writer io.Writer, result app.WorkspaceResult) error {
+	if _, err := fmt.Fprintf(writer, "Project: %q\nWorkspace: %q\nRun: %q\nState: %q\nExisting: %t\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Workspace)), terminal.SanitizeLine(string(result.RunID)), terminal.SanitizeLine(string(result.State)), result.Existing); err != nil {
+		return model.Wrap(model.CodeInternal, "write workspace result", err)
+	}
+	warnings := append([]string(nil), result.Warnings...)
+	sort.Strings(warnings)
+	for _, warning := range warnings {
+		if _, err := fmt.Fprintf(writer, "Warning: %q\n", terminal.SanitizeLine(warning)); err != nil {
+			return model.Wrap(model.CodeInternal, "write workspace warning", err)
+		}
+	}
+	urls := append([]string(nil), result.URLs...)
+	sort.Strings(urls)
+	for _, url := range urls {
+		if _, err := fmt.Fprintf(writer, "URL: %q\n", terminal.SanitizeLine(url)); err != nil {
+			return model.Wrap(model.CodeInternal, "write workspace URL", err)
+		}
 	}
 	return nil
 }
 
-func (dispatcher *Dispatcher) executeList(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet("list")
-	root := flags.String("root", ".", "project root")
-	format := flags.String("format", "text", "output format: text or json")
-	if exit, done := parseFlags(flags, args, stdout, stderr, listHelp); done {
-		return exit
+func renderWorkspaceList(writer io.Writer, result app.WorkspaceListResult, format string) error {
+	workspaces := append([]app.WorkspaceSummary(nil), result.Workspaces...)
+	for i := range workspaces {
+		workspaces[i].Warnings = append([]string(nil), workspaces[i].Warnings...)
+		sort.Strings(workspaces[i].Warnings)
+		workspaces[i].URLs = append([]string(nil), workspaces[i].URLs...)
+		sort.Strings(workspaces[i].URLs)
 	}
-	if flags.NArg() != 0 {
-		return usageError(stderr, "dsx list", "list does not accept positional arguments")
-	}
-	if err := validateRoot(*root); err != nil {
-		return reportError(stderr, "dsx list", err)
-	}
-	if err := validateFormat(*format); err != nil {
-		return reportError(stderr, "dsx list", err)
-	}
-	if dispatcher == nil || dispatcher.dependencies.Lifecycle == nil {
-		return reportError(stderr, "dsx list", model.NewError(model.CodeUnavailable, "lifecycle service is unavailable", nil))
-	}
-	result, err := dispatcher.dependencies.Lifecycle.List(ctx, app.ListRequest{Root: *root})
-	if err != nil {
-		return reportError(stderr, "dsx list", err)
-	}
-	if err := renderList(stdout, result, *format); err != nil {
-		return reportError(stderr, "dsx list", err)
-	}
-	return 0
-}
-
-func (dispatcher *Dispatcher) executeShell(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlagSet("shell")
-	root := flags.String("root", ".", "project root")
-	approval := flags.String("approve-config", "", "exact executable configuration hash for start-or-attach")
-	agent := flags.String("agent", "", "agent harness")
-	profile := flags.String("profile", "default", "persistent authentication profile")
-	if exit, done := parseFlags(flags, args, stdout, stderr, shellHelp); done {
-		return exit
-	}
-	if flags.NArg() != 0 && !argumentsFollowSeparator(args, flags.Args()) {
-		return usageError(stderr, "dsx shell", "shell command arguments must follow --")
-	}
-	if err := validateRoot(*root); err != nil {
-		return reportError(stderr, "dsx shell", err)
-	}
-	if *approval != "" && !validApprovalHash(*approval) {
-		return usageError(stderr, "dsx shell", "--approve-config must be exactly 64 lowercase hexadecimal characters")
-	}
-	if *agent != "" {
-		if _, err := harness.ParseName(*agent); err != nil {
-			return usageError(stderr, "dsx shell", err.Error())
+	sort.SliceStable(workspaces, func(i, j int) bool {
+		if workspaces[i].Workspace != workspaces[j].Workspace {
+			return workspaces[i].Workspace < workspaces[j].Workspace
 		}
+		return workspaces[i].RunID < workspaces[j].RunID
+	})
+	if format == "json" {
+		result.Workspaces = workspaces
+		return encodeJSON(writer, result)
 	}
-	if _, err := model.ParseSandboxName(*profile); err != nil {
-		return usageError(stderr, "dsx shell", err.Error())
+	if len(workspaces) == 0 {
+		_, err := io.WriteString(writer, "No workspaces.\n")
+		return err
 	}
-	if *agent != "" {
-		if flags.NArg() != 0 {
-			return usageError(stderr, "dsx shell", "--agent does not accept shell command arguments")
+	for _, workspace := range workspaces {
+		if _, err := fmt.Fprintf(writer, "Workspace %q: state=%q run=%q source=%q@%q default_agent=%q resources=%d mutating=%t legacy=%t\n", terminal.SanitizeLine(string(workspace.Workspace)), terminal.SanitizeLine(string(workspace.State)), terminal.SanitizeLine(string(workspace.RunID)), terminal.SanitizeLine(workspace.SourceBranch), terminal.SanitizeLine(workspace.SourceRevision), terminal.SanitizeLine(workspace.DefaultAgent), workspace.Resources, workspace.MutationActive, workspace.Legacy); err != nil {
+			return model.Wrap(model.CodeInternal, "write workspace list", err)
 		}
-		if !dispatcher.interactive(stdout) {
-			return usageError(stderr, "dsx shell", "--agent requires an interactive terminal; use dsx run for one-shot execution")
-		}
-		return dispatcher.runHarness(ctx, app.HarnessRunRequest{
-			Root: *root, ApproveConfig: *approval, Agent: *agent, Profile: *profile, Interactive: true,
-			Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
-		}, stderr)
-	}
-	return dispatcher.runShell(ctx, app.ShellRequest{
-		ApproveConfig: *approval,
-		Root:          *root,
-		Agent:         *agent,
-		Argv:          append([]string(nil), flags.Args()...),
-		Terminal:      dispatcher.interactive(stdout),
-		Stdin:         dispatcher.dependencies.Stdin,
-		Stdout:        stdout,
-		Stderr:        stderr,
-		BeforeExec: func(ready app.ShellReady) error {
-			return renderProcessStatus(stdout, app.ProcessStatusResult{URLs: ready.URLs, Processes: ready.Processes}, "text")
-		},
-	}, stderr)
-}
-
-func (dispatcher *Dispatcher) runShell(ctx context.Context, request app.ShellRequest, stderr io.Writer) int {
-	if dispatcher == nil || dispatcher.dependencies.Lifecycle == nil {
-		return reportError(stderr, "dsx shell", model.NewError(model.CodeUnavailable, "lifecycle service is unavailable", nil))
-	}
-	if request.Terminal {
-		request.RunInteractive = dispatcher.runInteractive
-	}
-	result, err := dispatcher.dependencies.Lifecycle.Shell(ctx, request)
-	if err != nil {
-		return reportError(stderr, "dsx shell", err)
-	}
-	exit, err := shellExitCode(result)
-	if err != nil {
-		return reportError(stderr, "dsx shell", err)
-	}
-	return exit
-}
-
-func (dispatcher *Dispatcher) runHarness(ctx context.Context, request app.HarnessRunRequest, stderr io.Writer) int {
-	if dispatcher == nil || dispatcher.dependencies.Harness == nil {
-		return reportError(stderr, "dsx shell", model.NewError(model.CodeUnavailable, "harness service is unavailable", nil))
-	}
-	if request.Interactive {
-		request.RunInteractive = dispatcher.runInteractive
-		beforeExec := request.BeforeExec
-		if beforeExec == nil {
-			beforeExec = func(result app.HarnessRunResult) error {
-				return renderHarnessIdentity(request.Stdout, result.Agent, result.Version)
+		for _, warning := range workspace.Warnings {
+			if _, err := fmt.Fprintf(writer, "  Warning: %q\n", terminal.SanitizeLine(warning)); err != nil {
+				return model.Wrap(model.CodeInternal, "write workspace list", err)
 			}
 		}
-		request.BeforeExec = func(result app.HarnessRunResult) error {
-			warningOutput := request.Stderr
-			if warningOutput == nil {
-				warningOutput = request.Stdout
+		for _, url := range workspace.URLs {
+			if _, err := fmt.Fprintf(writer, "  URL: %q\n", terminal.SanitizeLine(url)); err != nil {
+				return model.Wrap(model.CodeInternal, "write workspace list", err)
 			}
-			if _, err := fmt.Fprintln(warningOutput, terminal.SanitizeLine("Warning: concurrent editing harnesses in one live workspace may conflict or corrupt work.")); err != nil {
-				return model.Wrap(model.CodeInternal, "write live harness warning", err)
-			}
-			return beforeExec(result)
-		}
-	} else if request.BeforeExec == nil {
-		request.BeforeExec = func(result app.HarnessRunResult) error {
-			return renderHarnessIdentity(request.Stdout, result.Agent, result.Version)
 		}
 	}
-	result, err := dispatcher.dependencies.Harness.Run(ctx, request)
-	if err != nil {
-		return reportError(stderr, "dsx shell", err)
-	}
-	exit, err := shellExitCode(app.ShellResult{Exit: result.Exit})
-	if err != nil {
-		return reportError(stderr, "dsx shell", err)
-	}
-	return exit
+	return nil
 }
-func renderHarnessIdentity(writer io.Writer, agent harness.Name, version string) error {
-	_, err := fmt.Fprintf(writer, "Agent: %q\nVersion: %q\n", terminal.SanitizeLine(string(agent)), terminal.SanitizeLine(version))
-	if err != nil {
-		return model.Wrap(model.CodeInternal, "write harness status", err)
+
+func renderWorkspaceRemove(writer io.Writer, result app.WorkspaceRemoveResult) error {
+	if _, err := fmt.Fprintf(writer, "Project: %q\nWorkspace: %q\nRun: %q\nState: %q\nDeleted resources: %d\nDeleted manifest: %t\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Workspace)), terminal.SanitizeLine(string(result.RunID)), terminal.SanitizeLine(string(result.State)), result.DeletedResources, result.DeletedManifest); err != nil {
+		return model.Wrap(model.CodeInternal, "write workspace removal", err)
+	}
+	preserved := append([]string(nil), result.Preserved...)
+	sort.Strings(preserved)
+	for _, item := range preserved {
+		if _, err := fmt.Fprintf(writer, "Preserved: %q\n", terminal.SanitizeLine(item)); err != nil {
+			return model.Wrap(model.CodeInternal, "write workspace removal", err)
+		}
 	}
 	return nil
 }
@@ -341,8 +525,7 @@ func (dispatcher *Dispatcher) runInteractive(ctx context.Context, child app.Inte
 		return runtime.Exit{}, model.NewError(model.CodeInternal, "interactive child executable is missing", nil)
 	}
 	command := exec.Command(child.Argv[0], child.Argv[1:]...)
-	command.Env = make([]string, len(child.Env))
-	copy(command.Env, child.Env)
+	command.Env = append([]string(nil), child.Env...)
 	command.Dir = child.Dir
 	output := child.Stdout
 	if output == nil {
@@ -352,14 +535,7 @@ func (dispatcher *Dispatcher) runInteractive(ctx context.Context, child app.Inte
 	defer stopResize()
 	handoffCtx, signals, stopSignals := claimInteractiveSignals(ctx)
 	defer stopSignals()
-	exit, err := (terminal.Handoff{
-		Input:       child.Stdin,
-		Output:      output,
-		State:       dispatcher.dependencies.TerminalState,
-		InitialSize: initial,
-		Resize:      resize,
-		Signals:     signals,
-	}).Run(handoffCtx, command)
+	exit, err := (terminal.Handoff{Input: child.Stdin, Output: output, State: dispatcher.dependencies.TerminalState, InitialSize: initial, Resize: resize, Signals: signals}).Run(handoffCtx, command)
 	result := runtime.Exit{}
 	if exit.Signal != 0 {
 		result.Signal = signalName(exit.Signal)
@@ -370,169 +546,12 @@ func (dispatcher *Dispatcher) runInteractive(ctx context.Context, child app.Inte
 	return result, err
 }
 
-func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Intent, stdout, stderr io.Writer) int {
-	root := intent.Project
-	if err := validateRoot(root); err != nil {
-		return reportError(stderr, "dsx "+intent.Action, err)
-	}
-	if strings.HasPrefix(intent.Action, "git-") {
-		return dispatcher.executeGitIntent(ctx, intent, stdout, stderr)
-	}
-	if intent.Action == "clone-run" {
-		return dispatcher.executeCloneRunIntent(ctx, intent, stdout, stderr)
-	}
-	if dispatcher == nil || dispatcher.dependencies.Lifecycle == nil {
-		return reportError(stderr, "dsx "+intent.Action, model.NewError(model.CodeUnavailable, fmt.Sprintf("%s is not available in this build", intent.Action), nil))
-	}
-	switch intent.Action {
-	case "create", "start":
-		startRequest := app.StartRequest{Root: root, Interactive: true, FinalConfirmed: true}
-		progressRunner, showsProgress := dispatcher.dependencies.TUI.(TUIProgressRunner)
-		progressLifecycle, reportsProgress := dispatcher.dependencies.Lifecycle.(LifecycleProgress)
-		if showsProgress && reportsProgress {
-			progressRequest := tui.ProgressRequest{
-				Title:      "Creating workspace",
-				Project:    root,
-				Detail:     "DSX is creating the approved workspace and waiting until it is ready.",
-				Accessible: dispatcher.dependencies.Accessible,
-				Steps: []tui.ProgressStep{
-					{ID: string(app.StartProgressValidate), Label: "Validate approved project plan"},
-					{ID: string(app.StartProgressImage), Label: "Prepare workspace image"},
-					{ID: string(app.StartProgressResources), Label: "Create private network and persistent volumes"},
-					{ID: string(app.StartProgressWorkspace), Label: "Create and start workspace"},
-					{ID: string(app.StartProgressServices), Label: "Publish ports and start configured services"},
-					{ID: string(app.StartProgressReady), Label: "Workspace ready"},
-				},
-			}
-			if err := progressRunner.RunProgress(ctx, progressRequest, func(operationCtx context.Context, report func(string)) error {
-				_, err := progressLifecycle.StartWithProgress(operationCtx, startRequest, func(step app.StartProgressStep) {
-					report(string(step))
-				})
-				return err
-			}); err != nil {
-				return reportError(stderr, "dsx "+intent.Action, err)
-			}
-		} else if _, err := dispatcher.dependencies.Lifecycle.Start(ctx, startRequest); err != nil {
-			return reportError(stderr, "dsx "+intent.Action, err)
-		}
-		return dispatcher.runShell(ctx, app.ShellRequest{
-			Root: root, Terminal: true, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
-		}, stderr)
-	case "attach":
-		return dispatcher.runShell(ctx, app.ShellRequest{
-			Root: root, Terminal: true, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
-		}, stderr)
-	case "recreate-ports":
-		if _, err := dispatcher.dependencies.Lifecycle.RecreatePorts(ctx, app.StartRequest{
-			Root: root, ApproveConfig: intent.ApproveConfig, Interactive: true, FinalConfirmed: true,
-		}); err != nil {
-			return reportError(stderr, "dsx reconfigure ports", err)
-		}
-		return dispatcher.runShell(ctx, app.ShellRequest{
-			Root: root, Terminal: true, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
-		}, stderr)
-	case "stop":
-		result, err := dispatcher.dependencies.Lifecycle.Stop(ctx, app.StopRequest{Root: root, Sandbox: intent.Sandbox})
-		if err != nil {
-			return reportError(stderr, "dsx stop", err)
-		}
-		if err := renderStop(stdout, result); err != nil {
-			return reportError(stderr, "dsx stop", err)
-		}
-		return 0
-	case "clean":
-		result, err := dispatcher.dependencies.Lifecycle.Clean(ctx, app.CleanRequest{Root: root, Confirmed: true})
-		if err != nil {
-			return reportError(stderr, "dsx clean", err)
-		}
-		if err := renderClean(stdout, result); err != nil {
-			return reportError(stderr, "dsx clean", err)
-		}
-		return 0
-	default:
-		return reportError(stderr, "dsx", model.NewError(model.CodeUnavailable, fmt.Sprintf("%s is not available in this build", intent.Action), nil))
-	}
-}
-
-func (dispatcher *Dispatcher) executeGitIntent(ctx context.Context, intent tui.Intent, stdout, stderr io.Writer) int {
-	operation := strings.TrimPrefix(intent.Action, "git-")
-	command := "dsx git " + operation
-	sandbox, err := model.ParseSandboxName(intent.Sandbox)
-	if err != nil {
-		return reportError(stderr, command, model.NewError(model.CodeUsage, "select a valid named clone sandbox", err))
-	}
-	if sandbox == "main" {
-		return reportError(stderr, command, model.NewError(model.CodeUnavailable, "Git "+operation+" is unavailable for the live sandbox; select a named clone sandbox", nil))
-	}
-	if dispatcher == nil || dispatcher.dependencies.Clones == nil {
-		return reportError(stderr, command, model.NewError(model.CodeUnavailable, "clone service is unavailable", nil))
-	}
-	switch operation {
-	case "status":
-		result, operationErr := dispatcher.dependencies.Clones.GitStatus(ctx, app.GitStatusRequest{
-			Root: intent.Project, Sandbox: intent.Sandbox, Repository: intent.Repository,
-		})
-		if operationErr != nil {
-			return reportError(stderr, command, operationErr)
-		}
-		if renderErr := renderGitStatus(stdout, result, "text"); renderErr != nil {
-			return reportError(stderr, command, renderErr)
-		}
-	case "diff":
-		result, operationErr := dispatcher.dependencies.Clones.GitDiff(ctx, app.GitDiffRequest{
-			Root: intent.Project, Sandbox: intent.Sandbox, Repository: intent.Repository, MaxBytes: maxGitDiffBytes,
-		})
-		if operationErr != nil {
-			return reportError(stderr, command, operationErr)
-		}
-		if renderErr := renderGitDiff(stdout, result, "text"); renderErr != nil {
-			return reportError(stderr, command, renderErr)
-		}
-	case "fetch":
-		result, operationErr := dispatcher.dependencies.Clones.GitFetch(ctx, app.GitFetchRequest{
-			Root: intent.Project, Sandbox: intent.Sandbox, Repository: intent.Repository,
-		})
-		if operationErr != nil {
-			return reportError(stderr, command, operationErr)
-		}
-		if renderErr := renderGitFetch(stdout, result, "text"); renderErr != nil {
-			return reportError(stderr, command, renderErr)
-		}
-	default:
-		return reportError(stderr, command, model.NewError(model.CodeUnavailable, fmt.Sprintf("%s is not available in this build", intent.Action), nil))
-	}
-	return 0
-}
-
-func (dispatcher *Dispatcher) executeCloneRunIntent(ctx context.Context, intent tui.Intent, stdout, stderr io.Writer) int {
-	const command = "dsx run"
-	if dispatcher == nil || dispatcher.dependencies.Clones == nil {
-		return reportError(stderr, command, model.NewError(model.CodeUnavailable, "clone service is unavailable", nil))
-	}
-	if !validApprovalHash(intent.ApproveConfig) {
-		return reportError(stderr, command, model.NewError(model.CodeUsage, "reviewed clone plan has an invalid approval hash", nil))
-	}
-	result, err := dispatcher.dependencies.Clones.RunClone(ctx, app.CloneRunRequest{
-		Root: intent.Project, ApproveConfig: intent.ApproveConfig, Sandbox: intent.Sandbox,
-		Agent: intent.Agent, Profile: intent.Profile, Prompt: intent.Prompt, Browser: intent.Browser,
-		Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr,
-	})
-	if err != nil {
-		return reportError(stderr, command, err)
-	}
-	exit, err := runtimeExitCode(result.Exit, "clone run")
-	if err != nil {
-		return reportError(stderr, command, err)
-	}
-	return exit
-}
-
 func validApprovalHash(value string) bool {
 	if len(value) != 64 {
 		return false
 	}
-	for index := range value {
-		if (value[index] < '0' || value[index] > '9') && (value[index] < 'a' || value[index] > 'f') {
+	for i := range value {
+		if (value[i] < '0' || value[i] > '9') && (value[i] < 'a' || value[i] > 'f') {
 			return false
 		}
 	}
@@ -551,68 +570,21 @@ func argumentsFollowSeparator(args, positional []string) bool {
 	if separator < 0 || separator >= len(args) || args[separator] != "--" {
 		return false
 	}
-	for index := range positional {
-		if positional[index] != args[separator+1+index] {
+	for i := range positional {
+		if positional[i] != args[separator+1+i] {
 			return false
 		}
 	}
 	return true
 }
 
-func shellExitCode(result app.ShellResult) (int, error) {
-	if result.Exit.Signal != "" {
-		if result.Exit.Code != nil {
-			return 0, model.NewError(model.CodeInternal, "shell returned both an exit code and a signal", nil)
-		}
-		signal, found := shellSignals[strings.ToUpper(result.Exit.Signal)]
-		if !found {
-			return 0, model.NewError(model.CodeInternal, fmt.Sprintf("shell returned unknown signal %q", result.Exit.Signal), nil)
-		}
-		return 128 + int(signal), nil
-	}
-	if result.Exit.Code == nil || *result.Exit.Code < 0 || *result.Exit.Code > 255 {
-		return 0, model.NewError(model.CodeInternal, "shell returned no valid exit status", nil)
-	}
-	return *result.Exit.Code, nil
-}
+var interactiveSignals = map[string]syscall.Signal{"SIGHUP": syscall.SIGHUP, "SIGINT": syscall.SIGINT, "SIGQUIT": syscall.SIGQUIT, "SIGILL": syscall.SIGILL, "SIGTRAP": syscall.SIGTRAP, "SIGABRT": syscall.SIGABRT, "SIGBUS": syscall.SIGBUS, "SIGFPE": syscall.SIGFPE, "SIGKILL": syscall.SIGKILL, "SIGUSR1": syscall.SIGUSR1, "SIGSEGV": syscall.SIGSEGV, "SIGUSR2": syscall.SIGUSR2, "SIGPIPE": syscall.SIGPIPE, "SIGALRM": syscall.SIGALRM, "SIGTERM": syscall.SIGTERM, "SIGCHLD": syscall.SIGCHLD, "SIGCONT": syscall.SIGCONT, "SIGSTOP": syscall.SIGSTOP, "SIGTSTP": syscall.SIGTSTP, "SIGTTIN": syscall.SIGTTIN, "SIGTTOU": syscall.SIGTTOU, "SIGURG": syscall.SIGURG, "SIGXCPU": syscall.SIGXCPU, "SIGXFSZ": syscall.SIGXFSZ, "SIGVTALRM": syscall.SIGVTALRM, "SIGPROF": syscall.SIGPROF, "SIGWINCH": syscall.SIGWINCH, "SIGIO": syscall.SIGIO, "SIGSYS": syscall.SIGSYS}
 
-var shellSignals = map[string]syscall.Signal{
-	"SIGHUP":    syscall.SIGHUP,
-	"SIGINT":    syscall.SIGINT,
-	"SIGQUIT":   syscall.SIGQUIT,
-	"SIGILL":    syscall.SIGILL,
-	"SIGTRAP":   syscall.SIGTRAP,
-	"SIGABRT":   syscall.SIGABRT,
-	"SIGBUS":    syscall.SIGBUS,
-	"SIGFPE":    syscall.SIGFPE,
-	"SIGKILL":   syscall.SIGKILL,
-	"SIGUSR1":   syscall.SIGUSR1,
-	"SIGSEGV":   syscall.SIGSEGV,
-	"SIGUSR2":   syscall.SIGUSR2,
-	"SIGPIPE":   syscall.SIGPIPE,
-	"SIGALRM":   syscall.SIGALRM,
-	"SIGTERM":   syscall.SIGTERM,
-	"SIGCHLD":   syscall.SIGCHLD,
-	"SIGCONT":   syscall.SIGCONT,
-	"SIGSTOP":   syscall.SIGSTOP,
-	"SIGTSTP":   syscall.SIGTSTP,
-	"SIGTTIN":   syscall.SIGTTIN,
-	"SIGTTOU":   syscall.SIGTTOU,
-	"SIGURG":    syscall.SIGURG,
-	"SIGXCPU":   syscall.SIGXCPU,
-	"SIGXFSZ":   syscall.SIGXFSZ,
-	"SIGVTALRM": syscall.SIGVTALRM,
-	"SIGPROF":   syscall.SIGPROF,
-	"SIGWINCH":  syscall.SIGWINCH,
-	"SIGIO":     syscall.SIGIO,
-	"SIGSYS":    syscall.SIGSYS,
-}
-
-func signalName(signal syscall.Signal) string {
-	for name, candidate := range shellSignals {
-		if candidate == signal {
+func signalName(value syscall.Signal) string {
+	for name, candidate := range interactiveSignals {
+		if candidate == value {
 			return name
 		}
 	}
-	return fmt.Sprintf("SIG%d", signal)
+	return fmt.Sprintf("SIG%d", value)
 }

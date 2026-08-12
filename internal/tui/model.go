@@ -17,9 +17,7 @@ import (
 	"github.com/srimajji/dsx/internal/app"
 	"github.com/srimajji/dsx/internal/config"
 	"github.com/srimajji/dsx/internal/harness"
-	modelpkg "github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
-	"github.com/srimajji/dsx/internal/runtime"
 	"github.com/srimajji/dsx/internal/terminal"
 )
 
@@ -31,25 +29,10 @@ var errSetupReviewTooLarge = errors.New("complete setup review exceeds the safe 
 // perform lifecycle transitions themselves.
 type Application interface {
 	BareState(context.Context, app.BareStateRequest) (app.BareState, error)
-	StartContainerSystem(context.Context) error
 	PreviewSetup(context.Context, app.SetupPreviewRequest) (app.SetupPreview, error)
-	PreviewExisting(context.Context, app.BareStateRequest) (app.SetupPreview, error)
-	PreviewClone(context.Context, app.ClonePreviewRequest) (app.SetupPreview, error)
 	Initialize(context.Context, app.InitializeRequest) (app.InitializeResult, error)
 	ApproveExisting(context.Context, app.InitializeRequest) (app.InitializeResult, error)
 	UpdateExisting(context.Context, app.InitializeRequest) (app.InitializeResult, error)
-}
-
-type Intent struct {
-	Action        string
-	Project       string
-	Sandbox       string
-	Repository    string
-	Agent         string
-	Profile       string
-	Prompt        string
-	Browser       bool
-	ApproveConfig string
 }
 
 type setupStage int
@@ -297,12 +280,12 @@ func (model *SetupModel) buildSetupForms() {
 		huh.NewGroup(
 			huh.NewSelect[int]().
 				Title("CPU allocation").
-				Description("Compute available to each workspace sandbox.").
+				Description("Compute available to each named workspace.").
 				Options(setupCPUOptions(model.cpus)...).
 				Value(&model.cpus),
 			huh.NewSelect[string]().
 				Title("Memory allocation").
-				Description("RAM available to each workspace sandbox.").
+				Description("RAM available to each named workspace.").
 				Options(setupMemoryOptions(model.memory)...).
 				Value(&model.memory),
 		),
@@ -746,10 +729,8 @@ func buildCompleteReview(preview app.SetupPreview) (string, error) {
 
 func buildWorkspaceReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 	execution := preview.Plan
-	builder.section("Workspace", "Where DSX will run and which environment it will start.")
+	builder.section("Project defaults", "Reusable settings applied when DSX creates a named peer workspace.")
 	builder.item("Project", preview.Facts.CanonicalRoot)
-	builder.item("Mode", string(execution.Mode))
-	builder.item("Sandbox", string(execution.Sandbox.Name))
 	builder.item("Environment", reviewImageSummary(preview))
 	if execution.Image.Context != "" {
 		builder.bullet("Build context " + execution.Image.Context)
@@ -766,10 +747,10 @@ func buildWorkspaceReview(builder *setupReviewBuilder, preview app.SetupPreview)
 	if execution.Image.InputDigest != "" && !strings.Contains(reviewImageSummary(preview), execution.Image.InputDigest) {
 		builder.bullet("Image input digest " + execution.Image.InputDigest)
 	}
-	builder.item("Coding assistant", execution.Agent)
+	builder.item("Allowed agents", strings.Join(execution.Agents.Allowed, " · "))
+	builder.item("Default agent", execution.Agents.Default)
 	builder.item("Internet", reviewInternetSummary(preview.Config))
-	builder.item("Browser", reviewBrowserSummary(execution))
-	builder.item("Resources", fmt.Sprintf("%d CPU • %s • %d concurrent clone(s)", execution.Limits.CPUs, reviewBytes(execution.Limits.MemoryBytes), execution.Limits.MaxConcurrentClones))
+	builder.item("Resources", fmt.Sprintf("%d CPU • %s • %d concurrent workspace(s)", execution.Limits.CPUs, reviewBytes(execution.Limits.MemoryBytes), execution.Limits.MaxConcurrentWorkspaces))
 }
 
 func buildDetectedProjectReview(builder *setupReviewBuilder, preview app.SetupPreview) {
@@ -825,8 +806,8 @@ func buildAccessReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 		}
 		builder.bullet("Mount " + source + " → " + mount.Target + " • " + access)
 	}
-	for _, grant := range execution.Auth {
-		builder.bullet("Credentials " + grant.Harness + "/" + grant.Profile + " • " + grant.Persistence)
+	for _, harness := range execution.Auth.Imports {
+		builder.bullet("Approved authentication import " + harness)
 	}
 	for _, bridge := range execution.Bridges {
 		access := "read/write"
@@ -854,7 +835,7 @@ func buildAccessReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 		}
 		builder.bullet(fmt.Sprintf("Port %s • %s %d → %s:%s%s", port.Name, port.Protocol, port.GuestPort, port.HostIP, hostPort, grant))
 	}
-	if len(execution.Mounts) == 0 && len(execution.Auth) == 0 && len(execution.Bridges) == 0 && len(execution.Ports) == 0 {
+	if len(execution.Mounts) == 0 && len(execution.Auth.Imports) == 0 && len(execution.Bridges) == 0 && len(execution.Ports) == 0 {
 		builder.bullet("No additional mounts, credentials, host grants, or published ports")
 	}
 }
@@ -939,12 +920,6 @@ func buildStorageReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 	builder.item("Repositories", strconv.Itoa(len(execution.Repositories)))
 	for _, repository := range execution.Repositories {
 		detail := repository.Name + " • " + repository.HostPath + " → " + repository.GuestPath
-		if repository.SourceRef != "" {
-			detail += " • ref " + repository.SourceRef
-		}
-		if repository.SourceCommit != "" {
-			detail += " • commit " + repository.SourceCommit
-		}
 		if repository.TrackedDigest != "" {
 			detail += " • tracked " + repository.TrackedDigest
 		}
@@ -965,11 +940,6 @@ func buildApprovalReview(builder *setupReviewBuilder, preview app.SetupPreview) 
 	builder.section("Approval", "Identity and hashes bind this review to the exact configuration and executable plan.")
 	builder.item("Plan contract", execution.ContractVersion)
 	builder.item("Project ID", string(execution.Project.ID))
-	builder.item("Run ID", string(execution.Sandbox.RunID))
-	builder.item("Owned resource", execution.Ownership.ResourceName)
-	for _, label := range execution.Ownership.Labels {
-		builder.bullet("Ownership label " + label.Key + " = " + label.Value)
-	}
 	keys := make([]string, 0, len(execution.Provenance))
 	for key := range execution.Provenance {
 		keys = append(keys, key)
@@ -1003,20 +973,6 @@ func reviewInternetSummary(document config.ConfigDocument) string {
 		return "Keep offline"
 	}
 	return "Allowed"
-}
-
-func reviewBrowserSummary(execution plan.ExecutionPlan) string {
-	if execution.Browser == nil || !execution.Browser.Enabled {
-		return "Disabled"
-	}
-	parts := []string{"Enabled • isolated browser"}
-	if execution.Browser.ImageReference != "" {
-		parts = append(parts, execution.Browser.ImageReference)
-	}
-	if execution.Browser.ImageDigest != "" {
-		parts = append(parts, execution.Browser.ImageDigest)
-	}
-	return strings.Join(parts, " • ")
 }
 
 func reviewBytes(bytes int64) string {
@@ -1196,413 +1152,4 @@ func reviewPages(review string, width, height int) []string {
 		return []string{""}
 	}
 	return pages
-}
-
-type ActionModel struct {
-	state        app.BareState
-	intent       *Intent
-	width        int
-	accessible   bool
-	manage       bool
-	confirmClean bool
-	sandboxes    []app.SandboxSummary
-	selected     int
-	notice       string
-}
-
-func NewLauncherModel(state app.BareState, sandboxes ...app.SandboxSummary) *ActionModel {
-	return newActionModel(state, sandboxes)
-}
-
-func NewDashboardModel(state app.BareState, sandboxes ...app.SandboxSummary) *ActionModel {
-	return newActionModel(state, sandboxes)
-}
-
-func newActionModel(state app.BareState, sandboxes []app.SandboxSummary) *ActionModel {
-	available := make([]app.SandboxSummary, 0, len(sandboxes))
-	for _, sandbox := range sandboxes {
-		if _, err := modelpkg.ParseSandboxName(string(sandbox.Sandbox)); err == nil && sandbox.State != modelpkg.StateDeleted {
-			available = append(available, sandbox)
-		}
-	}
-	slices.SortStableFunc(available, func(left, right app.SandboxSummary) int {
-		if left.Sandbox == "main" && right.Sandbox != "main" {
-			return -1
-		}
-		if left.Sandbox != "main" && right.Sandbox == "main" {
-			return 1
-		}
-		return strings.Compare(string(left.Sandbox), string(right.Sandbox))
-	})
-	return &ActionModel{state: state, width: 80, sandboxes: available}
-}
-
-func (model *ActionModel) Init() tea.Cmd { return nil }
-
-func (model *ActionModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
-	if size, ok := message.(tea.WindowSizeMsg); ok {
-		if size.Width > 0 {
-			model.width = size.Width
-		}
-		return model, nil
-	}
-	key, ok := message.(tea.KeyPressMsg)
-	if !ok {
-		return model, nil
-	}
-	pressed := strings.ToLower(key.String())
-	if model.confirmClean {
-		switch pressed {
-		case "ctrl+c", "q":
-			return model, tea.Quit
-		case "y", "enter":
-			model.intent = &Intent{Action: "clean", Project: model.state.Facts.CanonicalRoot}
-			return model, tea.Quit
-		case "n", "esc":
-			model.confirmClean = false
-		}
-		return model, nil
-	}
-	if !model.manage {
-		switch pressed {
-		case "ctrl+c", "q", "esc":
-			return model, tea.Quit
-		case "m":
-			model.manage = true
-			model.notice = ""
-			return model, nil
-		case "enter":
-			action, _ := model.primaryAction()
-			if action == "" {
-				return model, nil
-			}
-			model.intent = &Intent{Action: action, Project: model.state.Facts.CanonicalRoot}
-			return model, tea.Quit
-		default:
-			return model, nil
-		}
-	}
-
-	switch pressed {
-	case "ctrl+c", "q":
-		return model, tea.Quit
-	case "esc", "m":
-		model.manage = false
-		model.notice = ""
-		return model, nil
-	case "up", "k":
-		if len(model.sandboxes) != 0 {
-			model.selected = (model.selected - 1 + len(model.sandboxes)) % len(model.sandboxes)
-			model.notice = ""
-		}
-		return model, nil
-	case "down", "j":
-		if len(model.sandboxes) != 0 {
-			model.selected = (model.selected + 1) % len(model.sandboxes)
-			model.notice = ""
-		}
-		return model, nil
-	case "n":
-		if model.runtimeReady() && model.state.ConfigExists {
-			model.intent = &Intent{Action: "new-clone", Project: model.state.Facts.CanonicalRoot}
-			return model, tea.Quit
-		}
-	case "p":
-		if model.state.ConfigExists {
-			model.intent = &Intent{Action: "configure-ports", Project: model.state.Facts.CanonicalRoot}
-			return model, tea.Quit
-		}
-	case "x":
-		if selected := model.selectedSandbox(); selected != nil && selected.State == modelpkg.StateRunning {
-			model.intent = &Intent{
-				Action: "stop", Project: model.state.Facts.CanonicalRoot, Sandbox: string(selected.Sandbox),
-			}
-			return model, tea.Quit
-		}
-	case "d":
-		if model.workspaceExists() {
-			model.confirmClean = true
-			return model, nil
-		}
-	case "g":
-		return model.selectGitAction("status")
-	case "v":
-		return model.selectGitAction("diff")
-	case "f":
-		return model.selectGitAction("fetch")
-	}
-	return model, nil
-}
-
-func (model *ActionModel) runtimeReady() bool {
-	return model.state.ContainerSystem.State == runtime.SystemStateRunning
-}
-
-func (model *ActionModel) workspaceExists() bool {
-	return model.state.OwnedResources > 0 || len(model.sandboxes) > 0
-}
-
-func (model *ActionModel) mainSandbox() *app.SandboxSummary {
-	for index := range model.sandboxes {
-		if model.sandboxes[index].Sandbox == "main" {
-			return &model.sandboxes[index]
-		}
-	}
-	return nil
-}
-
-func (model *ActionModel) selectedSandbox() *app.SandboxSummary {
-	if model.selected < 0 || model.selected >= len(model.sandboxes) {
-		return nil
-	}
-	return &model.sandboxes[model.selected]
-}
-
-func (model *ActionModel) primaryAction() (string, string) {
-	switch model.state.ContainerSystem.State {
-	case runtime.SystemStateStopped:
-		return "start-container-system", "Start container system"
-	case runtime.SystemStateNotInstalled, runtime.SystemStateUnavailable, runtime.SystemStateUnknown:
-		return "", ""
-	case runtime.SystemStateRunning:
-	}
-	main := model.mainSandbox()
-	if main == nil {
-		if model.state.OwnedResources > 0 && len(model.sandboxes) == 0 {
-			return "", ""
-		}
-		return "create", "Create & open"
-	}
-	switch main.State {
-	case modelpkg.StateRunning:
-		return "attach", "Attach"
-	case modelpkg.StateStopped:
-		return "start", "Start & open"
-	default:
-		return "", ""
-	}
-}
-
-func (model *ActionModel) selectGitAction(operation string) (tea.Model, tea.Cmd) {
-	selected := model.selectedSandbox()
-	if !model.manage || selected == nil || selected.Mode != modelpkg.ModeClone {
-		model.notice = fmt.Sprintf("Git %s is available only for a selected isolated clone.", operation)
-		return model, nil
-	}
-	model.intent = &Intent{
-		Action:  "git-" + operation,
-		Project: model.state.Facts.CanonicalRoot,
-		Sandbox: string(selected.Sandbox),
-	}
-	return model, tea.Quit
-}
-
-func (model *ActionModel) View() tea.View {
-	theme := newVisualTheme(terminal.ColorEnabled() && !model.accessible)
-	header := theme.header("Project", friendlyProjectName(model.state.Facts.CanonicalRoot), model.width)
-	if model.confirmClean {
-		body := theme.danger.Render("This removes DSX-owned workspace resources.") +
-			"\n\nYour project files and global agent sign-ins are preserved." +
-			"\n\nProject\n" + terminal.SanitizeLine(model.state.Facts.CanonicalRoot) +
-			"\n\n" + theme.help("[y] confirm cleanup", "[n] cancel")
-		return model.actionView(header + "\n\n" + theme.panel("Confirm cleanup", body, model.width, true))
-	}
-
-	projectWidth := max(8, tuiContentWidth(model.width)-10)
-	overview := theme.title.Render(terminal.Truncate(friendlyProjectName(model.state.Facts.CanonicalRoot), projectWidth)) +
-		"\n" + theme.muted.Render(terminal.Truncate(terminal.SanitizeLine(model.state.Facts.CanonicalRoot), projectWidth)) +
-		"\n\n" + model.renderStatus(theme)
-	content := header + "\n\n" + theme.panel("Status", overview, model.width, false)
-
-	if model.manage {
-		content += "\n\n" + theme.panel("Workspaces", model.renderSandboxList(theme), model.width, len(model.sandboxes) != 0)
-		content += "\n\n" + theme.panel("More options", model.renderManageActions(theme), model.width, false)
-	} else {
-		content += "\n\n" + theme.panel("Next", model.nextStep(theme), model.width, false)
-	}
-	if model.notice != "" {
-		content += "\n\n" + theme.panel("Heads up", terminal.SanitizeLine(model.notice), model.width, true)
-	}
-	return model.actionView(content)
-}
-
-func (model *ActionModel) actionView(content string) tea.View {
-	theme := newVisualTheme(terminal.ColorEnabled() && !model.accessible)
-	rendered := terminal.Wrap(content, tuiContentWidth(model.width))
-	if !model.accessible {
-		rendered = theme.layout(rendered, model.width)
-	}
-	view := tea.NewView(rendered)
-	view.AltScreen = !model.accessible
-	return view
-}
-
-func (model *ActionModel) renderStatus(theme visualTheme) string {
-	setup := "Not configured"
-	if model.state.ConfigExists {
-		setup = "Complete"
-	}
-	return strings.Join([]string{
-		statusRow(theme, "Container system", containerSystemLabel(model.state.ContainerSystem.State)),
-		statusRow(theme, "Project setup", setup),
-		statusRow(theme, "Workspace", model.workspaceLabel()),
-		statusRow(theme, "Published ports", configuredPortLabel(model.state.ConfiguredPorts)),
-	}, "\n")
-}
-
-func statusRow(theme visualTheme, label, value string) string {
-	style := theme.value
-	lower := strings.ToLower(value)
-	switch {
-	case strings.Contains(lower, "running"), lower == "complete":
-		style = theme.success
-	case strings.Contains(lower, "not created"), strings.Contains(lower, "stopped"):
-		style = theme.warning
-	case strings.Contains(lower, "not installed"), strings.Contains(lower, "unavailable"):
-		style = theme.danger
-	}
-	return theme.label.Render(label) + "    " + style.Render(value)
-}
-
-func configuredPortLabel(ports []config.PortConfig) string {
-	if len(ports) == 0 {
-		return "None"
-	}
-	return formatGuestPorts(ports) + " → dynamic loopback"
-}
-
-func containerSystemLabel(state runtime.SystemState) string {
-	switch state {
-	case runtime.SystemStateRunning:
-		return "Running"
-	case runtime.SystemStateStopped:
-		return "Stopped"
-	case runtime.SystemStateNotInstalled:
-		return "Not installed"
-	default:
-		return "Unavailable"
-	}
-}
-
-func (model *ActionModel) workspaceLabel() string {
-	if main := model.mainSandbox(); main != nil {
-		state := string(main.State)
-		if state == "" {
-			state = "unknown"
-		} else {
-			state = strings.ToUpper(state[:1]) + state[1:]
-		}
-		return "main — " + state
-	}
-	named := 0
-	for _, sandbox := range model.sandboxes {
-		if sandbox.Mode == modelpkg.ModeClone {
-			named++
-		}
-	}
-	if named > 0 {
-		return fmt.Sprintf("Not created • %d isolated", named)
-	}
-	if model.state.OwnedResources > 0 {
-		return "State unavailable"
-	}
-	return "Not created"
-}
-
-func (model *ActionModel) nextStep(theme visualTheme) string {
-	var message string
-	switch model.state.ContainerSystem.State {
-	case runtime.SystemStateStopped:
-		message = "DSX needs Apple Container running before it can use a workspace."
-	case runtime.SystemStateNotInstalled:
-		message = "DSX requires Apple Container 1.2.2.\n\n" + model.state.ContainerSystem.Remediation
-	case runtime.SystemStateUnavailable, runtime.SystemStateUnknown:
-		message = "DSX could not determine the Apple Container status.\n\n" + model.state.ContainerSystem.Remediation
-	case runtime.SystemStateRunning:
-		switch main := model.mainSandbox(); {
-		case main == nil && model.state.OwnedResources == 0:
-			message = "No workspace exists for this project yet."
-		case main == nil:
-			message = "DSX found project resources but could not verify a live workspace."
-		case main.State == modelpkg.StateRunning:
-			message = "Your project workspace is ready."
-		case main.State == modelpkg.StateStopped:
-			message = "Your project workspace is stopped."
-		default:
-			message = "Your project workspace needs attention before it can be used."
-		}
-	}
-	_, label := model.primaryAction()
-	actions := []string{}
-	if label != "" {
-		actions = append(actions, theme.help("[Enter] "+label))
-	}
-	if model.runtimeReady() {
-		actions = append(actions, theme.help("[m] More options"))
-	}
-	actions = append(actions, theme.help("[q] Quit"))
-	return message + "\n\n" + strings.Join(actions, "\n")
-}
-
-func (model *ActionModel) renderManageActions(theme visualTheme) string {
-	actions := make([]string, 0, 7)
-	if model.runtimeReady() && model.state.ConfigExists {
-		actions = append(actions, theme.help("[n] Create isolated clone"))
-	}
-	if model.state.ConfigExists {
-		actions = append(actions, theme.help("[p] Configure published ports"))
-	}
-	selected := model.selectedSandbox()
-	if selected != nil && selected.State == modelpkg.StateRunning {
-		actions = append(actions, theme.help("[x] Stop selected workspace"))
-	}
-	if selected != nil && selected.Mode == modelpkg.ModeClone {
-		actions = append(actions, theme.help("[g] Git status", "[v] Git diff", "[f] Git fetch"))
-	}
-	if model.workspaceExists() {
-		actions = append(actions, theme.help("[d] Clean DSX resources"))
-	}
-	actions = append(actions, theme.help("[m/Esc] Back", "[q] Quit"))
-	return strings.Join(actions, "\n")
-}
-
-func (model *ActionModel) renderSandboxList(theme visualTheme) string {
-	if len(model.sandboxes) == 0 {
-		return theme.muted.Render("No workspace exists for this project.")
-	}
-	var entries strings.Builder
-	entries.WriteString(theme.muted.Render("Use j/k or ↑/↓ to select a workspace.") + "\n\n")
-	for index, sandbox := range model.sandboxes {
-		marker := "  "
-		nameStyle := theme.title
-		if index == model.selected {
-			marker = "› "
-			nameStyle = theme.accent
-		}
-		state := terminal.SanitizeLine(string(sandbox.State))
-		tone := "warning"
-		if state == "running" {
-			tone = "success"
-		} else if state == "failed" {
-			tone = "danger"
-		}
-		fmt.Fprintf(
-			&entries,
-			"%s%s  %s\n",
-			marker,
-			nameStyle.Render(terminal.SanitizeLine(string(sandbox.Sandbox))),
-			theme.badge(state, tone),
-		)
-		for _, publishedURL := range sandbox.URLs {
-			fmt.Fprintf(&entries, "    %s\n", theme.value.Render(terminal.SanitizeLine(publishedURL)))
-		}
-	}
-	return strings.TrimRight(entries.String(), "\n")
-}
-
-func (model *ActionModel) Intent() (Intent, bool) {
-	if model.intent == nil {
-		return Intent{}, false
-	}
-	return *model.intent, true
 }

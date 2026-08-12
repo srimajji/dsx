@@ -32,21 +32,26 @@ func VerifyWorkspacePostcondition(observed ResourceSnapshot, expected WorkspaceS
 	if len(observed.Ports) != len(expected.Ports) {
 		return fmt.Errorf("published port count is %d, want %d", len(observed.Ports), len(expected.Ports))
 	}
-	ports := make(map[string]struct{}, len(observed.Ports))
-	for _, port := range observed.Ports {
-		key := fmt.Sprintf("%s/%d/%d/%s", port.HostIP, port.HostPort, port.GuestPort, port.Protocol)
-		if _, duplicate := ports[key]; duplicate {
-			return fmt.Errorf("duplicate observed published port %q", key)
-		}
-		ports[key] = struct{}{}
-	}
+	matched := make([]bool, len(observed.Ports))
 	for _, port := range expected.Ports {
-		if port.HostPort == nil {
-			return errors.New("expected workspace contains an unresolved dynamic host port")
+		found := false
+		for index, actual := range observed.Ports {
+			if matched[index] || actual.HostIP != port.HostIP || actual.GuestPort != port.GuestPort ||
+				actual.Protocol != port.Protocol || actual.HostPort == 0 {
+				continue
+			}
+			if port.HostPort != nil && actual.HostPort != *port.HostPort {
+				continue
+			}
+			matched[index] = true
+			found = true
+			break
 		}
-		key := fmt.Sprintf("%s/%d/%d/%s", port.HostIP, *port.HostPort, port.GuestPort, port.Protocol)
-		if _, found := ports[key]; !found {
-			return fmt.Errorf("published port %q does not match", key)
+		if !found {
+			if port.HostPort == nil {
+				return fmt.Errorf("dynamic published port %s/%d/%s does not match", port.HostIP, port.GuestPort, port.Protocol)
+			}
+			return fmt.Errorf("published port %s/%d/%d/%s does not match", port.HostIP, *port.HostPort, port.GuestPort, port.Protocol)
 		}
 	}
 	return nil

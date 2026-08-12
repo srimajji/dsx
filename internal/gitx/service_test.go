@@ -27,9 +27,7 @@ func TestPrepareSourceRefusesDirtyTrackedAndReportsWarnings(t *testing.T) {
 	writeFile(t, filepath.Join(fixture.path, "untracked.txt"), "untracked\n")
 	writeFile(t, filepath.Join(fixture.path, "ignored.log"), "ignored\n")
 
-	artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
-		Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "alpha", TempRoot: t.TempDir(),
-	})
+	artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "alpha", TempRoot: t.TempDir()})
 	if err != nil {
 		t.Fatalf("PrepareSource() error = %v", err)
 	}
@@ -51,11 +49,80 @@ func TestPrepareSourceRefusesDirtyTrackedAndReportsWarnings(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "dirty\n")
-	_, err = fixture.service.PrepareSource(context.Background(), SourceRequest{
-		Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "alpha", TempRoot: t.TempDir(),
-	})
+	_, err = fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "alpha", TempRoot: t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "tracked or index changes") {
 		t.Fatalf("dirty PrepareSource() error = %v", err)
+	}
+}
+
+func TestPrepareUpdateSourceRequiresCleanMatchingAdvancedBranch(t *testing.T) {
+	tests := map[string]struct {
+		mutate  func(*testing.T, repositoryFixture)
+		wantErr string
+	}{
+		"successful update": {
+			mutate: func(t *testing.T, fixture repositoryFixture) {
+				writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "new source\n")
+				gitTest(t, fixture.path, "add", "tracked.txt")
+				gitTest(t, fixture.path, "commit", "-m", "new source")
+			},
+		},
+		"wrong branch": {
+			mutate: func(t *testing.T, fixture repositoryFixture) {
+				gitTest(t, fixture.path, "checkout", "-b", "other")
+			},
+			wantErr: "does not match recorded source branch",
+		},
+		"dirty host": {
+			mutate: func(t *testing.T, fixture repositoryFixture) {
+				writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "dirty\n")
+			},
+			wantErr: "tracked or index changes",
+		},
+		"no newer commit": {
+			mutate:  func(*testing.T, repositoryFixture) {},
+			wantErr: "no newer committed revision",
+		},
+		"rewritten source history": {
+			mutate: func(t *testing.T, fixture repositoryFixture) {
+				tree := strings.TrimSpace(gitTest(t, fixture.path, "write-tree"))
+				revision := strings.TrimSpace(gitTest(t, fixture.path, "commit-tree", tree, "-m", "unrelated source"))
+				gitTest(t, fixture.path, "update-ref", "refs/heads/main", revision)
+			},
+			wantErr: "does not descend from recorded source revision",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixture := newRepositoryWithCommit(t)
+			source := prepareSourceTest(t, &fixture, "alpha")
+			t.Cleanup(func() { _ = fixture.service.RemoveArtifact(source.BundlePath) })
+			test.mutate(t, fixture)
+
+			artifact, err := fixture.service.PrepareUpdateSource(context.Background(), UpdateSourceRequest{
+				Repository: fixture.repository(), Workspace: "alpha", TempRoot: t.TempDir(),
+				SourceBranch: source.SourceBranch, SourceRevision: source.SourceRevision,
+			})
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("PrepareUpdateSource() error = %v, want containing %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PrepareUpdateSource() error = %v", err)
+			}
+			t.Cleanup(func() { _ = fixture.service.RemoveArtifact(artifact.BundlePath) })
+			if artifact.SourceBranch != "main" || artifact.SourceRevision == source.SourceRevision {
+				t.Fatalf("updated artifact = %#v", artifact)
+			}
+			if info, statErr := os.Lstat(artifact.BundlePath); statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != SourceBundleMode {
+				t.Fatalf("updated bundle metadata = %v, error = %v", info, statErr)
+			}
+			if err := fixture.service.VerifyBundle(context.Background(), artifact.BundlePath, artifact.BundleDigest); err != nil {
+				t.Fatalf("VerifyBundle(updated) error = %v", err)
+			}
+		})
 	}
 }
 
@@ -68,18 +135,18 @@ func TestPrepareSourceRejectsHostileNamesPathsAndArtifactReplacement(t *testing.
 		t.Fatal(err)
 	}
 	badRequests := []SourceRequest{
-		{Repository: Repository{Name: "../bad", HostPath: fixture.path, GuestPath: "/workspace"}, ApprovedRoot: fixture.path, Sandbox: "alpha", TempRoot: tempRoot},
-		{Repository: Repository{Name: "workspace", HostPath: "relative", GuestPath: "/workspace"}, ApprovedRoot: fixture.path, Sandbox: "alpha", TempRoot: tempRoot},
-		{Repository: Repository{Name: "workspace", HostPath: fixture.path, GuestPath: "/../escape"}, ApprovedRoot: fixture.path, Sandbox: "alpha", TempRoot: tempRoot},
-		{Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "../escape", TempRoot: tempRoot},
-		{Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "alpha", TempRoot: tempLink},
+		{Repository: Repository{Name: "../bad", HostPath: fixture.path, GuestPath: "/workspace"}, ApprovedRoot: fixture.path, Workspace: "alpha", TempRoot: tempRoot},
+		{Repository: Repository{Name: "workspace", HostPath: "relative", GuestPath: "/workspace"}, ApprovedRoot: fixture.path, Workspace: "alpha", TempRoot: tempRoot},
+		{Repository: Repository{Name: "workspace", HostPath: fixture.path, GuestPath: "/../escape"}, ApprovedRoot: fixture.path, Workspace: "alpha", TempRoot: tempRoot},
+		{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "../escape", TempRoot: tempRoot},
+		{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "alpha", TempRoot: tempLink},
 	}
 	for _, request := range badRequests {
 		if _, err := fixture.service.PrepareSource(context.Background(), request); err == nil {
 			t.Fatalf("PrepareSource accepted hostile request %#v", request)
 		}
 	}
-	artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "alpha", TempRoot: tempRoot})
+	artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "alpha", TempRoot: tempRoot})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +211,7 @@ func TestResultFetchDiffAndSuccessfulSquashApplySmoke(t *testing.T) {
 		t.Fatalf("fetched ref = %s, want %s", observed, fixture.resultCommit)
 	}
 	diff, err := fixture.host.service.Diff(context.Background(), DiffRequest{
-		Repository: fixture.host.repository(), BaseCommit: fixture.source.SourceCommit, HeadCommit: fixture.resultCommit, MaxBytes: 1 << 20,
+		Repository: fixture.host.repository(), BaseCommit: fixture.source.SourceRevision, HeadCommit: fixture.resultCommit, MaxBytes: 1 << 20,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -155,7 +222,7 @@ func TestResultFetchDiffAndSuccessfulSquashApplySmoke(t *testing.T) {
 		}
 	}
 	capped, err := fixture.host.service.Diff(context.Background(), DiffRequest{
-		Repository: fixture.host.repository(), BaseCommit: fixture.source.SourceCommit, HeadCommit: fixture.resultCommit, MaxBytes: 32,
+		Repository: fixture.host.repository(), BaseCommit: fixture.source.SourceRevision, HeadCommit: fixture.resultCommit, MaxBytes: 32,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -163,21 +230,14 @@ func TestResultFetchDiffAndSuccessfulSquashApplySmoke(t *testing.T) {
 	if len(capped.Patch) != 32 || !capped.Truncated {
 		t.Fatalf("capped diff length=%d truncated=%v", len(capped.Patch), capped.Truncated)
 	}
-	status, err := fixture.host.service.Status(context.Background(), StatusRequest{
-		Repository: fixture.host.repository(), Sandbox: "alpha", SourceRef: fixture.source.SourceRef,
-		SourceCommit: fixture.source.SourceCommit, ResultBranch: "dsx/alpha", ResultCommit: fixture.resultCommit,
-		TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedCommit: fixture.resultCommit,
-	})
+	status, err := fixture.host.service.Status(context.Background(), StatusRequest{Repository: fixture.host.repository(), Workspace: "alpha", SourceBranch: fixture.source.SourceBranch, SourceRevision: fixture.source.SourceRevision, WorkspaceBranch: "dsx/alpha", ResultCommit: fixture.resultCommit, TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedCommit: fixture.resultCommit})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.HostTrackedClean || status.SourceRef != fixture.source.SourceRef || status.ResultBranch != "dsx/alpha" || status.HostCommit != fixture.source.SourceCommit || !status.Fetched || status.FetchedCommit != fixture.resultCommit {
+	if !status.HostTrackedClean || status.SourceBranch != fixture.source.SourceBranch || status.WorkspaceBranch != "dsx/alpha" || status.HostCommit != fixture.source.SourceRevision || !status.Fetched || status.FetchedCommit != fixture.resultCommit {
 		t.Fatalf("status = %#v", status)
 	}
-	transaction, err := fixture.host.service.PrepareApply(context.Background(), ApplyRequest{
-		Repository: fixture.host.repository(), SourceCommit: fixture.source.SourceCommit,
-		TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedRef: fixture.fetch.HostRef, ExpectedCommit: fixture.resultCommit,
-	})
+	transaction, err := fixture.host.service.PrepareApply(context.Background(), ApplyRequest{Repository: fixture.host.repository(), SourceRevision: fixture.source.SourceRevision, TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedRef: fixture.fetch.HostRef, ExpectedCommit: fixture.resultCommit})
 	if err != nil {
 		t.Fatalf("PrepareApply() error = %v", err)
 	}
@@ -189,7 +249,7 @@ func TestResultFetchDiffAndSuccessfulSquashApplySmoke(t *testing.T) {
 	if !reflect.DeepEqual(apply.Paths, wantPaths) {
 		t.Fatalf("applied paths = %#v, want %#v", apply.Paths, wantPaths)
 	}
-	if head := strings.TrimSpace(gitTest(t, fixture.host.path, "rev-parse", "HEAD")); head != fixture.source.SourceCommit {
+	if head := strings.TrimSpace(gitTest(t, fixture.host.path, "rev-parse", "HEAD")); head != fixture.source.SourceRevision {
 		t.Fatalf("Apply committed host HEAD %s", head)
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.host.path, "diff", "--cached", "--name-only")); got == "" {
@@ -204,11 +264,7 @@ func TestFreshResultBundleDiffIsBoundedHostImmutableAndDisposable(t *testing.T) 
 	runner := &diffRepositoryRunner{delegate: OSRunner{}}
 	fixture := newUnfetchedTransferFixture(t, runner)
 	defer fixture.cleanup()
-	status, err := fixture.host.service.Status(context.Background(), StatusRequest{
-		Repository: fixture.host.repository(), Sandbox: "alpha", SourceRef: fixture.source.SourceRef,
-		SourceCommit: fixture.source.SourceCommit, ResultBranch: "dsx/alpha", ResultCommit: fixture.resultCommit,
-		TrackedFingerprint: fixture.source.TrackedFingerprint,
-	})
+	status, err := fixture.host.service.Status(context.Background(), StatusRequest{Repository: fixture.host.repository(), Workspace: "alpha", SourceBranch: fixture.source.SourceBranch, SourceRevision: fixture.source.SourceRevision, WorkspaceBranch: "dsx/alpha", ResultCommit: fixture.resultCommit, TrackedFingerprint: fixture.source.TrackedFingerprint})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +273,7 @@ func TestFreshResultBundleDiffIsBoundedHostImmutableAndDisposable(t *testing.T) 
 	}
 	before := hostByteSnapshot(t, fixture.host.path)
 	request := DiffRequest{
-		Repository: fixture.host.repository(), BaseCommit: fixture.source.SourceCommit, HeadCommit: fixture.resultCommit,
+		Repository: fixture.host.repository(), BaseCommit: fixture.source.SourceRevision, HeadCommit: fixture.resultCommit,
 		Bundle: &DiffBundle{Path: fixture.resultBundle, Digest: fixture.resultDigest, Ref: "refs/heads/dsx/alpha"},
 	}
 	diff, err := fixture.host.service.Diff(context.Background(), request)
@@ -256,10 +312,7 @@ func TestFreshResultBundleDiffIsBoundedHostImmutableAndDisposable(t *testing.T) 
 	assertHostByteSnapshot(t, fixture.host.path, before)
 	runner.assertPrivateRepositoriesRemoved(t)
 
-	fetched, err := fixture.host.service.FetchResult(context.Background(), FetchRequest{
-		Repository: fixture.host.repository(), Sandbox: "alpha", BundlePath: fixture.resultBundle,
-		Digest: fixture.resultDigest, ExpectedCommit: fixture.resultCommit,
-	})
+	fetched, err := fixture.host.service.FetchResult(context.Background(), FetchRequest{Repository: fixture.host.repository(), Workspace: "alpha", BundlePath: fixture.resultBundle, Digest: fixture.resultDigest, ExpectedCommit: fixture.resultCommit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,19 +325,61 @@ func TestFreshResultBundleDiffIsBoundedHostImmutableAndDisposable(t *testing.T) 
 	}
 }
 
-func TestFetchRejectsHostileSandboxAndUnexpectedBundleRef(t *testing.T) {
+func TestFetchRejectsHostileWorkspaceAndUnexpectedBundleRef(t *testing.T) {
 	t.Parallel()
 	fixture := newRepositoryWithCommit(t)
 	artifact := prepareSourceTest(t, &fixture, "alpha")
-	if _, err := fixture.service.FetchResult(context.Background(), FetchRequest{
-		Repository: fixture.repository(), Sandbox: "../evil", BundlePath: artifact.BundlePath, Digest: artifact.BundleDigest, ExpectedCommit: artifact.SourceCommit,
-	}); err == nil {
-		t.Fatal("FetchResult accepted hostile sandbox")
+	if _, err := fixture.service.FetchResult(context.Background(), FetchRequest{Repository: fixture.repository(), Workspace: "../evil", BundlePath: artifact.BundlePath, Digest: artifact.BundleDigest, ExpectedCommit: artifact.SourceRevision}); err == nil {
+		t.Fatal("FetchResult accepted hostile workspace")
 	}
-	if _, err := fixture.service.FetchResult(context.Background(), FetchRequest{
-		Repository: fixture.repository(), Sandbox: "alpha", BundlePath: artifact.BundlePath, Digest: artifact.BundleDigest, ExpectedCommit: artifact.SourceCommit,
-	}); err == nil || !strings.Contains(err.Error(), "does not match required") {
+	if _, err := fixture.service.FetchResult(context.Background(), FetchRequest{Repository: fixture.repository(), Workspace: "alpha", BundlePath: artifact.BundlePath, Digest: artifact.BundleDigest, ExpectedCommit: artifact.SourceRevision}); err == nil || !strings.Contains(err.Error(), "does not match required") {
 		t.Fatalf("FetchResult unexpected-ref error = %v", err)
+	}
+}
+
+func TestFetchMaintainsIndependentWorkspaceRefs(t *testing.T) {
+	fixture := newRepositoryWithCommit(t)
+	source := prepareSourceTest(t, &fixture, "alpha")
+	defer fixture.service.RemoveArtifact(source.BundlePath)
+	guest := filepath.Join(t.TempDir(), "guest")
+	gitTest(t, "", "init", "--quiet", guest)
+	gitTest(t, guest, "fetch", "--no-tags", "--no-write-fetch-head", "--", source.BundlePath, source.BundleRef)
+	gitTest(t, guest, "config", "user.name", "DSX Result")
+	gitTest(t, guest, "config", "user.email", "dsx@example.invalid")
+
+	commits := make(map[string]string, 2)
+	for _, workspace := range []string{"alpha", "beta"} {
+		gitTest(t, guest, "checkout", "--quiet", "--detach", source.SourceRevision)
+		gitTest(t, guest, "switch", "--quiet", "-C", "dsx/"+workspace)
+		writeFile(t, filepath.Join(guest, workspace+".txt"), workspace+"\n")
+		gitTest(t, guest, "add", workspace+".txt")
+		gitTest(t, guest, "commit", "-m", workspace)
+		commit := strings.TrimSpace(gitTest(t, guest, "rev-parse", "HEAD"))
+		bundle := filepath.Join(t.TempDir(), workspace+".bundle")
+		gitTest(t, guest, "bundle", "create", bundle, "refs/heads/dsx/"+workspace)
+		if err := os.Chmod(bundle, ResultBundleMode); err != nil {
+			t.Fatal(err)
+		}
+		digest, err := bundleSHA256(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fetched, err := fixture.service.FetchResult(context.Background(), FetchRequest{
+			Repository: fixture.repository(), Workspace: workspace, BundlePath: bundle,
+			Digest: digest, ExpectedCommit: commit,
+		})
+		if err != nil {
+			t.Fatalf("FetchResult(%s) error = %v", workspace, err)
+		}
+		if fetched.HostRef != RefNamespace+workspace {
+			t.Fatalf("FetchResult(%s) ref = %q", workspace, fetched.HostRef)
+		}
+		commits[workspace] = commit
+	}
+	for workspace, commit := range commits {
+		if got := strings.TrimSpace(gitTest(t, fixture.path, "rev-parse", RefNamespace+workspace)); got != commit {
+			t.Fatalf("%s ref = %s, want %s", workspace, got, commit)
+		}
 	}
 }
 
@@ -296,10 +391,7 @@ func TestFetchExpectedCommitMismatchPreservesExistingHostRef(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fixture.host.service.FetchResult(context.Background(), FetchRequest{
-		Repository: fixture.host.repository(), Sandbox: "alpha", BundlePath: fixture.resultBundle,
-		Digest: digest, ExpectedCommit: strings.Repeat("0", len(fixture.resultCommit)),
-	})
+	_, err = fixture.host.service.FetchResult(context.Background(), FetchRequest{Repository: fixture.host.repository(), Workspace: "alpha", BundlePath: fixture.resultBundle, Digest: digest, ExpectedCommit: strings.Repeat("0", len(fixture.resultCommit))})
 	if err == nil || !strings.Contains(err.Error(), "does not match expected commit") {
 		t.Fatalf("FetchResult mismatch error = %v", err)
 	}
@@ -338,9 +430,7 @@ func TestHostGitUsesProtectedConfigurationAndRejectsUnallowlistedLocalConfig(t *
 				t.Fatalf("host Git argv does not force %s", required)
 			}
 		}
-		artifact, err := service.PrepareSource(context.Background(), SourceRequest{
-			Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "secure", TempRoot: t.TempDir(),
-		})
+		artifact, err := service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -361,9 +451,7 @@ func TestHostGitUsesProtectedConfigurationAndRejectsUnallowlistedLocalConfig(t *
 		gitTest(t, fixture.path, "config", "--local", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 		gitTest(t, fixture.path, "config", "--local", "branch.main.remote", "origin")
 		gitTest(t, fixture.path, "config", "--local", "branch.main.merge", "refs/heads/main")
-		artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
-			Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "safe", TempRoot: t.TempDir(),
-		})
+		artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "safe", TempRoot: t.TempDir()})
 		if err != nil {
 			t.Fatalf("PrepareSource with ordinary clone configuration: %v", err)
 		}
@@ -387,9 +475,7 @@ func TestHostGitUsesProtectedConfigurationAndRejectsUnallowlistedLocalConfig(t *
 				value = "!" + script
 			}
 			gitTest(t, fixture.path, "config", "--local", key, value)
-			_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
-				Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "secure", TempRoot: t.TempDir(),
-			})
+			_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir()})
 			want := fmt.Sprintf("repository-local Git configuration %q is not allowlisted", strings.ToLower(key))
 			if err == nil || err.Error() != want {
 				t.Fatalf("PrepareSource with %s error = %v, want %q", key, err, want)
@@ -402,9 +488,7 @@ func TestHostGitUsesProtectedConfigurationAndRejectsUnallowlistedLocalConfig(t *
 	t.Run("command remote transport", func(t *testing.T) {
 		fixture := newRepositoryWithCommit(t)
 		gitTest(t, fixture.path, "config", "--local", "remote.origin.url", "ext::touch command-transport-ran")
-		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
-			Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "secure", TempRoot: t.TempDir(),
-		})
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir()})
 		if err == nil || err.Error() != `repository-local Git configuration "remote.origin.url" is not allowlisted` {
 			t.Fatalf("PrepareSource with command transport error = %v", err)
 		}
@@ -492,7 +576,7 @@ func TestApplyPreconditionsLeaveHostByteIdentical(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		gitTest(t, fixture.host.path, "update-ref", fixture.fetch.HostRef, fixture.source.SourceCommit)
+		gitTest(t, fixture.host.path, "update-ref", fixture.fetch.HostRef, fixture.source.SourceRevision)
 		before := hostByteSnapshot(t, fixture.host.path)
 		if _, err := transaction.Commit(context.Background()); err == nil || !strings.Contains(err.Error(), "want recorded result") {
 			t.Fatalf("Apply moved-ref boundary error = %v", err)
@@ -511,11 +595,7 @@ func TestApplyPreconditionsLeaveHostByteIdentical(t *testing.T) {
 	})
 	if service, err := NewService(OSRunner{}, testGitExecutable(t)); err != nil {
 		t.Fatal(err)
-	} else if _, err := service.PrepareApply(context.Background(), ApplyRequest{
-		Repository:   Repository{Name: "workspace", HostPath: t.TempDir(), GuestPath: "/workspace"},
-		SourceCommit: strings.Repeat("0", 40), TrackedFingerprint: strings.Repeat("0", 64),
-		FetchedRef: "refs/remotes/dsx/alpha/evil", ExpectedCommit: strings.Repeat("1", 40),
-	}); err == nil {
+	} else if _, err := service.PrepareApply(context.Background(), ApplyRequest{Repository: Repository{Name: "workspace", HostPath: t.TempDir(), GuestPath: "/workspace"}, SourceRevision: strings.Repeat("0", 40), TrackedFingerprint: strings.Repeat("0", 64), FetchedRef: "refs/remotes/dsx/alpha/evil", ExpectedCommit: strings.Repeat("1", 40)}); err == nil {
 		t.Fatal("Apply accepted hostile fetched ref")
 	}
 }
@@ -780,11 +860,9 @@ func (fixture repositoryFixture) repository() Repository {
 	return Repository{Name: "workspace", HostPath: fixture.path, GuestPath: "/workspace", Identity: fixture.identity}
 }
 
-func prepareSourceTest(t *testing.T, fixture *repositoryFixture, sandbox string) SourceArtifact {
+func prepareSourceTest(t *testing.T, fixture *repositoryFixture, workspace string) SourceArtifact {
 	t.Helper()
-	artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
-		Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: sandbox, TempRoot: t.TempDir(),
-	})
+	artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: workspace, TempRoot: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -805,10 +883,7 @@ type transferFixture struct {
 func newTransferFixture(t *testing.T, runner Runner) transferFixture {
 	t.Helper()
 	fixture := newUnfetchedTransferFixture(t, runner)
-	fetch, err := fixture.host.service.FetchResult(context.Background(), FetchRequest{
-		Repository: fixture.host.repository(), Sandbox: "alpha", BundlePath: fixture.resultBundle,
-		Digest: fixture.resultDigest, ExpectedCommit: fixture.resultCommit,
-	})
+	fetch, err := fixture.host.service.FetchResult(context.Background(), FetchRequest{Repository: fixture.host.repository(), Workspace: "alpha", BundlePath: fixture.resultBundle, Digest: fixture.resultDigest, ExpectedCommit: fixture.resultCommit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +910,7 @@ func newUnfetchedTransferFixture(t *testing.T, runner Runner) transferFixture {
 	gitTest(t, guest, "fetch", "--no-tags", "--no-write-fetch-head", "--", source.BundlePath, source.BundleRef)
 	gitTest(t, guest, "config", "user.name", "DSX Result")
 	gitTest(t, guest, "config", "user.email", "dsx@example.invalid")
-	gitTest(t, guest, "checkout", "--quiet", "--detach", source.SourceCommit)
+	gitTest(t, guest, "checkout", "--quiet", "--detach", source.SourceRevision)
 	gitTest(t, guest, "switch", "--quiet", "-c", "dsx/alpha")
 	if sameGitDirectory(t, host.path, guest) {
 		t.Fatal("guest clone shares Git directory with host")
@@ -871,10 +946,7 @@ func (fixture transferFixture) cleanup() {
 }
 
 func (fixture transferFixture) applyRequest() ApplyRequest {
-	return ApplyRequest{
-		Repository: fixture.host.repository(), SourceCommit: fixture.source.SourceCommit,
-		TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedRef: fixture.fetch.HostRef, ExpectedCommit: fixture.resultCommit,
-	}
+	return ApplyRequest{Repository: fixture.host.repository(), SourceRevision: fixture.source.SourceRevision, TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedRef: fixture.fetch.HostRef, ExpectedCommit: fixture.resultCommit}
 }
 
 type diffRepositoryRunner struct {

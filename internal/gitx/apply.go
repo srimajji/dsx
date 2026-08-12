@@ -20,7 +20,7 @@ func (service *Service) PrepareApply(ctx context.Context, request ApplyRequest) 
 	if err := service.validateLocalConfiguration(ctx, request.Repository.HostPath); err != nil {
 		return nil, err
 	}
-	if err := validateFullOID(request.SourceCommit, "source commit"); err != nil {
+	if err := validateFullOID(request.SourceRevision, "source revision"); err != nil {
 		return nil, err
 	}
 	if err := validateFullOID(request.ExpectedCommit, "expected result commit"); err != nil {
@@ -29,11 +29,11 @@ func (service *Service) PrepareApply(ctx context.Context, request ApplyRequest) 
 	if err := validateDigest(request.TrackedFingerprint); err != nil {
 		return nil, fmt.Errorf("tracked fingerprint: %w", err)
 	}
-	sandbox, err := validateFetchedRef(request.FetchedRef)
+	workspace, err := validateFetchedRef(request.FetchedRef)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSandbox(sandbox); err != nil {
+	if err := validateWorkspace(workspace); err != nil {
 		return nil, err
 	}
 	fetchedCommit, changedPaths, err := service.validateApplyState(ctx, request, "", nil)
@@ -104,8 +104,8 @@ func (transaction *applyTransaction) Commit(ctx context.Context) (ApplyResult, e
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("resolve host HEAD after squash apply: %w", err)
 	}
-	if current != transaction.request.SourceCommit {
-		return ApplyResult{}, fmt.Errorf("host HEAD changed during squash apply: got %q, want %q", current, transaction.request.SourceCommit)
+	if current != transaction.request.SourceRevision {
+		return ApplyResult{}, fmt.Errorf("host HEAD changed during squash apply: got %q, want %q", current, transaction.request.SourceRevision)
 	}
 	pathsOutput, err := transaction.service.gitOutput(ctx, transaction.request.Repository.HostPath, "diff", "--cached", "--name-only", "-z", "--")
 	if err != nil {
@@ -148,8 +148,8 @@ func (service *Service) validateApplyState(ctx context.Context, request ApplyReq
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve host HEAD: %w", err)
 	}
-	if current != request.SourceCommit {
-		return "", nil, fmt.Errorf("host advanced from source commit %s to %s", request.SourceCommit, current)
+	if current != request.SourceRevision {
+		return "", nil, fmt.Errorf("host advanced from source revision %s to %s", request.SourceRevision, current)
 	}
 	state, err := service.inspectRepositoryState(ctx, request.Repository.HostPath)
 	if err != nil {
@@ -175,10 +175,10 @@ func (service *Service) validateApplyState(ctx context.Context, request ApplyReq
 	if expectedCommit != "" && fetchedCommit != expectedCommit {
 		return "", nil, fmt.Errorf("fetched result changed from %s to %s", expectedCommit, fetchedCommit)
 	}
-	if err := service.runGit(ctx, request.Repository.HostPath, nil, "merge-base", "--is-ancestor", request.SourceCommit, fetchedCommit); err != nil {
+	if err := service.runGit(ctx, request.Repository.HostPath, nil, "merge-base", "--is-ancestor", request.SourceRevision, fetchedCommit); err != nil {
 		return "", nil, fmt.Errorf("fetched result is not descended from the prepared source: %w", err)
 	}
-	changedPaths, err := service.changedPaths(ctx, request.Repository.HostPath, request.SourceCommit, fetchedCommit)
+	changedPaths, err := service.changedPaths(ctx, request.Repository.HostPath, request.SourceRevision, fetchedCommit)
 	if err != nil {
 		return "", nil, err
 	}
@@ -211,11 +211,11 @@ func validateFetchedRef(ref string) (string, error) {
 	if !strings.HasPrefix(ref, RefNamespace) {
 		return "", fmt.Errorf("fetched ref must be beneath %q", RefNamespace)
 	}
-	sandbox := strings.TrimPrefix(ref, RefNamespace)
-	if sandbox == "" || ref != RefNamespace+sandbox || strings.Contains(sandbox, "/") {
+	workspace := strings.TrimPrefix(ref, RefNamespace)
+	if workspace == "" || ref != RefNamespace+workspace || strings.Contains(workspace, "/") {
 		return "", fmt.Errorf("invalid fetched ref %q", ref)
 	}
-	return sandbox, nil
+	return workspace, nil
 }
 
 func (service *Service) changedPaths(ctx context.Context, repositoryPath, baseCommit, headCommit string) ([]string, error) {

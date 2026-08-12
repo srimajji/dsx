@@ -89,6 +89,9 @@ func (adapter *guestClientAdapter) EnsureImage(context.Context, runtime.ImageSpe
 func (adapter *guestClientAdapter) CreateVolume(context.Context, runtime.VolumeSpec) (runtime.Resource, error) {
 	return runtime.Resource{}, errors.New("unexpected CreateVolume")
 }
+func (adapter *guestClientAdapter) CreateAuthLoginVolume(context.Context, runtime.AuthLoginVolumeSpec) (runtime.Resource, error) {
+	return runtime.Resource{}, errors.New("unexpected CreateAuthLoginVolume")
+}
 func (adapter *guestClientAdapter) CreateNetwork(context.Context, runtime.NetworkSpec) (runtime.Resource, error) {
 	return runtime.Resource{}, errors.New("unexpected CreateNetwork")
 }
@@ -98,8 +101,14 @@ func (adapter *guestClientAdapter) CreateWorkspace(context.Context, runtime.Work
 func (adapter *guestClientAdapter) CreateBrowser(context.Context, runtime.BrowserSpec) (runtime.Resource, error) {
 	return runtime.Resource{}, errors.New("unexpected CreateBrowser")
 }
+func (adapter *guestClientAdapter) CreateAuthLogin(context.Context, runtime.AuthLoginSpec) (runtime.Resource, error) {
+	return runtime.Resource{}, errors.New("unexpected CreateAuthLogin")
+}
 func (adapter *guestClientAdapter) StartWorkspace(context.Context, runtime.ResourceSnapshot) error {
 	return errors.New("unexpected StartWorkspace")
+}
+func (adapter *guestClientAdapter) StartAuthLogin(context.Context, runtime.ResourceSnapshot) error {
+	return errors.New("unexpected StartAuthLogin")
 }
 func (adapter *guestClientAdapter) PrepareExec(context.Context, runtime.ResourceSnapshot, runtime.ExecSpec) (runtime.ProcessSpec, error) {
 	return runtime.ProcessSpec{}, errors.New("unexpected PrepareExec")

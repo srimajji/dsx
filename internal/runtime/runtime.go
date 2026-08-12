@@ -11,11 +11,14 @@ type Adapter interface {
 	Probe(context.Context) (Capabilities, error)
 	EnsureImage(context.Context, ImageSpec) (Image, error)
 	CreateVolume(context.Context, VolumeSpec) (Resource, error)
+	CreateAuthLoginVolume(context.Context, AuthLoginVolumeSpec) (Resource, error)
 	CreateNetwork(context.Context, NetworkSpec) (Resource, error)
 	CreateWorkspace(context.Context, WorkspaceSpec) (Resource, error)
 	CreateBrowser(context.Context, BrowserSpec) (Resource, error)
+	CreateAuthLogin(context.Context, AuthLoginSpec) (Resource, error)
 	StartWorkspace(context.Context, ResourceSnapshot) error
 	PrepareExec(context.Context, ResourceSnapshot, ExecSpec) (ProcessSpec, error)
+	StartAuthLogin(context.Context, ResourceSnapshot) error
 	Exec(context.Context, ResourceSnapshot, ExecSpec, ExecIO) (Exit, error)
 	CopyTo(context.Context, ResourceSnapshot, HostPath, GuestPath) error
 	CopyFrom(context.Context, ResourceSnapshot, GuestPath, HostPath) error
@@ -69,6 +72,7 @@ type ResourceKind string
 const (
 	ResourceWorkspace ResourceKind = "workspace"
 	ResourceBrowser   ResourceKind = "browser"
+	ResourceAuthLogin ResourceKind = "auth-login"
 	ResourceNetwork   ResourceKind = "network"
 	ResourceVolume    ResourceKind = "volume"
 )
@@ -122,18 +126,19 @@ type NetworkSpec struct {
 }
 
 type WorkspaceSpec struct {
-	Name        string
-	Image       Image
-	Entrypoint  []string
-	Env         []string
-	WorkingDir  GuestPath
-	User        string
-	Mounts      []Mount
-	Networks    []string
-	Ports       []PortRequest
-	Labels      []Label
-	CPUs        int
-	MemoryBytes int64
+	Name          string
+	CanonicalRoot HostPath
+	Image         Image
+	Entrypoint    []string
+	Env           []string
+	WorkingDir    GuestPath
+	User          string
+	Mounts        []Mount
+	Networks      []string
+	Ports         []PortRequest
+	Labels        []Label
+	CPUs          int
+	MemoryBytes   int64
 }
 
 // BrowserSpec deliberately excludes mounts, volumes, host paths, users, and
@@ -149,18 +154,42 @@ type BrowserSpec struct {
 	MemoryBytes int64
 }
 
+// AuthLoginSpec is a project-scoped, disposable provider-login container. It
+// has no workspace identity, source mount, host-home mount, AWS mount, private
+// workspace network, or host port publication.
+type AuthLoginSpec struct {
+	Name          string
+	CanonicalRoot string
+	Harness       string
+	Image         Image
+	Entrypoint    []string
+	Env           []string
+	WorkingDir    GuestPath
+	User          string
+	AuthVolume    Mount
+	GuestHelper   *Mount
+	Labels        []Label
+	CPUs          int
+	MemoryBytes   int64
+}
+
+type AuthLoginVolumeSpec struct {
+	Name          string
+	CanonicalRoot string
+	Harness       string
+	Labels        []Label
+}
+
 // MountAuthority identifies the app-validated capability that permits a mount
 // source to cross the runtime boundary. Apple adapters must validate the
 // authority/type/target pairing before serializing it.
 type MountAuthority string
 
 const (
-	MountAuthorityRepository     MountAuthority = "repository"
-	MountAuthorityConfiguredHost MountAuthority = "configured-host"
-	MountAuthorityLeappMirror    MountAuthority = "leapp-mirror"
-	MountAuthorityGuestHelper    MountAuthority = "guest-helper"
-	MountAuthorityInternal       MountAuthority = "internal-artifact"
-	MountAuthorityVolume         MountAuthority = "volume"
+	MountAuthorityGuestHelper  MountAuthority = "guest-helper"
+	MountAuthorityLeappMirror  MountAuthority = "leapp-mirror"
+	MountAuthorityReviewedHost MountAuthority = "reviewed-host"
+	MountAuthorityVolume       MountAuthority = "volume"
 )
 
 type Mount struct {

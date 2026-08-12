@@ -9,7 +9,6 @@ import (
 
 	"github.com/srimajji/dsx/internal/app"
 	"github.com/srimajji/dsx/internal/config"
-	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
 	"github.com/srimajji/dsx/internal/runtime"
 )
@@ -22,8 +21,7 @@ func TestSanitizeExplicitCLIRendering(t *testing.T) {
 		Facts: app.ProjectFacts{CanonicalRoot: hostile, ConfigPath: hostile, ConfigExists: true},
 		Plan: plan.ExecutionPlan{
 			ContractVersion: plan.ContractVersion,
-			Mode:            model.ModeLive,
-			Agent:           hostile,
+			Agents:          plan.AgentPlan{Default: hostile},
 			Image:           plan.ResolvedImage{Reference: hostile},
 			ExecutableHash:  hostile,
 		},

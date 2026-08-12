@@ -18,7 +18,7 @@ func (service *Service) FetchResult(ctx context.Context, request FetchRequest) (
 	if err := service.validateLocalConfiguration(ctx, request.Repository.HostPath); err != nil {
 		return FetchResult{}, err
 	}
-	if err := validateSandbox(request.Sandbox); err != nil {
+	if err := validateWorkspace(request.Workspace); err != nil {
 		return FetchResult{}, err
 	}
 	if err := validateFullOID(request.ExpectedCommit, "expected result commit"); err != nil {
@@ -36,7 +36,7 @@ func (service *Service) FetchResult(ctx context.Context, request FetchRequest) (
 		return FetchResult{}, fmt.Errorf("verify result bundle: %w", err)
 	}
 
-	expectedBundleRef := "refs/heads/dsx/" + request.Sandbox
+	expectedBundleRef := "refs/heads/dsx/" + request.Workspace
 	commit, err := service.singleBundleHead(ctx, request.Repository.HostPath, privatePath, expectedBundleRef)
 	if err != nil {
 		return FetchResult{}, err
@@ -44,7 +44,7 @@ func (service *Service) FetchResult(ctx context.Context, request FetchRequest) (
 	if commit != request.ExpectedCommit {
 		return FetchResult{}, fmt.Errorf("result bundle commit %s does not match expected commit %s", commit, request.ExpectedCommit)
 	}
-	hostRef := RefNamespace + request.Sandbox
+	hostRef := RefNamespace + request.Workspace
 	refspec := expectedBundleRef + ":" + hostRef
 	if err := service.validateRepositoryIdentity(ctx, request.Repository); err != nil {
 		return FetchResult{}, fmt.Errorf("revalidate repository before result fetch: %w", err)
@@ -97,22 +97,23 @@ func (service *Service) Status(ctx context.Context, request StatusRequest) (Stat
 	if err := service.validateLocalConfiguration(ctx, request.Repository.HostPath); err != nil {
 		return Status{}, err
 	}
-	if err := validateSandbox(request.Sandbox); err != nil {
+	if err := validateWorkspace(request.Workspace); err != nil {
 		return Status{}, err
 	}
-	if request.SourceRef == "" || !strings.HasPrefix(request.SourceRef, "refs/heads/") || strings.ContainsAny(request.SourceRef, "\x00\r\n") {
-		return Status{}, errors.New("source ref must be a local branch ref")
+	if err := validateSourceBranch(request.SourceBranch); err != nil {
+		return Status{}, err
 	}
-	if err := service.runGit(ctx, request.Repository.HostPath, nil, "check-ref-format", request.SourceRef); err != nil {
-		return Status{}, fmt.Errorf("validate source ref: %w", err)
+	sourceRef := "refs/heads/" + request.SourceBranch
+	if err := service.runGit(ctx, request.Repository.HostPath, nil, "check-ref-format", sourceRef); err != nil {
+		return Status{}, fmt.Errorf("validate source branch: %w", err)
 	}
-	if request.ResultBranch != "dsx/"+request.Sandbox {
-		return Status{}, errors.New("result branch does not match sandbox")
+	if request.WorkspaceBranch != "dsx/"+request.Workspace {
+		return Status{}, errors.New("workspace branch does not match workspace")
 	}
-	if err := service.runGit(ctx, request.Repository.HostPath, nil, "check-ref-format", "refs/heads/"+request.ResultBranch); err != nil {
-		return Status{}, fmt.Errorf("validate result branch: %w", err)
+	if err := service.runGit(ctx, request.Repository.HostPath, nil, "check-ref-format", "refs/heads/"+request.WorkspaceBranch); err != nil {
+		return Status{}, fmt.Errorf("validate workspace branch: %w", err)
 	}
-	if err := validateFullOID(request.SourceCommit, "source commit"); err != nil {
+	if err := validateFullOID(request.SourceRevision, "source revision"); err != nil {
 		return Status{}, err
 	}
 	if request.ResultCommit != "" {
@@ -143,7 +144,7 @@ func (service *Service) Status(ctx context.Context, request StatusRequest) (Stat
 	if err != nil {
 		return Status{}, err
 	}
-	observedFetched, found, err := service.optionalRefCommit(ctx, request.Repository.HostPath, RefNamespace+request.Sandbox)
+	observedFetched, found, err := service.optionalRefCommit(ctx, request.Repository.HostPath, RefNamespace+request.Workspace)
 	if err != nil {
 		return Status{}, err
 	}
@@ -153,10 +154,10 @@ func (service *Service) Status(ctx context.Context, request StatusRequest) (Stat
 	}
 	return Status{
 		Repository:             request.Repository.Name,
-		Sandbox:                request.Sandbox,
-		SourceRef:              request.SourceRef,
-		SourceCommit:           request.SourceCommit,
-		ResultBranch:           request.ResultBranch,
+		Workspace:              request.Workspace,
+		SourceBranch:           request.SourceBranch,
+		SourceRevision:         request.SourceRevision,
+		WorkspaceBranch:        request.WorkspaceBranch,
 		ResultCommit:           request.ResultCommit,
 		HostCommit:             current,
 		HostTrackedFingerprint: fingerprint,

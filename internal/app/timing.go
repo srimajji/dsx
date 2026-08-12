@@ -3,7 +3,7 @@ package app
 import "time"
 
 // Phase identifies one bounded application operation. Values are deliberately
-// low-cardinality and must not include project, sandbox, run, or user input.
+// low-cardinality and must not include project, workspace, run, or user input.
 type Phase string
 
 const (

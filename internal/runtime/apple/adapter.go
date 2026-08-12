@@ -16,21 +16,21 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/srimajji/dsx/internal/config"
-	"github.com/srimajji/dsx/internal/hostsource"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/ownership"
 	"github.com/srimajji/dsx/internal/runtime"
 )
 
 const (
-	maxItems       = 128
-	maxCPUs        = 64
-	minMemoryBytes = 128 << 20
-	maxMemoryBytes = 1 << 40
+	maxItems              = 128
+	maxCPUs               = 64
+	minMemoryBytes        = 128 << 20
+	maxMemoryBytes        = 1 << 40
+	maxGeneratedNameBytes = 62
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$`)
+var generatedNameRE = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,60}[a-z0-9])?$`)
 var volumeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 var keyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var labelRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
@@ -259,7 +259,7 @@ func (a *Adapter) CreateVolume(ctx context.Context, s runtime.VolumeSpec) (runti
 	if e := a.ready(ctx); e != nil {
 		return runtime.Resource{}, e
 	}
-	if !volumeRE.MatchString(s.Name) || len(s.Name) > 63 {
+	if !volumeRE.MatchString(s.Name) || len(s.Name) > maxGeneratedNameBytes {
 		return runtime.Resource{}, bad("create volume", errors.New("invalid name"))
 	}
 	if e := own(s.Name, runtime.ResourceVolume, s.Labels); e != nil {
@@ -274,11 +274,28 @@ func (a *Adapter) CreateVolume(ctx context.Context, s runtime.VolumeSpec) (runti
 	snapshot, e := a.afterCreate(ctx, r, s.Name, runtime.ResourceVolume, s.Labels)
 	return snapshot.Resource, e
 }
+func (a *Adapter) CreateAuthLoginVolume(ctx context.Context, spec runtime.AuthLoginVolumeSpec) (runtime.Resource, error) {
+	if err := a.ready(ctx); err != nil {
+		return runtime.Resource{}, err
+	}
+	if err := validAuthLoginIdentity(spec.Name, spec.CanonicalRoot, spec.Harness, spec.Labels); err != nil {
+		return runtime.Resource{}, bad("create auth login volume", err)
+	}
+	args := labelArgs([]string{"volume", "create"}, spec.Labels)
+	args = append(args, spec.Name)
+	result, err := a.command(ctx, "create auth login volume", Command{Args: args})
+	if err != nil {
+		return runtime.Resource{}, err
+	}
+	snapshot, err := a.afterCreate(ctx, result, spec.Name, runtime.ResourceVolume, spec.Labels)
+	return snapshot.Resource, err
+}
+
 func (a *Adapter) CreateNetwork(ctx context.Context, s runtime.NetworkSpec) (runtime.Resource, error) {
 	if e := a.ready(ctx); e != nil {
 		return runtime.Resource{}, e
 	}
-	if !nameRE.MatchString(s.Name) {
+	if !generatedNameRE.MatchString(s.Name) {
 		return runtime.Resource{}, bad("create network", errors.New("invalid name"))
 	}
 	if e := own(s.Name, runtime.ResourceNetwork, s.Labels); e != nil {
@@ -330,7 +347,7 @@ func (a *Adapter) CreateWorkspace(ctx context.Context, s runtime.WorkspaceSpec) 
 		args = append(args, "--network", n)
 	}
 	for _, p := range s.Ports {
-		args = append(args, "--publish", fmt.Sprintf("127.0.0.1:%d:%d/%s", *p.HostPort, p.GuestPort, p.Protocol))
+		args = append(args, "--publish", portArg(p))
 	}
 	args = labelArgs(args, s.Labels)
 	if s.CPUs > 0 {
@@ -410,25 +427,89 @@ func (a *Adapter) CreateBrowser(ctx context.Context, s runtime.BrowserSpec) (run
 	}
 	return snapshot.Resource, nil
 }
+func (a *Adapter) CreateAuthLogin(ctx context.Context, spec runtime.AuthLoginSpec) (runtime.Resource, error) {
+	if err := a.ready(ctx); err != nil {
+		return runtime.Resource{}, err
+	}
+	if err := validAuthLogin(spec); err != nil {
+		return runtime.Resource{}, bad("create auth login", err)
+	}
+	args := []string{"create", "--name", spec.Name, "--user", spec.User, "--workdir", string(spec.WorkingDir)}
+	for _, value := range spec.Env {
+		args = append(args, "--env", value)
+	}
+	mounts := []runtime.Mount{spec.AuthVolume}
+	if spec.GuestHelper != nil {
+		mounts = append(mounts, *spec.GuestHelper)
+	}
+	for _, mount := range mounts {
+		value, err := mountArg(mount)
+		if err != nil {
+			return runtime.Resource{}, bad("create auth login", err)
+		}
+		args = append(args, "--mount", value)
+	}
+	args = labelArgs(args, spec.Labels)
+	if spec.CPUs > 0 {
+		args = append(args, "--cpus", strconv.Itoa(spec.CPUs))
+	}
+	if spec.MemoryBytes > 0 {
+		args = append(args, "--memory", strconv.FormatInt(spec.MemoryBytes, 10))
+	}
+	args = append(args, "--entrypoint", spec.Entrypoint[0], imageRef(spec.Image))
+	args = append(args, spec.Entrypoint[1:]...)
+	result, err := a.command(ctx, "create auth login", Command{Args: args})
+	if err != nil {
+		return runtime.Resource{}, err
+	}
+	snapshot, err := a.afterCreate(ctx, result, spec.Name, runtime.ResourceAuthLogin, spec.Labels)
+	if err != nil {
+		return runtime.Resource{}, err
+	}
+	if len(snapshot.Networks) != 0 || len(snapshot.Ports) != 0 || len(snapshot.Mounts) != len(mounts) {
+		return runtime.Resource{}, unavailable("verify created auth login", errors.New("auth login runtime grants differ"))
+	}
+	for index, mount := range mounts {
+		observed := snapshot.Mounts[index]
+		if observed.Source != mount.Source || observed.Target != mount.Target || observed.Type != mount.Type || observed.ReadOnly != mount.ReadOnly {
+			return runtime.Resource{}, unavailable("verify created auth login", errors.New("auth login mount differs"))
+		}
+	}
+	return snapshot.Resource, nil
+}
 
 func (a *Adapter) StartWorkspace(ctx context.Context, expected runtime.ResourceSnapshot) error {
-	observed, e := a.verifyExpected(ctx, expected, "start")
-	if e != nil {
-		return e
+	if expected.Kind != runtime.ResourceWorkspace && expected.Kind != runtime.ResourceBrowser {
+		return bad("start workspace", errors.New("workspace or browser resource required"))
 	}
-	if _, e = a.command(ctx, "start", Command{Args: []string{"start", string(observed.ID)}}); e != nil {
-		return e
+	return a.startContainer(ctx, expected)
+}
+
+func (a *Adapter) StartAuthLogin(ctx context.Context, expected runtime.ResourceSnapshot) error {
+	if expected.Kind != runtime.ResourceAuthLogin || !authLoginOwnershipLabels(expected.Labels) {
+		return bad("start auth login", errors.New("auth login resource required"))
 	}
-	started, e := a.container(ctx, observed.ID)
-	if e != nil {
-		return e
+	return a.startContainer(ctx, expected)
+}
+
+func (a *Adapter) startContainer(ctx context.Context, expected runtime.ResourceSnapshot) error {
+	observed, err := a.verifyExpected(ctx, expected, "start")
+	if err != nil {
+		return err
+	}
+	if _, err = a.command(ctx, "start", Command{Args: []string{"start", string(observed.ID)}}); err != nil {
+		return err
+	}
+	started, err := a.container(ctx, observed.ID)
+	if err != nil {
+		return err
 	}
 	if started.State != "running" || started.Resource != observed.Resource || !sameLabels(started.Labels, expected.Labels) {
 		return unavailable("verify start", fmt.Errorf("state or ownership changed after start"))
 	}
 	if started.Kind == runtime.ResourceBrowser {
-		if e := verifyBrowserNetworkAddress(started); e != nil {
-			return unavailable("verify started browser", e)
+		if err := verifyBrowserNetworkAddress(started); err != nil {
+			return unavailable("verify started browser", err)
 		}
 	}
 	return nil
@@ -543,7 +624,7 @@ func (a *Adapter) List(ctx context.Context, k runtime.ResourceKind) ([]runtime.R
 	}
 	var args []string
 	switch k {
-	case runtime.ResourceWorkspace, runtime.ResourceBrowser:
+	case runtime.ResourceWorkspace, runtime.ResourceBrowser, runtime.ResourceAuthLogin:
 		args = []string{"list", "--all", "--format", "json"}
 	case runtime.ResourceNetwork:
 		args = []string{"network", "list", "--format", "json"}
@@ -557,12 +638,12 @@ func (a *Adapter) List(ctx context.Context, k runtime.ResourceKind) ([]runtime.R
 		return nil, e
 	}
 	var out []runtime.ResourceSnapshot
-	if k == runtime.ResourceWorkspace || k == runtime.ResourceBrowser {
+	if k == runtime.ResourceWorkspace || k == runtime.ResourceBrowser || k == runtime.ResourceAuthLogin {
 		out, e = decodeContainers(r.Stdout)
 		if e == nil {
 			filtered := out[:0]
 			for _, s := range out {
-				if s.Kind == k {
+				if s.Kind == k || k == runtime.ResourceWorkspace && s.Kind == "" && strings.HasPrefix(s.Name, "dsx-") {
 					filtered = append(filtered, s)
 				}
 			}
@@ -574,6 +655,15 @@ func (a *Adapter) List(ctx context.Context, k runtime.ResourceKind) ([]runtime.R
 	if e != nil {
 		return nil, unavailable("decode list", e)
 	}
+	sort.Slice(out, func(left, right int) bool {
+		if out[left].Name != out[right].Name {
+			return out[left].Name < out[right].Name
+		}
+		if out[left].Kind != out[right].Kind {
+			return out[left].Kind < out[right].Kind
+		}
+		return out[left].ID < out[right].ID
+	})
 	return out, nil
 }
 func (a *Adapter) Signal(ctx context.Context, expected runtime.ResourceSnapshot, requested runtime.Signal) error {
@@ -628,6 +718,9 @@ func (a *Adapter) verifyExpected(ctx context.Context, expected runtime.ResourceS
 	if len(expected.Labels) == 0 {
 		return runtime.ResourceSnapshot{}, bad(operation, errors.New("expected ownership labels are missing"))
 	}
+	if !currentOwnershipLabels(expected.Labels) && !authLoginOwnershipLabels(expected.Labels) {
+		return runtime.ResourceSnapshot{}, bad(operation, errors.New("legacy or malformed ownership is cleanup-only"))
+	}
 	observed, e := a.inspectKind(ctx, expected.Kind, expected.ID)
 	if e != nil {
 		return runtime.ResourceSnapshot{}, e
@@ -663,7 +756,7 @@ func (a *Adapter) Delete(ctx context.Context, expected runtime.ResourceSnapshot)
 	}
 	var args []string
 	switch resource.Kind {
-	case runtime.ResourceWorkspace, runtime.ResourceBrowser:
+	case runtime.ResourceWorkspace, runtime.ResourceBrowser, runtime.ResourceAuthLogin:
 		args = []string{"delete", string(resource.ID)}
 	case runtime.ResourceNetwork:
 		args = []string{"network", "delete", resource.Name}
@@ -696,7 +789,7 @@ func (a *Adapter) container(ctx context.Context, id runtime.ResourceID) (runtime
 	return v[0], nil
 }
 func (a *Adapter) inspectKind(ctx context.Context, k runtime.ResourceKind, id runtime.ResourceID) (runtime.ResourceSnapshot, error) {
-	if k == runtime.ResourceWorkspace || k == runtime.ResourceBrowser {
+	if k == runtime.ResourceWorkspace || k == runtime.ResourceBrowser || k == runtime.ResourceAuthLogin {
 		return a.container(ctx, id)
 	}
 	if k != runtime.ResourceNetwork && k != runtime.ResourceVolume {
@@ -948,7 +1041,7 @@ func validBuild(s runtime.ImageSpec) error {
 }
 
 func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
-	if !nameRE.MatchString(s.Name) {
+	if !generatedNameRE.MatchString(s.Name) {
 		return "", errors.New("invalid name")
 	}
 	if e := validRef(s.Image.Reference); e != nil {
@@ -983,30 +1076,40 @@ func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
 	if len(s.Mounts) > maxItems || len(s.Networks) > maxItems || len(s.Ports) > maxItems {
 		return "", errors.New("too many resources")
 	}
+	mountTargets := make(map[string]struct{}, len(s.Mounts))
+	workspaceVolumes := 0
 	for _, mount := range s.Mounts {
-		if err := validMountAuthority(mount); err != nil {
+		if _, err := mountArg(mount); err != nil {
 			return "", err
 		}
+		if mount.Authority == runtime.MountAuthorityReviewedHost {
+			if err := validReviewedHostMount(s, mount); err != nil {
+				return "", err
+			}
+		}
+		if _, duplicate := mountTargets[mount.Target]; duplicate {
+			return "", fmt.Errorf("duplicate mount target %q", mount.Target)
+		}
+		mountTargets[mount.Target] = struct{}{}
+		if mount.Target == "/workspace" && mount.Type == "volume" &&
+			mount.Authority == runtime.MountAuthorityVolume && !mount.ReadOnly {
+			workspaceVolumes++
+		}
+	}
+	if workspaceVolumes != 1 {
+		return "", errors.New("exactly one writable private workspace volume required")
 	}
 	if err := validGuestHelperMounts(s.Mounts); err != nil {
 		return "", err
 	}
-	if err := validSensitiveHostMounts(s.Mounts); err != nil {
-		return "", err
-	}
-	for _, n := range s.Networks {
-		if !nameRE.MatchString(n) {
-			return "", errors.New("invalid network")
-		}
+	if len(s.Networks) != 1 || !validCurrentResourceName(s.Networks[0], label(s.Labels, ownership.WorkspaceLabel), "network") {
+		return "", errors.New("exactly one workspace-private network required")
 	}
 	for _, p := range s.Ports {
-		if p.HostPort == nil {
-			return "", errors.New("dynamic ports unsupported")
-		}
 		if p.HostIP != netip.MustParseAddr("127.0.0.1") {
 			return "", errors.New("nonloopback ports unsupported")
 		}
-		if *p.HostPort == 0 || p.GuestPort == 0 || p.Protocol != "tcp" {
+		if (p.HostPort != nil && *p.HostPort == 0) || p.GuestPort == 0 || p.Protocol != "tcp" {
 			return "", errors.New("invalid port")
 		}
 	}
@@ -1023,7 +1126,7 @@ func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
 	return k, nil
 }
 func validBrowser(s runtime.BrowserSpec) error {
-	if !nameRE.MatchString(s.Name) {
+	if !generatedNameRE.MatchString(s.Name) {
 		return errors.New("invalid name")
 	}
 	if e := validRef(s.Image.Reference); e != nil {
@@ -1062,6 +1165,115 @@ func validBrowser(s runtime.BrowserSpec) error {
 		return e
 	}
 	return nil
+}
+func validAuthLogin(spec runtime.AuthLoginSpec) error {
+	if err := validAuthLoginIdentity(spec.Name, spec.CanonicalRoot, spec.Harness, spec.Labels); err != nil {
+		return err
+	}
+	if err := validRef(spec.Image.Reference); err != nil {
+		return err
+	}
+	if !digestRE.MatchString(spec.Image.Digest) {
+		return errors.New("unpinned digest")
+	}
+	if pinned, err := pin(spec.Image.Reference); err == nil && pinned != spec.Image.Digest {
+		return errors.New("digest mismatch")
+	}
+	if len(spec.Entrypoint) == 0 || len(spec.Entrypoint) > maxItems {
+		return errors.New("invalid entrypoint")
+	}
+	if err := argv(spec.Entrypoint); err != nil {
+		return err
+	}
+	if err := env(spec.Env); err != nil {
+		return err
+	}
+	if err := guestPath(spec.WorkingDir); err != nil {
+		return err
+	}
+	if err := nonroot(spec.User); err != nil {
+		return err
+	}
+	if spec.CPUs < 0 || spec.CPUs > maxCPUs || spec.MemoryBytes < 0 || spec.MemoryBytes > maxMemoryBytes {
+		return errors.New("invalid auth login limits")
+	}
+	if spec.AuthVolume.Type != "volume" || spec.AuthVolume.Authority != runtime.MountAuthorityVolume ||
+		spec.AuthVolume.ReadOnly || spec.AuthVolume.Target == "/workspace" || guestPathsOverlap(spec.AuthVolume.Target, "/usr/local/libexec/dsx") ||
+		guestPathsOverlap(spec.AuthVolume.Target, "/run/dsx/aws") {
+		return errors.New("auth login requires one private writable auth volume")
+	}
+	if _, err := mountArg(spec.AuthVolume); err != nil {
+		return err
+	}
+	if spec.GuestHelper != nil {
+		if spec.GuestHelper.Target == spec.AuthVolume.Target {
+			return errors.New("duplicate auth login mount target")
+		}
+		if _, err := mountArg(*spec.GuestHelper); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validAuthLoginIdentity(name, canonicalRoot, harness string, labels []runtime.Label) error {
+	expectedName, err := runtime.CanonicalAuthLoginName(canonicalRoot, harness)
+	if err != nil || expectedName != name {
+		return errors.New("invalid auth login name")
+	}
+	if !authLoginOwnershipLabels(labels) {
+		return errors.New("invalid auth login ownership labels")
+	}
+	projectID, err := model.NewProjectID(canonicalRoot)
+	if err != nil {
+		return err
+	}
+	values := make(map[string]string, len(labels))
+	for _, label := range labels {
+		values[label.Key] = label.Value
+	}
+	if values[runtime.AuthLoginProjectLabel] != string(projectID) || values[runtime.AuthLoginHarnessLabel] != harness {
+		return errors.New("auth login ownership does not match canonical project and harness")
+	}
+	return nil
+}
+
+func authLoginOwnershipLabels(labels []runtime.Label) bool {
+	if len(labels) != 6 || validLabels(labels, true) != nil {
+		return false
+	}
+	values := make(map[string]string, len(labels))
+	for _, label := range labels {
+		if _, duplicate := values[label.Key]; duplicate {
+			return false
+		}
+		values[label.Key] = label.Value
+	}
+	if values[runtime.AuthLoginManagedLabel] != "true" ||
+		values[runtime.AuthLoginContractLabel] != runtime.AuthLoginContractValue ||
+		values[runtime.AuthLoginKindLabel] != string(runtime.ResourceAuthLogin) ||
+		!validNameTokenForAdapter(values[runtime.AuthLoginHarnessLabel]) {
+		return false
+	}
+	if _, err := model.ParseProjectID(values[runtime.AuthLoginProjectLabel]); err != nil {
+		return false
+	}
+	if _, err := model.ParseRunID(values[runtime.AuthLoginRunLabel]); err != nil {
+		return false
+	}
+	return true
+}
+
+func validNameTokenForAdapter(value string) bool {
+	if len(value) == 0 || len(value) > runtime.MaxResourceRoleBytes || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func verifyBrowserPostcondition(observed runtime.ResourceSnapshot, expected runtime.BrowserSpec) error {
@@ -1178,37 +1390,112 @@ func validRootReadOnlyCleanup(spec runtime.ExecSpec) bool {
 	return err == nil && string(runID) == parts[3]
 }
 
-func own(name string, k runtime.ResourceKind, l []runtime.Label) error {
-	if len(l) != 7 {
+func own(name string, kind runtime.ResourceKind, labels []runtime.Label) error {
+	if len(labels) != 7 {
 		return errors.New("exactly seven ownership labels required")
 	}
-	if e := validLabels(l, true); e != nil {
-		return e
+	if err := validLabels(labels, true); err != nil {
+		return err
 	}
-	m := map[string]string{}
-	for _, v := range l {
-		m[v.Key] = v.Value
+	values := make(map[string]string, len(labels))
+	for _, label := range labels {
+		values[label.Key] = label.Value
 	}
-	p, e := model.ParseProjectID(m[ownership.ProjectLabel])
-	if e != nil {
-		return e
+	required := [...]string{
+		ownership.ManagedLabel, ownership.ContractLabel, ownership.ProjectLabel,
+		ownership.WorkspaceLabel, ownership.RunLabel, ownership.KindLabel, ownership.RoleLabel,
 	}
-	s, e := model.ParseSandboxName(m[ownership.SandboxLabel])
-	if e != nil {
-		return e
+	for _, key := range required {
+		if values[key] == "" {
+			return fmt.Errorf("missing ownership label %q", key)
+		}
 	}
-	r, e := model.ParseRunID(m[ownership.RunLabel])
-	if e != nil {
-		return e
+	if values[ownership.ManagedLabel] != "true" || values[ownership.ContractLabel] != ownership.ContractValue {
+		return errors.New("current ownership contract required")
 	}
-	i, e := ownership.NewIdentity(p, s, r, k, m[ownership.RoleLabel])
-	if e != nil {
-		return e
+	if _, err := model.ParseProjectID(values[ownership.ProjectLabel]); err != nil {
+		return err
 	}
-	if i.Name() != name || !sameLabels(i.Labels(), l) {
-		return errors.New("ownership mismatch")
+	if _, err := model.ParseWorkspaceName(values[ownership.WorkspaceLabel]); err != nil {
+		return err
+	}
+	if _, err := model.ParseRunID(values[ownership.RunLabel]); err != nil {
+		return err
+	}
+	role := values[ownership.RoleLabel]
+	if _, err := model.ParseWorkspaceName(role); err != nil || len(role) > runtime.MaxResourceRoleBytes {
+		return errors.New("invalid ownership role")
+	}
+	if values[ownership.KindLabel] != string(kind) || !validCurrentResourceName(name, values[ownership.WorkspaceLabel], role) {
+		return errors.New("ownership kind or name mismatch")
 	}
 	return nil
+}
+
+func validCurrentResourceName(name, workspace, role string) bool {
+	if !generatedNameRE.MatchString(name) || !strings.HasPrefix(name, "dsx-") {
+		return false
+	}
+	suffix := "-" + workspace + "-" + role + "-"
+	index := strings.LastIndex(name, suffix)
+	if index < len("dsx-") || index+len(suffix)+6 != len(name) {
+		return false
+	}
+	project := name[len("dsx-"):index]
+	if len(project) == 0 || len(project) > 16 || project[0] == '-' || project[len(project)-1] == '-' {
+		return false
+	}
+	for _, value := range name[len(name)-6:] {
+		if (value < '0' || value > '9') && (value < 'a' || value > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func currentOwnershipLabels(labels []runtime.Label) bool {
+	if len(labels) != 7 || validLabels(labels, true) != nil {
+		return false
+	}
+	values := make(map[string]string, len(labels))
+	for _, label := range labels {
+		if _, duplicate := values[label.Key]; duplicate {
+			return false
+		}
+		values[label.Key] = label.Value
+	}
+	required := [...]string{
+		ownership.ManagedLabel, ownership.ContractLabel, ownership.ProjectLabel,
+		ownership.WorkspaceLabel, ownership.RunLabel, ownership.KindLabel, ownership.RoleLabel,
+	}
+	for _, key := range required {
+		if values[key] == "" {
+			return false
+		}
+	}
+	if values[ownership.ManagedLabel] != "true" || values[ownership.ContractLabel] != ownership.ContractValue {
+		return false
+	}
+	if _, err := model.ParseProjectID(values[ownership.ProjectLabel]); err != nil {
+		return false
+	}
+	if _, err := model.ParseWorkspaceName(values[ownership.WorkspaceLabel]); err != nil {
+		return false
+	}
+	if _, err := model.ParseRunID(values[ownership.RunLabel]); err != nil {
+		return false
+	}
+	if role := values[ownership.RoleLabel]; len(role) > runtime.MaxResourceRoleBytes {
+		return false
+	} else if _, err := model.ParseWorkspaceName(role); err != nil {
+		return false
+	}
+	switch runtime.ResourceKind(values[ownership.KindLabel]) {
+	case runtime.ResourceWorkspace, runtime.ResourceBrowser, runtime.ResourceNetwork, runtime.ResourceVolume:
+		return true
+	default:
+		return false
+	}
 }
 func validLabels(l []runtime.Label, only bool) error {
 	if len(l) > maxItems {
@@ -1280,15 +1567,6 @@ func hostPath(v runtime.HostPath) error {
 	return nil
 }
 
-func hostMountPath(value runtime.HostPath) error {
-	if err := hostPath(value); err != nil {
-		return err
-	}
-	if err := config.ValidateHostMountPath(string(value)); err != nil {
-		return err
-	}
-	return nil
-}
 func guestPath(v runtime.GuestPath) error {
 	s := string(v)
 	if s == "" || !strings.HasPrefix(s, "/") || path.Clean(s) != s || strings.ContainsAny(s, "\x00\r\n:") {
@@ -1346,7 +1624,7 @@ func validRootSupervisor(spec runtime.WorkspaceSpec) bool {
 				return false
 			}
 		case "/workspace":
-			if mount.Type == "volume" && mount.Authority == runtime.MountAuthorityInternal && !mount.ReadOnly {
+			if mount.Type == "volume" && mount.Authority == runtime.MountAuthorityVolume && !mount.ReadOnly {
 				workspaceVolumes++
 			}
 		}
@@ -1367,34 +1645,6 @@ func validGuestHelperMounts(mounts []runtime.Mount) error {
 			!mount.ReadOnly || hostPath(runtime.HostPath(mount.Source)) != nil || validGuestHelperHostDirectory(mount.Source) != nil {
 			return errors.New("mount overlaps reserved guest helper directory")
 		}
-	}
-	return nil
-}
-
-func validSensitiveHostMounts(mounts []runtime.Mount) error {
-	const leappGuestDirectory = "/run/dsx/aws"
-	sensitiveSource := ""
-	for _, mount := range mounts {
-		if !guestPathsOverlap(mount.Target, leappGuestDirectory) {
-			continue
-		}
-		if sensitiveSource != "" || mount.Target != leappGuestDirectory || mount.Type != "bind" ||
-			mount.Authority != runtime.MountAuthorityLeappMirror || !mount.ReadOnly {
-			return errors.New("mount overlaps reserved sensitive directory")
-		}
-		sensitiveSource = mount.Source
-	}
-	if sensitiveSource == "" {
-		return nil
-	}
-	writable := make([]string, 0, len(mounts))
-	for _, mount := range mounts {
-		if mount.Type == "bind" && !mount.ReadOnly {
-			writable = append(writable, mount.Source)
-		}
-	}
-	if err := hostsource.ValidateReadOnlyIsolation(sensitiveSource, writable); err != nil {
-		return errors.New("sensitive read-only host source overlaps writable workspace authority")
 	}
 	return nil
 }
@@ -1446,7 +1696,7 @@ func validDelete(r runtime.Resource) error {
 		return errors.New("builder delete forbidden")
 	}
 	switch r.Kind {
-	case runtime.ResourceWorkspace, runtime.ResourceBrowser:
+	case runtime.ResourceWorkspace, runtime.ResourceBrowser, runtime.ResourceAuthLogin:
 		if e := validID(r.ID); e != nil {
 			return e
 		}
@@ -1484,7 +1734,7 @@ func pin(s string) (string, error) {
 }
 func resourceNoun(kind runtime.ResourceKind) string {
 	switch kind {
-	case runtime.ResourceWorkspace, runtime.ResourceBrowser:
+	case runtime.ResourceWorkspace, runtime.ResourceBrowser, runtime.ResourceAuthLogin:
 		return "container"
 	case runtime.ResourceNetwork:
 		return "network"
@@ -1511,23 +1761,57 @@ func signal(s runtime.Signal) (string, error) {
 	}
 	return "", errors.New("unsupported signal")
 }
+func validReviewedHostMount(spec runtime.WorkspaceSpec, mount runtime.Mount) error {
+	if spec.CanonicalRoot == "" {
+		return errors.New("reviewed host mount requires canonical project root boundary")
+	}
+	projectRoot, err := filepath.EvalSymlinks(string(spec.CanonicalRoot))
+	if err != nil || projectRoot != string(spec.CanonicalRoot) {
+		return errors.New("canonical project root must be an existing no-symlink path")
+	}
+	projectID, err := model.NewProjectID(projectRoot)
+	if err != nil || label(spec.Labels, ownership.ProjectLabel) != string(projectID) {
+		return errors.New("canonical project root does not match workspace ownership")
+	}
+	workspace, err := model.ParseWorkspaceName(label(spec.Labels, ownership.WorkspaceLabel))
+	if err != nil {
+		return errors.New("workspace ownership is invalid")
+	}
+	expectedName, err := runtime.CanonicalResourceName(projectRoot, workspace, label(spec.Labels, ownership.RoleLabel))
+	if err != nil || expectedName != spec.Name {
+		return errors.New("canonical project root does not match workspace runtime name")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return errors.New("resolve host home")
+	}
+	hostHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return errors.New("resolve canonical host home")
+	}
+	if withinHostBoundary(mount.Source, projectRoot) || withinHostBoundary(mount.Source, hostHome) {
+		return errors.New("reviewed host source overlaps project source or host home")
+	}
+	for _, protected := range []string{"/workspace", "/auth", "/usr/local/libexec/dsx", "/run/dsx/aws"} {
+		if guestPathsOverlap(mount.Target, protected) {
+			return fmt.Errorf("reviewed host target overlaps protected guest path %q", protected)
+		}
+	}
+	for _, existing := range spec.Mounts {
+		if existing.Authority == runtime.MountAuthorityVolume && guestPathsOverlap(mount.Target, existing.Target) {
+			return fmt.Errorf("reviewed host target overlaps private volume target %q", existing.Target)
+		}
+	}
+	return nil
+}
+
+func withinHostBoundary(candidate, boundary string) bool {
+	relative, err := filepath.Rel(boundary, candidate)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
 func validMountAuthority(m runtime.Mount) error {
 	switch m.Authority {
-	case runtime.MountAuthorityRepository:
-		if m.Type != "bind" || m.Target != "/workspace" && !strings.HasPrefix(m.Target, "/workspace/") {
-			return errors.New("repository mount authority has an invalid type or target")
-		}
-		return hostPath(runtime.HostPath(m.Source))
-	case runtime.MountAuthorityConfiguredHost:
-		if m.Type != "bind" {
-			return errors.New("configured host mount authority requires a bind")
-		}
-		return hostMountPath(runtime.HostPath(m.Source))
-	case runtime.MountAuthorityLeappMirror:
-		if m.Type != "bind" || m.Target != "/run/dsx/aws" || !m.ReadOnly {
-			return errors.New("Leapp mirror authority has an invalid type, target, or mode")
-		}
-		return hostPath(runtime.HostPath(m.Source))
 	case runtime.MountAuthorityGuestHelper:
 		if m.Type != "bind" || m.Target != "/usr/local/libexec/dsx" || !m.ReadOnly {
 			return errors.New("guest helper authority has an invalid type, target, or mode")
@@ -1536,9 +1820,21 @@ func validMountAuthority(m runtime.Mount) error {
 			return err
 		}
 		return validGuestHelperHostDirectory(m.Source)
-	case runtime.MountAuthorityInternal:
-		if m.Type != "volume" || m.Target != "/workspace" || m.ReadOnly {
-			return errors.New("internal artifact authority has an invalid type, target, or mode")
+	case runtime.MountAuthorityLeappMirror:
+		if m.Type != "bind" || m.Target != "/run/dsx/aws" || !m.ReadOnly {
+			return errors.New("Leapp mirror authority has an invalid type, target, or mode")
+		}
+		return hostPath(runtime.HostPath(m.Source))
+	case runtime.MountAuthorityReviewedHost:
+		if m.Type != "bind" || !m.ReadOnly {
+			return errors.New("reviewed host authority requires a read-only bind mount")
+		}
+		if err := hostPath(runtime.HostPath(m.Source)); err != nil {
+			return err
+		}
+		resolved, err := filepath.EvalSymlinks(m.Source)
+		if err != nil || resolved != m.Source {
+			return errors.New("reviewed host source must be an existing canonical no-symlink path")
 		}
 		return nil
 	case runtime.MountAuthorityVolume:
@@ -1549,6 +1845,14 @@ func validMountAuthority(m runtime.Mount) error {
 	default:
 		return errors.New("mount authority is missing or unsupported")
 	}
+}
+
+func portArg(request runtime.PortRequest) string {
+	hostPort := ""
+	if request.HostPort != nil {
+		hostPort = strconv.FormatUint(uint64(*request.HostPort), 10)
+	}
+	return fmt.Sprintf("%s:%s:%d/%s", request.HostIP, hostPort, request.GuestPort, request.Protocol)
 }
 
 func mountArg(m runtime.Mount) (string, error) {
@@ -1566,7 +1870,7 @@ func mountArg(m runtime.Mount) (string, error) {
 	case "bind":
 		v = "type=bind,source=" + m.Source + ",target=" + m.Target
 	case "volume":
-		if !volumeRE.MatchString(m.Source) || len(m.Source) > 63 {
+		if !volumeRE.MatchString(m.Source) || len(m.Source) > maxGeneratedNameBytes {
 			return "", errors.New("invalid volume")
 		}
 		v = "type=volume,source=" + m.Source + ",target=" + m.Target

@@ -24,9 +24,10 @@ const (
 
 // LeaseIdentity is the complete owner of one workspace-scoped helper.
 type LeaseIdentity struct {
-	ProjectID model.ProjectID   `json:"project_id"`
-	Sandbox   model.SandboxName `json:"sandbox"`
-	RunID     model.RunID       `json:"run_id"`
+	ProjectID     model.ProjectID     `json:"project_id"`
+	CanonicalRoot string              `json:"canonical_root"`
+	Workspace     model.WorkspaceName `json:"workspace"`
+	RunID         model.RunID         `json:"run_id"`
 }
 
 func (identity LeaseIdentity) Validate() error {
@@ -34,9 +35,13 @@ func (identity LeaseIdentity) Validate() error {
 	if err != nil || project != identity.ProjectID {
 		return errors.New("invalid bridge lease project identity")
 	}
-	sandbox, err := model.ParseSandboxName(string(identity.Sandbox))
-	if err != nil || sandbox != identity.Sandbox {
-		return errors.New("invalid bridge lease sandbox identity")
+	derivedProject, err := model.NewProjectID(identity.CanonicalRoot)
+	if err != nil || derivedProject != identity.ProjectID {
+		return errors.New("bridge lease canonical root does not match project identity")
+	}
+	workspace, err := model.ParseWorkspaceName(string(identity.Workspace))
+	if err != nil || workspace != identity.Workspace {
+		return errors.New("invalid bridge lease workspace identity")
 	}
 	run, err := model.ParseRunID(string(identity.RunID))
 	if err != nil || run != identity.RunID {

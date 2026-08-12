@@ -4,92 +4,50 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/srimajji/dsx/internal/gitx"
-	"github.com/srimajji/dsx/internal/harness"
 	"github.com/srimajji/dsx/internal/model"
+	"github.com/srimajji/dsx/internal/ownership"
 	"github.com/srimajji/dsx/internal/plan"
 	"github.com/srimajji/dsx/internal/runtime"
 	"github.com/srimajji/dsx/internal/state"
 )
 
-func browserCloneFixture(t *testing.T, sandbox string) (*CloneService, *cloneRecordingRuntime, state.Manifest, cloneVolumeIndexes, runtime.ResourceSnapshot) {
-	t.Helper()
-	lifecycle, _, _, base, _ := lifecycleFixture(t)
-	fake := &cloneRecordingRuntime{lifecycleRuntime: base, diffCode: 0, resultCommit: cloneTestCommit}
-	lifecycle.runtime = fake
-	service := &CloneService{
-		lifecycle: lifecycle,
-		harness:   &HarnessService{},
-		git:       &cloneGitStub{status: gitx.Status{HostCommit: cloneTestCommit, HostTrackedClean: true, HostTrackedFingerprint: cloneTestFingerprint}},
-		tempRoot:  t.TempDir(),
+func TestBrowserRuntimeContractIsNetworkOnly(t *testing.T) {
+	root := t.TempDir()
+	projectID, err := model.NewProjectID(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	execution, artifacts := clonePlanFixture(t, sandbox)
-	execution.Browser = &plan.BrowserPlan{
-		Enabled: true, ImageReference: "example/browser@sha256:" + cloneTestDigest, ImageDigest: cloneTestDigest,
+	workspace, err := model.ParseWorkspaceName("browser-contract")
+	if err != nil {
+		t.Fatal(err)
 	}
 	runID, err := model.ParseRunID("01890f5c-7b00-7000-8000-000000000039")
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, indexes, err := plannedCloneManifest(execution, runID, lifecycle.now().UTC(), artifacts)
+	identity, err := ownership.NewIdentity(projectID, root, workspace, runID, runtime.ResourceBrowser, browserRole)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lifecycle.manifests.CreateIntent(context.Background(), manifest); err != nil {
+	record := identity.ManifestRecord()
+	record.Created = true
+	record.RuntimeID = record.ExpectedID
+	network := "private-workspace-network"
+	snapshot := runtime.ResourceSnapshot{
+		Resource: runtime.Resource{ID: runtime.ResourceID(record.ExpectedID), Name: record.Name, Kind: runtime.ResourceBrowser},
+		State:    "running", ImageDigest: "sha256:" + browserTestDigest,
+		Labels: identity.Labels(), Networks: []string{network},
+	}
+	if err := verifyBrowserSnapshot(record, snapshot, network, browserTestDigest, true); err != nil {
 		t.Fatal(err)
-	}
-	if err := lifecycle.transition(context.Background(), &manifest, model.StateCreating, "create", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := lifecycle.createResource(context.Background(), &manifest, 0, func(record state.ResourceRecord) (runtime.Resource, error) {
-		return fake.CreateNetwork(context.Background(), runtime.NetworkSpec{Name: record.Name, Labels: runtimeLabels(record.Labels)})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	workspaceRecord := manifest.Resources[indexes.owner]
-	if err := lifecycle.createResource(context.Background(), &manifest, indexes.owner, func(state.ResourceRecord) (runtime.Resource, error) {
-		return fake.CreateWorkspace(context.Background(), runtime.WorkspaceSpec{
-			Name: workspaceRecord.Name, Networks: []string{manifest.Resources[0].Name}, Labels: runtimeLabels(workspaceRecord.Labels),
-		})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	owner, err := fake.Inspect(context.Background(), runtime.ResourceID(workspaceRecord.ExpectedID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fake.StartWorkspace(context.Background(), owner); err != nil {
-		t.Fatal(err)
-	}
-	owner, err = fake.Inspect(context.Background(), runtime.ResourceID(workspaceRecord.ExpectedID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return service, fake, manifest, indexes, owner
-}
-
-func TestBrowserManifestAndSpecAreIsolatedAndCleanupOrdered(t *testing.T) {
-	service, fake, manifest, indexes, owner := browserCloneFixture(t, "browser-contract")
-	if indexes.browser != indexes.owner+1 || indexes.browser != len(manifest.Resources)-1 {
-		t.Fatalf("browser manifest order = owner %d browser %d resources %d", indexes.owner, indexes.browser, len(manifest.Resources))
-	}
-	server, err := service.createBrowser(context.Background(), owner, browserExecutionPlan(t, manifest), indexes.browser, &manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	record := manifest.Resources[indexes.browser]
-	if want := (harness.MCPServer{Name: "playwright", URL: "http://192.168.64.10:8931/mcp"}); !reflect.DeepEqual(*server, want) {
-		t.Fatalf("browser MCP = %#v, want %#v", *server, want)
-	}
-	if fake.browserSpec.Name != record.Name ||
-		!reflect.DeepEqual(fake.browserSpec.Networks, []string{manifest.Resources[0].Name}) ||
-		!reflect.DeepEqual(fake.browserSpec.Entrypoint, browserEntrypoint) || len(fake.browserSpec.Env) != 0 {
-		t.Fatalf("browser spec = %#v", fake.browserSpec)
 	}
 	browserType := reflect.TypeOf(runtime.BrowserSpec{})
 	for _, forbidden := range []string{"Mounts", "Ports", "WorkingDir", "User", "HostPath", "Volumes"} {
@@ -97,201 +55,355 @@ func TestBrowserManifestAndSpecAreIsolatedAndCleanupOrdered(t *testing.T) {
 			t.Fatalf("BrowserSpec exposes forbidden field %q", forbidden)
 		}
 	}
-	if err := service.deleteBrowser(context.Background(), indexes.browser, &manifest); err != nil {
-		t.Fatal(err)
-	}
-	if !manifest.Resources[indexes.browser].Deleted {
-		t.Fatal("browser deletion was not persisted")
-	}
-	if err := service.markCapturePending(context.Background(), &manifest); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.captureResults(context.Background(), owner, &manifest); err != nil {
-		t.Fatal(err)
-	}
-	deleteAt, captureAt := callIndex(fake.calls, "delete:browser"), callIndex(fake.calls, "exec:"+DefaultGuestHelperPath+" exec -- /usr/bin/git")
-	if deleteAt < 0 || captureAt < 0 || deleteAt >= captureAt {
-		t.Fatalf("browser was not deleted before capture: %#v", fake.calls)
+	snapshot.Mounts = []runtime.Mount{{Target: "/workspace"}}
+	if err := verifyBrowserSnapshot(record, snapshot, network, browserTestDigest, true); err == nil {
+		t.Fatal("browser snapshot with a source mount was accepted")
 	}
 }
 
-func TestBrowserReadinessTimeoutAndCrashFailClosed(t *testing.T) {
-	service, fake, manifest, indexes, owner := browserCloneFixture(t, "browser-readiness")
-	execution := browserExecutionPlan(t, manifest)
-	server, err := service.createBrowser(context.Background(), owner, execution, indexes.browser, &manifest)
-	if err != nil || server == nil {
-		t.Fatalf("initial browser creation = %#v, %v", server, err)
-	}
-	record := manifest.Resources[indexes.browser]
-	browser := fake.resources[runtime.ResourceID(record.ExpectedID)]
-	failureCode := 7
-	fake.execExit = runtime.Exit{Code: &failureCode}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
-	if err := service.waitBrowserReady(ctx, manifest.Resources[indexes.owner], record, manifest.Resources[0].Name, execution.Browser.ImageDigest, server.URL); model.ErrorCodeOf(err) != model.CodeUnavailable || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("readiness timeout = %v", err)
-	}
-	ownerCrash := fake.resources[owner.ID]
-	ownerCrash.State = "exited"
-	fake.resources[owner.ID] = ownerCrash
-	beforeOwnerCrash := len(fake.specs)
-	if err := service.waitBrowserReady(context.Background(), manifest.Resources[indexes.owner], record, manifest.Resources[0].Name, execution.Browser.ImageDigest, server.URL); model.ErrorCodeOf(err) != model.CodeUnavailable || !strings.Contains(err.Error(), "owner workspace exited") {
-		t.Fatalf("owner crash = %v", err)
-	}
-	if len(fake.specs) != beforeOwnerCrash {
-		t.Fatal("readiness probe ran after the owner workspace crash")
-	}
-	ownerCrash.State = "running"
-	fake.resources[owner.ID] = ownerCrash
-	browser.State = "exited"
-	fake.resources[browser.ID] = browser
-	before := len(fake.specs)
-	if err := service.waitBrowserReady(context.Background(), manifest.Resources[indexes.owner], record, manifest.Resources[0].Name, execution.Browser.ImageDigest, server.URL); model.ErrorCodeOf(err) != model.CodeUnavailable || !strings.Contains(err.Error(), "exited") {
-		t.Fatalf("browser crash = %v", err)
-	}
-	if len(fake.specs) != before {
-		t.Fatal("readiness probe ran after the browser crash")
-	}
-}
-
-func TestBrowserStartupFailureCleansCreatedResource(t *testing.T) {
-	service, fake, manifest, indexes, owner := browserCloneFixture(t, "browser-start-fail")
-	injected := errors.New("injected browser start failure")
-	fake.failStart = injected
-	if _, err := service.createBrowser(context.Background(), owner, browserExecutionPlan(t, manifest), indexes.browser, &manifest); !errors.Is(err, injected) {
-		t.Fatalf("createBrowser error = %v, want injected failure", err)
-	}
-	record := manifest.Resources[indexes.browser]
-	if !record.Deleted {
-		t.Fatalf("failed browser was not durably deleted: %#v", record)
-	}
-	if _, found := fake.resources[runtime.ResourceID(record.ExpectedID)]; found {
-		t.Fatalf("failed browser %q remains in runtime", record.ExpectedID)
-	}
-}
-func TestBrowserPreHarnessFailureCleansCreatedResource(t *testing.T) {
-	service, fake, manifest, indexes, owner := browserCloneFixture(t, "browser-preflight-fail")
-	injected := errors.New("injected project unlock failure")
-	_, err := service.executeCloneRun(
-		context.Background(),
-		CloneRunRequest{},
-		browserExecutionPlan(t, manifest),
-		owner,
-		indexes,
-		&manifest,
-		nil,
-		nil,
-		func() {},
-		func() error { return injected },
-	)
-	if !errors.Is(err, injected) {
-		t.Fatalf("executeCloneRun error = %v, want injected failure", err)
-	}
-	record := manifest.Resources[indexes.browser]
-	if !record.Deleted {
-		t.Fatalf("pre-harness failure did not durably delete browser: %#v", record)
-	}
-	if _, found := fake.resources[runtime.ResourceID(record.ExpectedID)]; found {
-		t.Fatalf("pre-harness failure left browser %q running", record.ExpectedID)
-	}
-}
-
-func TestBrowserMCPDuplicateAndNetworkAddressValidation(t *testing.T) {
-	if err := rejectPlaywrightMCP([]harness.MCPServer{{Name: "other"}, {Name: "playwright"}}); model.ErrorCodeOf(err) != model.CodeInvalidInput {
-		t.Fatalf("duplicate playwright MCP = %v", err)
-	}
-	if err := rejectPlaywrightMCP([]harness.MCPServer{{Name: "Playwright"}}); err != nil {
-		t.Fatalf("case-distinct MCP name was rejected: %v", err)
-	}
-	request := CloneRunRequest{MCPServers: []harness.MCPServer{{Name: "other", Command: []string{"tool"}}}}
-	injected, err := injectPlaywrightMCP(request, harness.MCPServer{Name: "playwright", URL: "http://192.168.64.7:8931/mcp"})
-	if err != nil || len(injected.MCPServers) != 2 || injected.MCPServers[0].Name != "other" || injected.MCPServers[1].Name != "playwright" {
-		t.Fatalf("playwright MCP injection = %#v, %v", injected.MCPServers, err)
-	}
-	if len(request.MCPServers) != 1 {
-		t.Fatalf("playwright injection mutated caller request: %#v", request.MCPServers)
-	}
-	if _, err := injectPlaywrightMCP(CloneRunRequest{MCPServers: []harness.MCPServer{{Name: "playwright"}}}, harness.MCPServer{Name: "playwright", URL: "http://192.168.64.7:8931/mcp"}); model.ErrorCodeOf(err) != model.CodeInvalidInput {
-		t.Fatalf("duplicate injection error = %v", err)
-	}
-	network := "owner-network"
+func TestBrowserNetworkAddressRequiresOnePrivateIPv4(t *testing.T) {
+	network := "private-workspace-network"
 	for _, test := range []struct {
 		name      string
 		addresses []netip.Addr
 		want      string
 	}{
-		{name: "owner private IPv4", addresses: []netip.Addr{netip.MustParseAddr("fd00::10"), netip.MustParseAddr("192.168.64.7")}, want: "192.168.64.7"},
+		{name: "private IPv4", addresses: []netip.Addr{netip.MustParseAddr("fd00::10"), netip.MustParseAddr("192.168.64.7")}, want: "192.168.64.7"},
 		{name: "public rejected", addresses: []netip.Addr{netip.MustParseAddr("203.0.113.7")}},
 		{name: "ambiguous rejected", addresses: []netip.Addr{netip.MustParseAddr("192.168.64.7"), netip.MustParseAddr("192.168.64.8")}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			address, err := browserNetworkIPv4(runtime.ResourceSnapshot{NetworkAddresses: map[string][]netip.Addr{network: test.addresses}}, network)
 			if test.want == "" && err == nil {
-				t.Fatalf("browserNetworkIPv4 = %s, want error", address)
+				t.Fatalf("browserNetworkIPv4() = %s, want error", address)
 			}
 			if test.want != "" && (err != nil || address.String() != test.want) {
-				t.Fatalf("browserNetworkIPv4 = %s, %v, want %s", address, err, test.want)
+				t.Fatalf("browserNetworkIPv4() = %s, %v; want %s", address, err, test.want)
 			}
 		})
 	}
 }
 
-func TestBrowserRollbackAndCleanupFailureRetention(t *testing.T) {
-	t.Run("rollback is reverse ownership order", func(t *testing.T) {
-		service, fake, manifest, indexes, owner := browserCloneFixture(t, "browser-rollback")
-		if _, err := service.createBrowser(context.Background(), owner, browserExecutionPlan(t, manifest), indexes.browser, &manifest); err != nil {
-			t.Fatal(err)
-		}
-		if err := service.lifecycle.rollbackCreate(context.Background(), &manifest); err != nil {
-			t.Fatal(err)
-		}
-		browserAt, workspaceAt, networkAt := callIndex(fake.calls, "delete:browser"), callIndex(fake.calls, "delete:workspace"), callIndex(fake.calls, "delete:network")
-		if !(browserAt >= 0 && browserAt < workspaceAt && workspaceAt < networkAt) {
-			t.Fatalf("rollback order = %#v", fake.calls)
-		}
-	})
-
-	t.Run("delete failure retains exact manifest evidence", func(t *testing.T) {
-		service, fake, manifest, indexes, owner := browserCloneFixture(t, "browser-retain")
-		if _, err := service.createBrowser(context.Background(), owner, browserExecutionPlan(t, manifest), indexes.browser, &manifest); err != nil {
-			t.Fatal(err)
-		}
-		injected := errors.New("injected browser delete failure")
-		fake.failBrowserDelete = injected
-		if err := service.deleteBrowser(context.Background(), indexes.browser, &manifest); !errors.Is(err, injected) {
-			t.Fatalf("deleteBrowser error = %v, want injected failure", err)
-		}
-		stored, found, err := service.lifecycle.manifests.LoadManifest(context.Background(), manifest.ProjectID, manifest.Sandbox, manifest.RunID)
-		if err != nil || !found {
-			t.Fatalf("load retained manifest = found %t, %v", found, err)
-		}
-		record := stored.Resources[indexes.browser]
-		if !record.Created || record.Deleted || record.RuntimeID != record.ExpectedID {
-			t.Fatalf("retained browser evidence = %#v", record)
-		}
-		if _, found := fake.resources[runtime.ResourceID(record.ExpectedID)]; !found {
-			t.Fatal("failed browser cleanup removed the runtime evidence")
-		}
-	})
+func TestManifestResourceIndexRejectsDuplicateBrowserRecords(t *testing.T) {
+	records := []state.ResourceRecord{
+		{Kind: string(runtime.ResourceBrowser)},
+		{Kind: string(runtime.ResourceBrowser)},
+	}
+	if _, found := manifestResourceIndex(records, runtime.ResourceBrowser); found {
+		t.Fatal("duplicate browser ownership records were accepted")
+	}
 }
 
-func browserExecutionPlan(t *testing.T, manifest state.Manifest) plan.ExecutionPlan {
+type browserStateRepository struct {
+	manifest    state.Manifest
+	workspaceMu sync.Mutex
+	projectMu   sync.Mutex
+}
+
+func (repository *browserStateRepository) CreateIntent(_ context.Context, manifest state.Manifest) error {
+	repository.manifest = manifest
+	return nil
+}
+func (repository *browserStateRepository) LoadManifest(_ context.Context, projectID model.ProjectID, workspace model.WorkspaceName, runID model.RunID) (state.Manifest, bool, error) {
+	if repository.manifest.ProjectID != projectID || repository.manifest.Workspace != workspace || repository.manifest.RunID != runID {
+		return state.Manifest{}, false, nil
+	}
+	return repository.manifest, true, nil
+}
+func (repository *browserStateRepository) ReplaceManifest(_ context.Context, manifest state.Manifest, expected uint64) error {
+	if repository.manifest.Generation != expected {
+		return errors.New("manifest generation conflict")
+	}
+	manifest.Generation = expected + 1
+	repository.manifest = manifest
+	return nil
+}
+func (repository *browserStateRepository) ListProjectManifests(_ context.Context, projectID model.ProjectID) ([]state.Manifest, error) {
+	if repository.manifest.ProjectID != projectID {
+		return nil, nil
+	}
+	return []state.Manifest{repository.manifest}, nil
+}
+func (repository *browserStateRepository) ListAllManifests(context.Context) ([]state.Manifest, error) {
+	return []state.Manifest{repository.manifest}, nil
+}
+func (repository *browserStateRepository) DeleteManifest(context.Context, model.ProjectID, model.WorkspaceName, model.RunID) error {
+	repository.manifest = state.Manifest{}
+	return nil
+}
+func (repository *browserStateRepository) LockProject(context.Context, model.ProjectID) (state.ProjectLock, error) {
+	repository.projectMu.Lock()
+	return browserStateLock{mutex: &repository.projectMu}, nil
+}
+func (repository *browserStateRepository) LockWorkspace(context.Context, model.ProjectID, model.WorkspaceName) (state.ProjectLock, error) {
+	repository.workspaceMu.Lock()
+	return browserStateLock{mutex: &repository.workspaceMu}, nil
+}
+
+type browserStateLock struct{ mutex *sync.Mutex }
+
+func (lock browserStateLock) Unlock() error { lock.mutex.Unlock(); return nil }
+
+type browserSessionRuntime struct {
+	*guestClientAdapter
+	resources map[runtime.ResourceID]runtime.ResourceSnapshot
+	spec      runtime.BrowserSpec
+	creates   int
+	deletes   int
+	startErr  error
+}
+
+func (adapter *browserSessionRuntime) EnsureImage(_ context.Context, spec runtime.ImageSpec) (runtime.Image, error) {
+	return runtime.Image{Reference: spec.Reference, Digest: "sha256:" + browserTestDigest}, nil
+}
+
+func (adapter *browserSessionRuntime) CreateBrowser(_ context.Context, spec runtime.BrowserSpec) (runtime.Resource, error) {
+	adapter.creates++
+	adapter.spec = spec
+	resource := runtime.Resource{ID: runtime.ResourceID(spec.Name), Name: spec.Name, Kind: runtime.ResourceBrowser}
+	adapter.resources[resource.ID] = runtime.ResourceSnapshot{
+		Resource: resource, State: "created", ImageDigest: spec.Image.Digest,
+		Labels: append([]runtime.Label(nil), spec.Labels...), Networks: append([]string(nil), spec.Networks...),
+		NetworkAddresses: map[string][]netip.Addr{spec.Networks[0]: {netip.MustParseAddr("192.168.64.10")}},
+	}
+	return resource, nil
+}
+
+func (adapter *browserSessionRuntime) StartWorkspace(_ context.Context, snapshot runtime.ResourceSnapshot) error {
+	if adapter.startErr != nil {
+		return adapter.startErr
+	}
+	snapshot.State = "running"
+	adapter.resources[snapshot.ID] = snapshot
+	return nil
+}
+
+func (adapter *browserSessionRuntime) Inspect(_ context.Context, id runtime.ResourceID) (runtime.ResourceSnapshot, error) {
+	snapshot, found := adapter.resources[id]
+	if !found {
+		return runtime.ResourceSnapshot{}, runtime.ErrResourceNotFound
+	}
+	return snapshot, nil
+}
+
+func (adapter *browserSessionRuntime) Exec(_ context.Context, _ runtime.ResourceSnapshot, _ runtime.ExecSpec, _ runtime.ExecIO) (runtime.Exit, error) {
+	code := 0
+	return runtime.Exit{Code: &code}, nil
+}
+
+func (adapter *browserSessionRuntime) Stop(_ context.Context, snapshot runtime.ResourceSnapshot, _ runtime.StopPolicy) error {
+	snapshot.State = "stopped"
+	adapter.resources[snapshot.ID] = snapshot
+	return nil
+}
+
+func (adapter *browserSessionRuntime) Delete(_ context.Context, snapshot runtime.ResourceSnapshot) error {
+	delete(adapter.resources, snapshot.ID)
+	adapter.deletes++
+	return nil
+}
+
+func TestBrowserSessionIsNewEachTimeAndDeletedAtSessionEnd(t *testing.T) {
+	service, access, fake := browserSessionFixture(t)
+	for sessionNumber := range 2 {
+		session, err := service.createBrowserSession(context.Background(), access)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if session.Server.Name != browserMCPName {
+			t.Fatalf("session %d MCP = %#v", sessionNumber, session.Server)
+		}
+		index, found := manifestResourceIndex(access.Manifest.Resources, runtime.ResourceBrowser)
+		if !found {
+			t.Fatalf("session %d browser intent missing", sessionNumber)
+		}
+		if err := service.deleteBrowserWithAccess(context.Background(), access, index); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fake.creates != 2 || fake.deletes != 2 {
+		t.Fatalf("browser lifetime creates=%d deletes=%d, want two disposable sessions", fake.creates, fake.deletes)
+	}
+	if len(fake.spec.Networks) != 1 || fake.spec.Networks[0] != access.Network.Name || len(fake.spec.Env) != 0 {
+		t.Fatalf("browser isolation spec = %#v", fake.spec)
+	}
+}
+
+func TestBrowserStartupCancellationDeletesCreatedResource(t *testing.T) {
+	service, access, fake := browserSessionFixture(t)
+	fake.startErr = context.Canceled
+	if _, err := service.createBrowserSession(context.Background(), access); !errors.Is(err, context.Canceled) {
+		t.Fatalf("createBrowserSession() error = %v, want cancellation", err)
+	}
+	if fake.creates != 1 || fake.deletes != 1 {
+		t.Fatalf("cancellation cleanup creates=%d deletes=%d", fake.creates, fake.deletes)
+	}
+}
+
+func TestWorkspaceStopDeletesOrphanedSessionBrowser(t *testing.T) {
+	assertWorkspaceLifecycleDeletesOrphanedBrowser(t, "stop")
+}
+
+func TestWorkspaceRestartDeletesOrphanedSessionBrowser(t *testing.T) {
+	assertWorkspaceLifecycleDeletesOrphanedBrowser(t, "restart")
+}
+
+func TestWorkspaceStopRefusesAmbiguousOrphanedSessionBrowser(t *testing.T) {
+	service, access, fake := browserSessionFixture(t)
+	session, err := service.createBrowserSession(context.Background(), access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := runtime.ResourceID(session.Record.ExpectedID)
+	browser := fake.resources[id]
+	browser.Labels[0].Value = "foreign"
+	fake.resources[id] = browser
+	if _, err := service.workspaces.Stop(context.Background(), WorkspaceStopRequest{
+		Root: access.Manifest.CanonicalRoot, Workspace: access.Manifest.Workspace,
+	}); model.ErrorCodeOf(err) != model.CodeAmbiguous {
+		t.Fatalf("Stop() error = %v, want ambiguous ownership", err)
+	}
+	if fake.deletes != 0 {
+		t.Fatalf("ambiguous browser was deleted")
+	}
+	workspace, err := fake.Inspect(context.Background(), access.Workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.State != "running" {
+		t.Fatalf("workspace stopped before ambiguous browser was resolved: %q", workspace.State)
+	}
+}
+
+func assertWorkspaceLifecycleDeletesOrphanedBrowser(t *testing.T, operation string) {
 	t.Helper()
-	execution, _ := clonePlanFixture(t, string(manifest.Sandbox))
-	execution.Project.ID = manifest.ProjectID
-	execution.Project.CanonicalRoot = manifest.CanonicalRoot
-	execution.Sandbox.RunID = manifest.RunID
-	execution.Browser = &plan.BrowserPlan{
-		Enabled: true, ImageReference: "example/browser@sha256:" + cloneTestDigest, ImageDigest: cloneTestDigest,
+	service, access, fake := browserSessionFixture(t)
+	session, err := service.createBrowserSession(context.Background(), access)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return execution
+	switch operation {
+	case "stop":
+		_, err = service.workspaces.Stop(context.Background(), WorkspaceStopRequest{
+			Root: access.Manifest.CanonicalRoot, Workspace: access.Manifest.Workspace,
+		})
+	case "restart":
+		_, err = service.workspaces.Restart(context.Background(), WorkspaceRestartRequest{
+			Root: access.Manifest.CanonicalRoot, Workspace: access.Manifest.Workspace,
+		})
+	default:
+		t.Fatalf("unsupported lifecycle operation %q", operation)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, inspectErr := fake.Inspect(context.Background(), runtime.ResourceID(session.Record.ExpectedID)); !errors.Is(inspectErr, runtime.ErrResourceNotFound) {
+		t.Fatalf("%s left orphaned browser: %v", operation, inspectErr)
+	}
+	if fake.deletes != 1 {
+		t.Fatalf("%s browser deletes = %d, want 1", operation, fake.deletes)
+	}
+	manifest, err := service.workspaces.oneWorkspaceManifest(context.Background(), access.Manifest.ProjectID, access.Manifest.Workspace, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, found := manifestResourceIndex(manifest.Resources, runtime.ResourceBrowser)
+	if !found || !manifest.Resources[index].Deleted || !manifest.Resources[index].Absent {
+		t.Fatalf("%s browser cleanup evidence = %#v", operation, manifest.Resources)
+	}
+	workspace, err := fake.Inspect(context.Background(), access.Workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantState := "stopped"
+	if operation == "restart" {
+		wantState = "running"
+	}
+	if workspace.State != wantState {
+		t.Fatalf("%s workspace state = %q, want %q", operation, workspace.State, wantState)
+	}
 }
 
-func callIndex(calls []string, prefix string) int {
-	for index, call := range calls {
-		if strings.HasPrefix(call, prefix) {
-			return index
-		}
+func browserSessionFixture(t *testing.T) (*AgentService, workspaceAccess, *browserSessionRuntime) {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	return -1
+	projectID, err := model.NewProjectID(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := model.WorkspaceName("browser-session")
+	runID := model.RunID("01890f5c-7b00-7000-8000-000000000042")
+	workspaceIdentity, err := ownership.NewIdentity(projectID, root, workspace, runID, runtime.ResourceWorkspace, workspaceOwnerRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	networkIdentity, err := ownership.NewIdentity(projectID, root, workspace, runID, runtime.ResourceNetwork, workspaceNetworkRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRecord := workspaceIdentity.ManifestRecord()
+	workspaceRecord.Created, workspaceRecord.RuntimeID = true, workspaceRecord.ExpectedID
+	networkRecord := networkIdentity.ManifestRecord()
+	networkRecord.Created, networkRecord.RuntimeID = true, networkRecord.ExpectedID
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	manifest := state.Manifest{
+		Version: state.ManifestVersion, Generation: 1, ProjectID: projectID, CanonicalRoot: root,
+		Workspace: workspace, RunID: runID, PlanHash: browserTestDigest, State: model.StateRunning,
+		Operation: "", Resources: []state.ResourceRecord{networkRecord, workspaceRecord},
+		CreatedAt: now, UpdatedAt: now,
+		Git: []state.GitRecord{{
+			Repository: "workspace", HostPath: root, GuestPath: "/workspace",
+			Identity: gitx.RepositoryIdentity{
+				ApprovedRoot: browserPhysicalIdentity(root), Worktree: browserPhysicalIdentity(root),
+				GitDir: browserPhysicalIdentity(filepath.Join(root, ".git")),
+			},
+			SourceBranch: "refs/heads/main", SourceRevision: strings.Repeat("1", 40),
+			TrackedFingerprint: strings.Repeat("2", 64), WorkspaceBranch: "dsx/browser-session",
+			SourceBundleDigest: strings.Repeat("3", 64),
+		}},
+	}
+	if err := state.ValidateManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	repository := &browserStateRepository{manifest: manifest}
+	workspaceSnapshot := runtime.ResourceSnapshot{
+		Resource: runtime.Resource{ID: runtime.ResourceID(workspaceRecord.ExpectedID), Name: workspaceRecord.Name, Kind: runtime.ResourceWorkspace},
+		State:    "running", Labels: workspaceIdentity.Labels(), Networks: []string{networkRecord.Name},
+	}
+	fake := &browserSessionRuntime{
+		guestClientAdapter: &guestClientAdapter{},
+		resources:          make(map[runtime.ResourceID]runtime.ResourceSnapshot),
+	}
+	fake.resources[workspaceSnapshot.ID] = workspaceSnapshot
+	workspaces := NewWorkspaceService(WorkspaceDependencies{
+		Manifests: repository, Locks: repository, Runtime: fake, Now: func() time.Time { return now.Add(time.Second) },
+	})
+	execution := plan.ExecutionPlan{
+		ContractVersion: plan.ContractVersion, Project: plan.ProjectIdentity{ID: projectID, CanonicalRoot: root},
+		Browser: &plan.BrowserPlan{ImageReference: "example/browser@sha256:" + browserTestDigest, ImageDigest: browserTestDigest},
+		Limits:  plan.ResourceLimits{CPUs: 2, MemoryBytes: 2 << 30}, ExecutableHash: browserTestDigest,
+	}
+	workspaces.resolvePlan = func(context.Context, string) (plan.ExecutionPlan, error) {
+		return execution, nil
+	}
+	access := workspaceAccess{Manifest: &manifest, Plan: execution, Workspace: workspaceSnapshot, Network: networkRecord}
+	return &AgentService{workspaces: workspaces}, access, fake
 }
+
+func browserPhysicalIdentity(value string) gitx.PhysicalPathIdentity {
+	components := []gitx.PathComponentIdentity{{Path: string(filepath.Separator), Device: 1, Inode: 1}}
+	current := string(filepath.Separator)
+	for index, part := range strings.Split(strings.TrimPrefix(value, string(filepath.Separator)), string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		components = append(components, gitx.PathComponentIdentity{Path: current, Device: 1, Inode: uint64(index + 2)})
+	}
+	return gitx.PhysicalPathIdentity{CanonicalPath: value, Components: components}
+}
+
+const browserTestDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

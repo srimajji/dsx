@@ -8,6 +8,7 @@
     ]
   },
   "image": { "ref": "ghcr.io/example/dev:latest" },
+  "agents": { "default": "codex", "allowed": ["codex"] },
   "processes": {
     "web": { "argv": ["run-web"], "dependsOn": ["worker"] }
   }

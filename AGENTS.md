@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-DSX is a daemonless Go CLI for creating secure Linux development sandboxes on Apple-silicon Macs with Apple's `container` runtime. It supports one live-mounted workspace or multiple guest-owned Git clone sandboxes, four coding-agent harnesses, isolated authentication, project services, loopback port publication, and a separate Playwright browser sandbox.
+DSX is a daemonless Go CLI for creating secure Linux development workspaces on Apple-silicon Macs with Apple's `container` runtime. Every workspace is a named peer backed by a guest-owned private Git clone. DSX supports four coding-agent harnesses, isolated project and per-workspace authentication, project services, loopback port publication, and a disposable Playwright browser for an explicitly browser-enabled agent session.
 
 Product requirements and architecture are authoritative in `docs/PRD.md` and `docs/adr/0001-dsx-implementation-architecture.md`. Treat `docs/implementation-plan.md` as execution history beneath those contracts, not permission to reduce scope.
 
@@ -24,17 +24,17 @@ Primary flow:
 2. `internal/config` parses bounded JSONC against the embedded offline schema.
 3. `internal/plan` resolves config/import/CLI/default precedence into a deterministic plan and executable hash.
 4. `internal/state` authorizes the exact hash and persists write-ahead manifests before runtime mutation.
-5. `internal/app` coordinates lifecycle, clone, harness, browser, port, and bridge operations through injected interfaces.
+5. `internal/app` coordinates named-workspace lifecycle, Git source/update/result transfer, agent, authentication, browser-session, port, and bridge operations through injected interfaces.
 6. `internal/runtime/apple` invokes Apple `container` with structured argv and re-inspects ownership before mutation.
 7. `internal/app/guest_client.go` communicates with `cmd/dsx-guest` using the bounded, versioned `internal/guestproto` protocol.
 
-Live mode mounts approved repositories read/write into sandbox `main`. Clone mode uses bounded Git bundles and guest-owned volumes; results return through verified bundles and guarded fetch/apply transactions. Browser resources receive only the owning private network—never source, auth, AWS, host paths, or published host ports.
+The local checkout is the source and integration point, not a DSX workspace. Workspace creation transfers clean committed revisions through bounded verified Git bundles into guest-owned volumes without shared Git objects or host source/home mounts. Every lifecycle and Git operation names its workspace; workspace, agent, authentication, and browser-session lifecycles remain separate. Results return through verified bundles and guarded fetch/apply transactions. A browser receives only the selected workspace's private network—never source, auth, AWS, host paths, or published host control ports—and is deleted with its agent session.
 
 ## Key Directories
 
 - `cmd/dsx/`: Darwin/ARM64 host CLI and production dependency composition.
 - `cmd/dsx-guest/`: Linux/ARM64 guest helper and narrow control/staging commands.
-- `internal/app/`: application services for inspect, setup, lifecycle, clones, harnesses, browser, and bridges.
+- `internal/app/`: application services for inspect, setup, named-workspace lifecycle, Git transfer, agents, authentication, browser sessions, and bridges.
 - `internal/hostcmd/`: explicit CLI parsing, rendering, exit codes, and TTY dispatch.
 - `internal/tui/`: Bubble Tea/Huh presentation; models emit intents and do not implement lifecycle transitions.
 - `internal/config/`, `internal/plan/`, `internal/model/`: validated configuration, deterministic execution plans, IDs, states, and typed errors.
@@ -88,7 +88,7 @@ There is no repository-specific linter or schema generator. Do not invent `golan
 - Keep secrets out of plans, hashes, manifests, logs, errors, TUI content, process listings, and bridge status. Stage secret values through private bounded files.
 - Persist authorization and planned manifest intent before runtime mutation. Revalidate plan hash, ownership labels, physical paths, bundles, DNS, helper/image identity, and guest generation immediately before sensitive use.
 - Never delete by resource name alone. Ambiguous ownership is reported and preserved.
-- Preserve lock order: clone sandbox lock before project lock. Preserve legal transitions in `internal/model/state.go` and optimistic manifest generations.
+- Preserve lock order: workspace lock before project lock. Preserve legal transitions in `internal/model/state.go` and optimistic manifest generations.
 - Cancellation stops forward work; rollback and result/auth capture use a bounded independent context when required. Cleanup is idempotent and must preserve unfetched or uncertain work.
 - Goroutines are reserved for real concurrent I/O/lifecycle work: PTYs, process supervision, Unix connections, health checks, and relay copying. Protect shared state with mutexes and signal completion through channels/context.
 - TUI models return intents only. Sanitize repository/runtime text with `internal/terminal`; restore terminal state around interactive child handoff and forward resize/signals.
@@ -97,11 +97,11 @@ There is no repository-specific linter or schema generator. Do not invent `golan
 
 - `cmd/dsx/main.go`: production composition root and hidden leased-helper modes.
 - `internal/hostcmd/execute.go`: command surface and dependency interfaces.
-- `internal/app/lifecycle.go`: live state machine, write-ahead resource creation, rollback, stop, and cleanup.
-- `internal/app/clone.go`: clone lifecycle and Git result recovery.
-- `internal/app/harness.go`: harness invocation, image attestation, auth copies, and MCP injection.
-- `internal/plan/hash.go`: executable projection and approval-hash contract.
-- `internal/state/manifest.go`: durable ownership/resource/Git record validation.
+- `internal/app/workspace.go`: named-workspace create/open/start/stop/restart/remove/list transactions and ownership-safe rollback.
+- `internal/app/workspace_update_rebase.go`, `internal/app/workspace_git.go`: committed-source update/rebase and guarded Git result recovery.
+- `internal/app/harness.go`, `internal/app/auth.go`, `internal/app/browser.go`: workspace-targeted agent sessions, canonical/project credential handling, isolated copies, and disposable per-session browsers.
+- `internal/plan/hash.go`: reusable project-default executable projection and approval-hash contract.
+- `internal/state/manifest.go`: durable workspace ownership/resource/Git record validation.
 - `internal/runtime/runtime.go`: DSX runtime port; `internal/runtime/apple/adapter.go` is its Apple implementation.
 - `schema/dsx-config-v1.schema.json`: manually maintained strict Draft 2020-12 schema.
 - `images/agent/harnesses.lock.json`: exact-byte harness lock coupled to the agent recipe and attestation digest.

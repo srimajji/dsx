@@ -2,715 +2,362 @@ package hostcmd
 
 import (
 	"bytes"
+	tea "charm.land/bubbletea/v2"
 	"context"
-	"encoding/json"
-	"errors"
 	"io"
 	"os"
-	"reflect"
+	"os/exec"
+	"path/filepath"
 	"strings"
-	"sync"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/srimajji/dsx/internal/app"
 	"github.com/srimajji/dsx/internal/harness"
 	"github.com/srimajji/dsx/internal/model"
+	"github.com/srimajji/dsx/internal/plan"
 	"github.com/srimajji/dsx/internal/runtime"
-	"github.com/srimajji/dsx/internal/terminal"
+	"github.com/srimajji/dsx/internal/state"
+	"github.com/srimajji/dsx/internal/tui"
 )
 
-type lifecycleStub struct {
-	startRequests    []app.StartRequest
-	recreateRequests []app.StartRequest
-	stopRequests     []app.StopRequest
-	cleanRequests    []app.CleanRequest
-	listRequests     []app.ListRequest
-	shellRequests    []app.ShellRequest
-	statusRequests   []app.ProcessStatusRequest
-	logsRequests     []app.ProcessLogsRequest
-	startResult      app.StartResult
-	stopResult       app.StopResult
-	cleanResult      app.CleanResult
-	listResult       app.ListResult
-	shellResult      app.ShellResult
-	statusResult     app.ProcessStatusResult
-	logsResult       app.ProcessLogsResult
-	shellReady       app.ShellReady
-	startErr         error
-	stopErr          error
-	cleanErr         error
-	listErr          error
-	shellErr         error
-	statusErr        error
-	logsErr          error
-	shellFunc        func(context.Context, app.ShellRequest) (app.ShellResult, error)
+type workspaceStub struct {
+	creates      []app.WorkspaceCreateRequest
+	opens        []app.WorkspaceOpenRequest
+	starts       []app.WorkspaceStartRequest
+	stops        []app.WorkspaceStopRequest
+	restarts     []app.WorkspaceRestartRequest
+	removes      []app.WorkspaceRemoveRequest
+	lists        []app.WorkspaceListRequest
+	result       app.WorkspaceResult
+	openResult   app.WorkspaceOpenResult
+	listResult   app.WorkspaceListResult
+	removeResult app.WorkspaceRemoveResult
+	err          error
 }
 
-func (stub *lifecycleStub) Start(_ context.Context, request app.StartRequest) (app.StartResult, error) {
-	stub.startRequests = append(stub.startRequests, request)
-	return stub.startResult, stub.startErr
-}
-
-func (stub *lifecycleStub) StartWithProgress(_ context.Context, request app.StartRequest, report app.StartProgressReporter) (app.StartResult, error) {
-	stub.startRequests = append(stub.startRequests, request)
-	for _, step := range []app.StartProgressStep{
-		app.StartProgressValidate,
-		app.StartProgressImage,
-		app.StartProgressResources,
-		app.StartProgressWorkspace,
-		app.StartProgressServices,
-		app.StartProgressReady,
-	} {
-		report(step)
-	}
-	return stub.startResult, stub.startErr
-}
-
-func (stub *lifecycleStub) RecreatePorts(_ context.Context, request app.StartRequest) (app.StartResult, error) {
-	stub.recreateRequests = append(stub.recreateRequests, request)
-	return stub.startResult, stub.startErr
-}
-
-func (stub *lifecycleStub) Stop(_ context.Context, request app.StopRequest) (app.StopResult, error) {
-	stub.stopRequests = append(stub.stopRequests, request)
-	return stub.stopResult, stub.stopErr
-}
-
-func (stub *lifecycleStub) Clean(_ context.Context, request app.CleanRequest) (app.CleanResult, error) {
-	stub.cleanRequests = append(stub.cleanRequests, request)
-	return stub.cleanResult, stub.cleanErr
-}
-
-func (stub *lifecycleStub) List(_ context.Context, request app.ListRequest) (app.ListResult, error) {
-	stub.listRequests = append(stub.listRequests, request)
-	return stub.listResult, stub.listErr
-}
-
-func (stub *lifecycleStub) Shell(ctx context.Context, request app.ShellRequest) (app.ShellResult, error) {
-	stub.shellRequests = append(stub.shellRequests, request)
-	if stub.shellFunc != nil {
-		return stub.shellFunc(ctx, request)
-	}
-	if request.BeforeExec != nil {
-		if err := request.BeforeExec(stub.shellReady); err != nil {
-			return app.ShellResult{}, err
-		}
-	}
-	return stub.shellResult, stub.shellErr
-}
-
-func (stub *lifecycleStub) ProcessStatus(_ context.Context, request app.ProcessStatusRequest) (app.ProcessStatusResult, error) {
-	stub.statusRequests = append(stub.statusRequests, request)
-	return stub.statusResult, stub.statusErr
-}
-
-func (stub *lifecycleStub) ProcessLogs(_ context.Context, request app.ProcessLogsRequest) (app.ProcessLogsResult, error) {
-	stub.logsRequests = append(stub.logsRequests, request)
-	return stub.logsResult, stub.logsErr
-}
-
-func (stub *lifecycleStub) calls() int {
-	return len(stub.startRequests) + len(stub.recreateRequests) + len(stub.stopRequests) + len(stub.cleanRequests) + len(stub.listRequests) + len(stub.shellRequests) + len(stub.statusRequests) + len(stub.logsRequests)
-}
-
-type harnessStub struct {
-	requests      []app.HarnessRunRequest
-	result        app.HarnessRunResult
-	err           error
-	loginRequests []app.HarnessLoginRequest
-	loginResult   app.HarnessLoginResult
-	loginFunc     func(context.Context, app.HarnessLoginRequest) (app.HarnessLoginResult, error)
-	runFunc       func(context.Context, app.HarnessRunRequest) (app.HarnessRunResult, error)
-}
-
-func (stub *harnessStub) Run(ctx context.Context, request app.HarnessRunRequest) (app.HarnessRunResult, error) {
-	stub.requests = append(stub.requests, request)
-	if stub.runFunc != nil {
-		return stub.runFunc(ctx, request)
-	}
-	if request.BeforeExec != nil && (stub.result.Agent != "" || stub.result.Version != "") {
-		if err := request.BeforeExec(stub.result); err != nil {
-			return stub.result, err
-		}
-	}
+func (stub *workspaceStub) Create(_ context.Context, request app.WorkspaceCreateRequest) (app.WorkspaceResult, error) {
+	stub.creates = append(stub.creates, request)
 	return stub.result, stub.err
 }
-func (stub *harnessStub) Login(ctx context.Context, request app.HarnessLoginRequest) (app.HarnessLoginResult, error) {
-	stub.loginRequests = append(stub.loginRequests, request)
-	if stub.loginFunc != nil {
-		return stub.loginFunc(ctx, request)
-	}
-	if request.BeforeExec != nil && (stub.loginResult.Agent != "" || stub.loginResult.Version != "") {
-		if err := request.BeforeExec(stub.loginResult); err != nil {
-			return stub.loginResult, err
-		}
-	}
-	return stub.loginResult, stub.err
+func (stub *workspaceStub) Open(_ context.Context, request app.WorkspaceOpenRequest) (app.WorkspaceOpenResult, error) {
+	stub.opens = append(stub.opens, request)
+	return stub.openResult, stub.err
+}
+func (stub *workspaceStub) Start(_ context.Context, request app.WorkspaceStartRequest) (app.WorkspaceResult, error) {
+	stub.starts = append(stub.starts, request)
+	return stub.result, stub.err
+}
+func (stub *workspaceStub) Stop(_ context.Context, request app.WorkspaceStopRequest) (app.WorkspaceResult, error) {
+	stub.stops = append(stub.stops, request)
+	return stub.result, stub.err
+}
+func (stub *workspaceStub) Restart(_ context.Context, request app.WorkspaceRestartRequest) (app.WorkspaceResult, error) {
+	stub.restarts = append(stub.restarts, request)
+	return stub.result, stub.err
+}
+func (stub *workspaceStub) Remove(_ context.Context, request app.WorkspaceRemoveRequest) (app.WorkspaceRemoveResult, error) {
+	stub.removes = append(stub.removes, request)
+	return stub.removeResult, stub.err
+}
+func (stub *workspaceStub) List(_ context.Context, request app.WorkspaceListRequest) (app.WorkspaceListResult, error) {
+	stub.lists = append(stub.lists, request)
+	return stub.listResult, stub.err
+}
+func (stub *workspaceStub) calls() int {
+	return len(stub.creates) + len(stub.opens) + len(stub.starts) + len(stub.stops) + len(stub.restarts) + len(stub.removes) + len(stub.lists)
 }
 
-func (stub *harnessStub) PurgeAuth(_ context.Context, request app.PurgeAuthRequest) error {
-	stub.requests = append(stub.requests, app.HarnessRunRequest{Agent: request.Agent, Profile: request.Profile})
-	return stub.err
+type gitStub struct {
+	updates  []app.WorkspaceUpdateRequest
+	statuses []app.GitStatusRequest
+	diffs    []app.GitDiffRequest
+	fetches  []app.GitFetchRequest
+	applies  []app.GitApplyRequest
+	result   app.WorkspaceResult
 }
 
-func TestLifecycleUsageErrorsDoNotCallService(t *testing.T) {
-	approval := strings.Repeat("a", 64)
-	cases := []struct {
-		name string
-		args []string
-	}{
-		{name: "start missing approval", args: []string{"start", "--root", "/tmp/project"}},
-		{name: "start short approval", args: []string{"start", "--approve-config", "abc"}},
-		{name: "start uppercase approval", args: []string{"start", "--approve-config", strings.Repeat("A", 64)}},
-		{name: "start nonhex approval", args: []string{"start", "--approve-config", strings.Repeat("g", 64)}},
-		{name: "start positional", args: []string{"start", "--approve-config", approval, "extra"}},
-		{name: "stop positional", args: []string{"stop", "extra"}},
-		{name: "list invalid format", args: []string{"list", "--format", "yaml"}},
-		{name: "list positional", args: []string{"list", "extra"}},
-		{name: "clean positional", args: []string{"clean", "extra"}},
-		{name: "shell missing separator", args: []string{"shell", "echo", "hello"}},
-		{name: "shell command before separator", args: []string{"shell", "echo", "--", "hello"}},
-		{name: "empty root", args: []string{"clean", "--root", ""}},
-	}
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			service := &lifecycleStub{}
-			dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
-			var stdout, stderr bytes.Buffer
-			if exit := dispatcher.Execute(context.Background(), test.args, &stdout, &stderr); exit != 2 {
-				t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
-			}
-			if service.calls() != 0 {
-				t.Fatalf("service calls = %d, want 0", service.calls())
-			}
-		})
-	}
+func (stub *gitStub) Update(_ context.Context, request app.WorkspaceUpdateRequest) (app.WorkspaceResult, error) {
+	stub.updates = append(stub.updates, request)
+	return stub.result, nil
+}
+func (stub *gitStub) GitStatus(_ context.Context, request app.GitStatusRequest) (app.GitStatusResult, error) {
+	stub.statuses = append(stub.statuses, request)
+	return app.GitStatusResult{}, nil
+}
+func (stub *gitStub) GitDiff(_ context.Context, request app.GitDiffRequest) (app.GitDiffResult, error) {
+	stub.diffs = append(stub.diffs, request)
+	return app.GitDiffResult{}, nil
+}
+func (stub *gitStub) GitFetch(_ context.Context, request app.GitFetchRequest) (app.GitFetchResult, error) {
+	stub.fetches = append(stub.fetches, request)
+	return app.GitFetchResult{}, nil
+}
+func (stub *gitStub) GitApply(_ context.Context, request app.GitApplyRequest) (app.GitApplyResult, error) {
+	stub.applies = append(stub.applies, request)
+	return app.GitApplyResult{}, nil
+}
+func (stub *gitStub) calls() int {
+	return len(stub.updates) + len(stub.statuses) + len(stub.diffs) + len(stub.fetches) + len(stub.applies)
 }
 
-func TestShellAgentRoutesThroughHarnessService(t *testing.T) {
-	code := 17
-	stub := &harnessStub{result: app.HarnessRunResult{Agent: harness.Claude, Version: "2.1.226", Exit: runtime.Exit{Code: &code}}}
-	dispatcher := NewDispatcher(Dependencies{
-		Harness: stub,
-		Stdin:   strings.NewReader(""),
-		IsTTY:   func(io.Reader, io.Writer) bool { return true },
-	})
-	var stdout, stderr bytes.Buffer
-	approval := strings.Repeat("a", 64)
-	exit := dispatcher.Execute(context.Background(), []string{"shell", "--root", "/tmp/project", "--approve-config", approval, "--agent", "claude", "--profile", "work"}, &stdout, &stderr)
-	if exit != 17 || len(stub.requests) != 1 {
-		t.Fatalf("agent shell exit=%d stderr=%q requests=%#v", exit, stderr.String(), stub.requests)
-	}
-	request := stub.requests[0]
-	if request.Agent != "claude" || request.Profile != "work" || !request.Interactive || request.RunInteractive == nil {
-		t.Fatalf("harness request = %#v", request)
-	}
-	if stdout.String() != "Agent: \"claude\"\nVersion: \"2.1.226\"\n" || strings.Contains(stdout.String(), "provider") {
-		t.Fatalf("harness status output = %q", stdout.String())
-	}
-	if stderr.String() != "Warning: concurrent editing harnesses in one live workspace may conflict or corrupt work.\n" {
-		t.Fatalf("harness warning output = %q", stderr.String())
-	}
+type agentStub struct {
+	requests []app.AgentRunRequest
+	result   app.AgentRunResult
+	err      error
 }
 
-func TestCleanRequiresConfirmationAndSupportsForceAll(t *testing.T) {
+func (stub *agentStub) Run(_ context.Context, request app.AgentRunRequest) (app.AgentRunResult, error) {
+	stub.requests = append(stub.requests, request)
+	return stub.result, stub.err
+}
 
-	t.Run("non-interactive refused", func(t *testing.T) {
-		service := &lifecycleStub{}
-		dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
+type authStub struct {
+	statuses  []app.AuthStatusRequest
+	imports   []app.AuthImportRequest
+	logins    []app.AuthLoginRequest
+	refreshes []app.AuthRefreshRequest
+	purges    []app.AuthPurgeRequest
+}
+
+func (stub *authStub) Status(_ context.Context, r app.AuthStatusRequest) (app.AuthStatusResult, error) {
+	stub.statuses = append(stub.statuses, r)
+	return app.AuthStatusResult{}, nil
+}
+func (stub *authStub) Import(_ context.Context, r app.AuthImportRequest) (app.AuthImportResult, error) {
+	stub.imports = append(stub.imports, r)
+	return app.AuthImportResult{Agent: harness.Name(r.Agent), Digest: "digest"}, nil
+}
+func (stub *authStub) Login(_ context.Context, r app.AuthLoginRequest) (app.AuthLoginResult, error) {
+	stub.logins = append(stub.logins, r)
+	code := 0
+	return app.AuthLoginResult{Agent: harness.Name(r.Agent), Exit: runtime.Exit{Code: &code}}, nil
+}
+func (stub *authStub) Refresh(_ context.Context, r app.AuthRefreshRequest) (app.AuthImportResult, error) {
+	stub.refreshes = append(stub.refreshes, r)
+	return app.AuthImportResult{Agent: harness.Name(r.Agent), Digest: "digest"}, nil
+}
+func (stub *authStub) Purge(_ context.Context, r app.AuthPurgeRequest) error {
+	stub.purges = append(stub.purges, r)
+	return nil
+}
+
+func TestWorkspaceCommandsTargetExactNamedWorkspace(t *testing.T) {
+	code := 0
+	workspaces := &workspaceStub{result: app.WorkspaceResult{Workspace: "feature-a", State: model.StateRunning}, openResult: app.WorkspaceOpenResult{WorkspaceResult: app.WorkspaceResult{Workspace: "feature-a"}, Exit: runtime.Exit{Code: &code}}}
+	git := &gitStub{result: app.WorkspaceResult{Workspace: "feature-a"}}
+	dispatcher := NewDispatcher(Dependencies{Workspaces: workspaces, Git: git, Stdin: strings.NewReader(""), IsTTY: func(io.Reader, io.Writer) bool { return true }})
+	commands := [][]string{
+		{"workspace", "create", "feature-a", "--root", "/project", "--default-agent", "codex"},
+		{"workspace", "open", "feature-a", "--root", "/project"},
+		{"workspace", "start", "feature-a", "--root", "/project"},
+		{"workspace", "stop", "feature-a", "--root", "/project"},
+		{"workspace", "restart", "feature-a", "--root", "/project"},
+		{"workspace", "update", "feature-a", "--root", "/project"},
+		{"workspace", "remove", "feature-a", "--root", "/project", "--force"},
+	}
+	for _, command := range commands {
 		var stdout, stderr bytes.Buffer
-		if exit := dispatcher.Execute(context.Background(), []string{"clean", "--root", "/tmp/project"}, &stdout, &stderr); exit != 2 {
-			t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+		if exit := dispatcher.Execute(context.Background(), command, &stdout, &stderr); exit != 0 {
+			t.Fatalf("%q exit=%d stderr=%q", command, exit, stderr.String())
 		}
-		if len(service.cleanRequests) != 0 {
-			t.Fatalf("cleanup called without confirmation: %#v", service.cleanRequests)
-		}
-	})
-	t.Run("interactive cancellation", func(t *testing.T) {
-		service := &lifecycleStub{}
-		dispatcher := NewDispatcher(Dependencies{
-			Lifecycle: service,
-			Stdin:     strings.NewReader("n\n"),
-			IsTTY:     func(io.Reader, io.Writer) bool { return true },
-		})
-		var stdout, stderr bytes.Buffer
-		if exit := dispatcher.Execute(context.Background(), []string{"clean", "--root", "/tmp/project"}, &stdout, &stderr); exit != 0 {
-			t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
-		}
-		if len(service.cleanRequests) != 0 || !strings.Contains(stdout.String(), "Cleanup cancelled.") {
-			t.Fatalf("requests = %#v, stdout = %q", service.cleanRequests, stdout.String())
-
-		}
-	})
-	t.Run("forced global cleanup", func(t *testing.T) {
-		service := &lifecycleStub{cleanResult: app.CleanResult{Projects: 2, DeletedManifests: 2, DeletedResources: 5}}
-		dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
-		var stdout, stderr bytes.Buffer
-		if exit := dispatcher.Execute(context.Background(), []string{"clean", "--all", "--force"}, &stdout, &stderr); exit != 0 {
-			t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
-		}
-		if len(service.cleanRequests) != 1 || service.cleanRequests[0] != (app.CleanRequest{Root: ".", All: true, Confirmed: true}) {
-			t.Fatalf("clean requests = %#v", service.cleanRequests)
-		}
-		if !strings.Contains(stdout.String(), "Projects: 2") {
-			t.Fatalf("stdout = %q", stdout.String())
-		}
-	})
-}
-func TestDiscardIntentDoesNotBypassCleanupConfirmation(t *testing.T) {
-	service := &lifecycleStub{}
-	dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
-	var stdout, stderr bytes.Buffer
-	exit := dispatcher.Execute(context.Background(), []string{
-		"clean", "--root", "/tmp/project", "--name", "protected", "--discard-unfetched",
-	}, &stdout, &stderr)
-	if exit != 2 || len(service.cleanRequests) != 0 {
-		t.Fatalf("exit=%d requests=%#v stderr=%q", exit, service.cleanRequests, stderr.String())
+	}
+	if len(workspaces.creates) != 1 || workspaces.creates[0].Workspace != "feature-a" || workspaces.creates[0].Root != "/project" || workspaces.creates[0].DefaultAgent != "codex" {
+		t.Fatalf("create requests=%#v", workspaces.creates)
+	}
+	if len(workspaces.opens) != 1 || workspaces.opens[0].Workspace != "feature-a" || len(workspaces.starts) != 1 || workspaces.starts[0].Workspace != "feature-a" || len(workspaces.stops) != 1 || workspaces.stops[0].Workspace != "feature-a" || len(workspaces.restarts) != 1 || workspaces.restarts[0].Workspace != "feature-a" {
+		t.Fatalf("named lifecycle requests not exact: %#v %#v %#v %#v", workspaces.opens, workspaces.starts, workspaces.stops, workspaces.restarts)
+	}
+	if len(git.updates) != 1 || git.updates[0].Workspace != "feature-a" || len(workspaces.removes) != 1 || workspaces.removes[0].Workspace != "feature-a" || !workspaces.removes[0].Confirmed || !workspaces.removes[0].DiscardUnfetched {
+		t.Fatalf("update=%#v remove=%#v", git.updates, workspaces.removes)
 	}
 }
 
-func TestNamedLifecycleFlagsAndDiscardIntentPlumbExactRequests(t *testing.T) {
-	service := &lifecycleStub{
-		stopResult:  app.StopResult{ProjectID: "project", Sandbox: "fix-test", RunID: "run", State: model.StateStopped},
-		cleanResult: app.CleanResult{ProjectID: "project", Projects: 1, DeletedManifests: 1, DeletedResources: 2},
+func TestAllNamedMutationRoutesRejectMissingOrInvalidWorkspaceBeforeService(t *testing.T) {
+	for _, args := range [][]string{
+		{"workspace", "create"}, {"workspace", "open"}, {"workspace", "start"}, {"workspace", "stop"}, {"workspace", "restart"}, {"workspace", "update"}, {"workspace", "remove"},
+		{"agent"}, {"git", "status"}, {"git", "diff"}, {"git", "fetch"}, {"git", "apply"},
+		{"workspace", "start", "Upper"}, {"agent", "../bad"}, {"git", "fetch", "-bad"},
+	} {
+		workspaces, git, agents := &workspaceStub{}, &gitStub{}, &agentStub{}
+		dispatcher := NewDispatcher(Dependencies{Workspaces: workspaces, Git: git, Agents: agents})
+		var stdout, stderr bytes.Buffer
+		if exit := dispatcher.Execute(context.Background(), args, &stdout, &stderr); exit != 2 {
+			t.Fatalf("%q exit=%d stderr=%q", args, exit, stderr.String())
+		}
+		if workspaces.calls() != 0 || git.calls() != 0 || len(agents.requests) != 0 {
+			t.Fatalf("%q mutated service", args)
+		}
+		if stdout.Len() != 0 || stderr.Len() == 0 {
+			t.Fatalf("%q stdout=%q stderr=%q", args, stdout.String(), stderr.String())
+		}
 	}
-	dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
+}
+
+func TestAgentRequiresPromptSeparatorAndPassesExactRequest(t *testing.T) {
+	code := 37
+	agents := &agentStub{result: app.AgentRunResult{Agent: harness.Codex, Exit: runtime.Exit{Code: &code}}}
+	dispatcher := NewDispatcher(Dependencies{Agents: agents, Stdin: strings.NewReader("input")})
 	var stdout, stderr bytes.Buffer
-	if exit := dispatcher.Execute(context.Background(), []string{"stop", "--root", "/tmp/project", "--name", "fix-test"}, &stdout, &stderr); exit != 0 {
-		t.Fatalf("stop exit = %d, stderr = %q", exit, stderr.String())
+	args := []string{"agent", "feature-a", "--root", "/project", "--agent", "codex", "--browser", "--", "--literal prompt $(not-shell)"}
+	if exit := dispatcher.Execute(context.Background(), args, &stdout, &stderr); exit != 37 {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
 	}
-	if len(service.stopRequests) != 1 || service.stopRequests[0] != (app.StopRequest{Root: "/tmp/project", Sandbox: "fix-test"}) {
-		t.Fatalf("stop requests = %#v", service.stopRequests)
+	if len(agents.requests) != 1 {
+		t.Fatalf("requests=%d", len(agents.requests))
+	}
+	request := agents.requests[0]
+	if request.Root != "/project" || request.Workspace != "feature-a" || request.Agent != "codex" || !request.Browser || request.Prompt != "--literal prompt $(not-shell)" {
+		t.Fatalf("request=%#v", request)
+	}
+	for _, bad := range [][]string{{"agent", "feature-a", "prompt"}, {"agent", "feature-a", "--"}, {"agent", "feature-a", "--", "one", "two"}} {
+		var out, errout bytes.Buffer
+		if exit := dispatcher.Execute(context.Background(), bad, &out, &errout); exit != 2 {
+			t.Fatalf("%q exit=%d", bad, exit)
+		}
+	}
+	if len(agents.requests) != 1 {
+		t.Fatalf("invalid prompts called service: %d", len(agents.requests))
+	}
+}
+
+func TestAuthCommandsAreExplicitAndPurgeRequiresConfirmation(t *testing.T) {
+	authentication := &authStub{}
+	dispatcher := NewDispatcher(Dependencies{Auth: authentication, Stdin: strings.NewReader("no\n"), IsTTY: func(io.Reader, io.Writer) bool { return true }})
+	for _, args := range [][]string{{"auth", "import", "--agent", "omp", "--root", "/project"}, {"auth", "refresh", "--agent", "codex", "--root", "/project"}} {
+		var stdout, stderr bytes.Buffer
+		if exit := dispatcher.Execute(context.Background(), args, &stdout, &stderr); exit != 0 {
+			t.Fatalf("%q exit=%d stderr=%q", args, exit, stderr.String())
+		}
+	}
+	if len(authentication.imports) != 1 || !authentication.imports[0].Approved || len(authentication.refreshes) != 1 || !authentication.refreshes[0].Approved {
+		t.Fatalf("import=%#v refresh=%#v", authentication.imports, authentication.refreshes)
+	}
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.Execute(context.Background(), []string{"auth", "purge", "--agent", "omp"}, &stdout, &stderr); exit != 0 {
+		t.Fatalf("purge cancel exit=%d", exit)
+	}
+	if len(authentication.purges) != 0 {
+		t.Fatal("cancelled purge called service")
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if exit := dispatcher.Execute(context.Background(), []string{"clean", "--root", "/tmp/project", "--name", "fix-test", "--force", "--discard-unfetched"}, &stdout, &stderr); exit != 0 {
-		t.Fatalf("clean exit = %d, stderr = %q", exit, stderr.String())
+	if exit := dispatcher.Execute(context.Background(), []string{"auth", "purge", "--agent", "omp", "--force"}, &stdout, &stderr); exit != 0 {
+		t.Fatalf("forced purge exit=%d stderr=%q", exit, stderr.String())
 	}
-	want := app.CleanRequest{Root: "/tmp/project", Sandbox: "fix-test", Confirmed: true, DiscardUnfetched: true}
-	if len(service.cleanRequests) != 1 || service.cleanRequests[0] != want {
-		t.Fatalf("clean requests = %#v, want %#v", service.cleanRequests, want)
+	if len(authentication.purges) != 1 || !authentication.purges[0].Approved {
+		t.Fatalf("purges=%#v", authentication.purges)
 	}
 }
 
-func TestNamedLifecycleInvalidAndMainSelectorsFailBeforeService(t *testing.T) {
-	commands := [][]string{
-		{"stop", "--root", "/tmp/project", "--name", "main"},
-		{"stop", "--root", "/tmp/project", "--name", "../bad"},
-		{"clean", "--root", "/tmp/project", "--name", "main", "--force"},
-		{"clean", "--root", "/tmp/project", "--name", "../bad", "--force"},
-		{"clean", "--all", "--name", "fix-test", "--force"},
-	}
-	for _, command := range commands {
-		service := &lifecycleStub{}
-		dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
+func TestGitCommandsPassExactWorkspaceAndRepository(t *testing.T) {
+	git := &gitStub{}
+	dispatcher := NewDispatcher(Dependencies{Git: git})
+	for _, operation := range []string{"status", "diff", "fetch", "apply"} {
 		var stdout, stderr bytes.Buffer
-		if exit := dispatcher.Execute(context.Background(), command, &stdout, &stderr); exit != 2 {
-			t.Fatalf("%v exit = %d, stderr = %q", command, exit, stderr.String())
+		args := []string{"git", operation, "feature-a", "--root", "/project", "--repo", "api", "--format", "json"}
+		if exit := dispatcher.Execute(context.Background(), args, &stdout, &stderr); exit != 0 {
+			t.Fatalf("%s exit=%d stderr=%q", operation, exit, stderr.String())
 		}
-		if service.calls() != 0 {
-			t.Fatalf("%v reached lifecycle service: %#v", command, service)
-		}
+	}
+	if len(git.statuses) != 1 || git.statuses[0].Workspace != "feature-a" || git.statuses[0].Repository != "api" || len(git.diffs) != 1 || git.diffs[0].MaxBytes != maxGitDiffBytes || len(git.fetches) != 1 || git.fetches[0].Root != "/project" || len(git.applies) != 1 {
+		t.Fatalf("git requests: %#v %#v %#v %#v", git.statuses, git.diffs, git.fetches, git.applies)
 	}
 }
 
-func TestNamedCleanConfirmationNamesExactSandbox(t *testing.T) {
-	service := &lifecycleStub{}
-	dispatcher := NewDispatcher(Dependencies{
-		Lifecycle: service,
-		Stdin:     strings.NewReader("yes\n"),
-		IsTTY:     func(io.Reader, io.Writer) bool { return true },
-	})
+type inventoryStub struct{ manifests []state.Manifest }
+
+func (stub inventoryStub) ListAllManifests(context.Context) ([]state.Manifest, error) {
+	return append([]state.Manifest(nil), stub.manifests...), nil
+}
+
+func TestAllProjectsCleanupDispatchesExactManifestRootsAndNames(t *testing.T) {
+	workspaces := &workspaceStub{}
+	inventory := inventoryStub{manifests: []state.Manifest{
+		{CanonicalRoot: "/project-b", Workspace: "tests", RunID: "run-b", State: model.StateStopped},
+		{CanonicalRoot: "/project-a", Workspace: "feature-a", RunID: "run-a", State: model.StateRunning},
+	}}
+	dispatcher := NewDispatcher(Dependencies{Workspaces: workspaces, Inventory: inventory})
 	var stdout, stderr bytes.Buffer
-	if exit := dispatcher.Execute(context.Background(), []string{"clean", "--root", "/tmp/project", "--name", "fix-test"}, &stdout, &stderr); exit != 0 {
+	if exit := dispatcher.Execute(context.Background(), []string{"workspace", "remove", "--all-projects", "--force"}, &stdout, &stderr); exit != 0 {
 		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `sandbox "fix-test"`) {
-		t.Fatalf("confirmation did not identify exact sandbox: %q", stdout.String())
-	}
-	if len(service.cleanRequests) != 1 || service.cleanRequests[0].Sandbox != "fix-test" || service.cleanRequests[0].DiscardUnfetched {
-		t.Fatalf("clean requests = %#v", service.cleanRequests)
-	}
-}
-
-func TestLifecycleHelpDocumentsNamedSelectionAndExplicitDiscard(t *testing.T) {
-	tests := []struct {
-		command string
-		wants   []string
-	}{
-		{command: "stop", wants: []string{"Usage: dsx stop", "--name NAME"}},
-		{command: "clean", wants: []string{"Usage: dsx clean", "--name NAME", "--discard-unfetched", "dsx clean --all"}},
-	}
-	for _, test := range tests {
-		service := &lifecycleStub{}
-		dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
-		var stdout, stderr bytes.Buffer
-		if exit := dispatcher.Execute(context.Background(), []string{test.command, "--help"}, &stdout, &stderr); exit != 0 {
-			t.Fatalf("%s help exit = %d, stderr = %q", test.command, exit, stderr.String())
-		}
-		for _, want := range test.wants {
-			if !strings.Contains(stdout.String(), want) {
-				t.Fatalf("%s help = %q, missing %q", test.command, stdout.String(), want)
-			}
-		}
-		if service.calls() != 0 {
-			t.Fatalf("%s help reached service", test.command)
-		}
-	}
-	dispatcher := NewDispatcher(Dependencies{})
-	var stdout, stderr bytes.Buffer
-	if exit := dispatcher.Execute(context.Background(), []string{"help"}, &stdout, &stderr); exit != 0 {
-		t.Fatalf("top-level help exit = %d, stderr = %q", exit, stderr.String())
-	}
-	for _, want := range []string{"dsx stop [--root PATH] [--name NAME]", "dsx clean [--root PATH] [--name NAME]", "--discard-unfetched", "--purge-auth"} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("top-level help = %q, missing %q", stdout.String(), want)
-		}
-	}
-}
-func TestCleanPurgeAuthRemovesOnlySelectedProfileAfterCleanup(t *testing.T) {
-	lifecycle := &lifecycleStub{}
-	harnesses := &harnessStub{}
-	dispatcher := NewDispatcher(Dependencies{Lifecycle: lifecycle, Harness: harnesses})
-	var stdout, stderr bytes.Buffer
-	exit := dispatcher.Execute(context.Background(), []string{"clean", "--root", "/tmp/project", "--force", "--purge-auth", "--agent", "codex", "--profile", "work"}, &stdout, &stderr)
-	if exit != 0 || stderr.Len() != 0 || len(lifecycle.cleanRequests) != 1 || len(harnesses.requests) != 1 {
-		t.Fatalf("purge exit=%d stderr=%q clean=%#v auth=%#v", exit, stderr.String(), lifecycle.cleanRequests, harnesses.requests)
-	}
-	if request := harnesses.requests[0]; request.Agent != "codex" || request.Profile != "work" {
-		t.Fatalf("purged profile = %#v", request)
+	if len(workspaces.removes) != 2 ||
+		workspaces.removes[0].Root != "/project-a" || workspaces.removes[0].Workspace != "feature-a" ||
+		workspaces.removes[1].Root != "/project-b" || workspaces.removes[1].Workspace != "tests" {
+		t.Fatalf("remove requests = %#v", workspaces.removes)
 	}
 }
 
-func TestStartPassesExactApprovalAndRendersStructuredResult(t *testing.T) {
-	approval := strings.Repeat("a1", 32)
-	service := &lifecycleStub{startResult: app.StartResult{
-		ProjectID: "project", Sandbox: "main", RunID: "run", State: model.StateRunning,
-	}}
-	dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
-	var stdout, stderr bytes.Buffer
-	if exit := dispatcher.Execute(context.Background(), []string{"start", "--root", "/tmp/project", "--approve-config", approval}, &stdout, &stderr); exit != 0 {
-		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+func TestDashboardLoadsCleanAndDirtyGitCheckoutSummary(t *testing.T) {
+	root := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
 	}
-	if len(service.startRequests) != 1 || service.startRequests[0] != (app.StartRequest{Root: "/tmp/project", ApproveConfig: approval}) {
-		t.Fatalf("start requests = %#v", service.startRequests)
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "test@example.invalid")
+	runGit("config", "user.name", "DSX Test")
+	tracked := filepath.Join(root, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("clean\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if stdout.String() != "Project: \"project\"\nSandbox: \"main\"\nRun: \"run\"\nState: \"running\"\nExisting: false\n" {
-		t.Fatalf("stdout = %q", stdout.String())
-	}
-}
+	runGit("add", "tracked.txt")
+	workspaces := &workspaceStub{listResult: app.WorkspaceListResult{Workspaces: []app.WorkspaceSummary{{Workspace: "feature-a", State: model.StateStopped}}}}
+	dispatcher := NewDispatcher(Dependencies{Inspector: app.NewInspectionService(plan.NewResolver()), Workspaces: workspaces})
+	runGit("commit", "-m", "initial")
 
-func TestListTextAndJSONAreDeterministicAndSafe(t *testing.T) {
-	result := app.ListResult{Sandboxes: []app.SandboxSummary{
-		{ProjectID: "p2", Sandbox: "z", RunID: "r2", Mode: model.ModeLive, State: model.StateStopped, Resources: 1},
-		{ProjectID: "p1", Sandbox: model.SandboxName("a\x1b[2J"), RunID: "r1", Mode: model.ModeLive, State: model.StateRunning, Resources: 2, Warnings: []string{"z warning", "a\x1b]0;title\a"}},
-	}}
-
-	for _, format := range []string{"text", "json"} {
-		t.Run(format, func(t *testing.T) {
-			service := &lifecycleStub{listResult: result}
-			dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
-			var stdout, stderr bytes.Buffer
-			if exit := dispatcher.Execute(context.Background(), []string{"list", "--root", "/tmp/project", "--format", format}, &stdout, &stderr); exit != 0 {
-				t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
-			}
-			if len(service.listRequests) != 1 || service.listRequests[0].Root != "/tmp/project" {
-				t.Fatalf("list requests = %#v", service.listRequests)
-			}
-			if strings.Contains(stdout.String(), "\x1b[2J") || strings.Contains(stdout.String(), "\x1b]0") || strings.Contains(stdout.String(), "\a") {
-				t.Fatalf("raw terminal control rendered: %q", stdout.String())
-			}
-			if format == "text" {
-				if !strings.HasPrefix(stdout.String(), "Sandbox \"a\\\\x1b[2J\"") || strings.Index(stdout.String(), "a\\\\x1b]0;title\\\\a") > strings.Index(stdout.String(), "z warning") {
-					t.Fatalf("text output is not sorted/sanitized: %q", stdout.String())
-				}
-				return
-			}
-			var decoded app.ListResult
-			if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
-				t.Fatal(err)
-			}
-			if len(decoded.Sandboxes) != 2 || decoded.Sandboxes[0].Sandbox != model.SandboxName("a\x1b[2J") {
-				t.Fatalf("decoded list = %#v", decoded)
-			}
-		})
+	clean, err := dispatcher.loadDashboard(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-func TestShellPassesApprovalIntoAtomicApplicationRequest(t *testing.T) {
-	approval := strings.Repeat("ab", 32)
-	service := &lifecycleStub{shellResult: shellResult(0)}
-	dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
+	if clean.Branch != "main" || clean.Revision == "" || !clean.Clean {
+		t.Fatalf("clean dashboard = %#v", clean)
+	}
+	cleanModel := tui.NewDashboardModel(clean)
+	updated, _ := cleanModel.Update(tea.KeyPressMsg(tea.Key{Text: "c", Code: 'c'}))
+	if !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Starting point") {
+		t.Fatal("clean checkout did not open create form")
+	}
+	updateModel := tui.NewDashboardModel(clean)
+	updateModel.Update(tea.KeyPressMsg(tea.Key{Text: "u", Code: 'u'}))
+	if intent, found := updateModel.Intent(); !found || intent.Action != "workspace-update" || intent.Workspace != "feature-a" {
+		t.Fatalf("clean update intent = %#v, found = %t", intent, found)
+	}
+
+	if err := os.WriteFile(tracked, []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := dispatcher.loadDashboard(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty.Branch != "main" || dirty.Revision != clean.Revision || dirty.Clean {
+		t.Fatalf("dirty dashboard = %#v", dirty)
+	}
+	dirtyModel := tui.NewDashboardModel(dirty)
+	updated, _ = dirtyModel.Update(tea.KeyPressMsg(tea.Key{Text: "c", Code: 'c'}))
+	if strings.Contains(updated.(*tui.DashboardModel).View().Content, "Starting point") || !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Create unavailable") {
+		t.Fatal("dirty checkout did not gate create")
+	}
+	dirtyModel.Update(tea.KeyPressMsg(tea.Key{Text: "u", Code: 'u'}))
+	if intent, found := dirtyModel.Intent(); found {
+		t.Fatalf("dirty checkout emitted intent %#v", intent)
+	}
+
+	runGit("add", "tracked.txt")
+	runGit("commit", "-m", "advance after dashboard load")
 	var stdout, stderr bytes.Buffer
-	exit := dispatcher.Execute(context.Background(), []string{"shell", "--root", "/tmp/project", "--approve-config", approval, "--", "true"}, &stdout, &stderr)
+	exit := dispatcher.executeIntent(context.Background(), tui.Intent{
+		Action: "workspace-create", Root: root, Workspace: "feature-b",
+		SourceBranch: clean.Branch, SourceRevision: clean.Revision,
+	}, &stdout, &stderr)
 	if exit != 0 {
-		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+		t.Fatalf("create exit = %d, stderr = %q", exit, stderr.String())
 	}
-	if len(service.startRequests) != 0 {
-		t.Fatalf("shell performed a non-atomic Start call: %#v", service.startRequests)
-	}
-	if len(service.shellRequests) != 1 || service.shellRequests[0].ApproveConfig != approval || !reflect.DeepEqual(service.shellRequests[0].Argv, []string{"true"}) {
-		t.Fatalf("shell requests = %#v", service.shellRequests)
+	if len(workspaces.creates) != 1 || workspaces.creates[0].SourceBranch != clean.Branch || workspaces.creates[0].SourceRevision != clean.Revision {
+		t.Fatalf("create request after HEAD advance = %#v", workspaces.creates)
 	}
 }
-
-func TestLifecycleErrorsUseTypedExitMapping(t *testing.T) {
-	service := &lifecycleStub{stopErr: model.NewError(model.CodeConflict, "already stopped", nil)}
-	dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
-	var stdout, stderr bytes.Buffer
-	if exit := dispatcher.Execute(context.Background(), []string{"stop", "--root", "/tmp/project"}, &stdout, &stderr); exit != 3 {
-		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "already stopped") || stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
-	}
-}
-
-func TestShellPreservesArgvAndExactChildStatus(t *testing.T) {
-	command := []string{"printf", "%s", "$(not-a-shell)", "two words", "--literal"}
-	for _, test := range []struct {
-		name   string
-		result app.ShellResult
-		want   int
-	}{
-		{name: "exit", result: shellResult(23), want: 23},
-		{name: "signal", result: app.ShellResult{Exit: runtime.Exit{Signal: "SIGTERM"}}, want: 143},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			service := &lifecycleStub{shellResult: test.result}
-			dispatcher := NewDispatcher(Dependencies{
-				Lifecycle: service,
-				Stdin:     strings.NewReader("input"),
-				IsTTY:     func(io.Reader, io.Writer) bool { return true },
-			})
-			args := append([]string{"shell", "--root", "/tmp/project", "--"}, command...)
-			var stdout, stderr bytes.Buffer
-			if exit := dispatcher.Execute(context.Background(), args, &stdout, &stderr); exit != test.want {
-				t.Fatalf("exit = %d, want %d, stderr = %q", exit, test.want, stderr.String())
-			}
-			if len(service.shellRequests) != 1 {
-				t.Fatalf("shell requests = %#v", service.shellRequests)
-			}
-			request := service.shellRequests[0]
-			if strings.Join(request.Argv, "\x00") != strings.Join(command, "\x00") || !request.Terminal || request.RunInteractive == nil || request.Stdin == nil || request.Stdout != &stdout || request.Stderr != &stderr {
-				t.Fatalf("shell request = %#v", request)
-			}
-		})
-	}
-}
-
-func TestShellDoesNotInventDefaultArgv(t *testing.T) {
-	service := &lifecycleStub{shellResult: shellResult(0)}
-	dispatcher := NewDispatcher(Dependencies{Lifecycle: service})
-	var stdout, stderr bytes.Buffer
-	if exit := dispatcher.Execute(context.Background(), []string{"shell", "--root", "/tmp/project"}, &stdout, &stderr); exit != 0 {
-		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
-	}
-
-	if len(service.shellRequests) != 1 || len(service.shellRequests[0].Argv) != 0 || service.shellRequests[0].RunInteractive != nil {
-		t.Fatalf("shell requests = %#v", service.shellRequests)
-	}
-}
-
-type signalReadyWriter struct {
-	once  sync.Once
-	ready chan struct{}
-}
-
-func (writer *signalReadyWriter) Write(data []byte) (int, error) {
-	if bytes.Contains(data, []byte("ready")) {
-		writer.once.Do(func() { close(writer.ready) })
-	}
-	return len(data), nil
-}
-
-func TestInteractiveShellClaimsCommandSignalsBeforeChildExecution(t *testing.T) {
-	output := &signalReadyWriter{ready: make(chan struct{})}
-	state := &terminalStateStub{}
-	service := &lifecycleStub{}
-	service.shellFunc = func(ctx context.Context, request app.ShellRequest) (app.ShellResult, error) {
-		if request.RunInteractive == nil {
-			return app.ShellResult{}, errors.New("interactive runner is missing")
-		}
-		exit, err := request.RunInteractive(ctx, app.InteractiveChild{
-			Argv:   []string{"/bin/sh", "-c", "trap 'exit 42' INT; echo ready; while :; do :; done"},
-			Stdout: output,
-		})
-		return app.ShellResult{Exit: exit}, err
-	}
-	dispatcher := NewDispatcher(Dependencies{
-		Lifecycle:     service,
-		Stdin:         strings.NewReader(""),
-		IsTTY:         func(io.Reader, io.Writer) bool { return true },
-		TerminalState: state,
-	})
-	ctx, stopSignals := terminal.CommandSignalContext(context.Background())
-	defer stopSignals()
-	result := make(chan int, 1)
-	go func() {
-		result <- dispatcher.Execute(ctx, []string{"shell", "--root", "/tmp/project"}, io.Discard, io.Discard)
-	}()
-	select {
-	case <-output.ready:
-	case <-time.After(3 * time.Second):
-		t.Fatal("interactive child did not become ready")
-	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case exit := <-result:
-		if exit != 42 {
-			t.Fatalf("dispatcher exit = %d, want child exit 42", exit)
-		}
-		if state.releases != 1 || state.restores != 1 {
-			t.Fatalf("release/restore = %d/%d, want 1/1", state.releases, state.restores)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("interactive child did not receive host SIGINT")
-	}
-}
-
-func TestInteractiveShellRoutesSIGQUITThroughHandoffOnceAndRestores(t *testing.T) {
-	output := &signalReadyWriter{ready: make(chan struct{})}
-	state := &terminalStateStub{}
-	service := &lifecycleStub{}
-	service.shellFunc = func(ctx context.Context, request app.ShellRequest) (app.ShellResult, error) {
-		exit, err := request.RunInteractive(ctx, app.InteractiveChild{
-			Argv:   []string{"/bin/sh", "-c", "trap 'exit 43' QUIT; echo ready; while :; do :; done"},
-			Stdout: output,
-		})
-		return app.ShellResult{Exit: exit}, err
-	}
-	dispatcher := NewDispatcher(Dependencies{
-		Lifecycle: service, Stdin: strings.NewReader(""),
-		IsTTY: func(io.Reader, io.Writer) bool { return true }, TerminalState: state,
-	})
-	ctx, stopSignals := terminal.CommandSignalContext(context.Background())
-	defer stopSignals()
-	result := make(chan int, 1)
-	go func() {
-		result <- dispatcher.Execute(ctx, []string{"shell", "--root", "/tmp/project"}, io.Discard, io.Discard)
-	}()
-	select {
-	case <-output.ready:
-	case <-time.After(3 * time.Second):
-		t.Fatal("interactive child did not become ready")
-	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGQUIT); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case exit := <-result:
-		if exit != 43 {
-			t.Fatalf("dispatcher exit = %d, want child SIGQUIT handler exit 43", exit)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("interactive child did not receive SIGQUIT")
-	}
-	if state.releases != 1 || state.restores != 1 {
-		t.Fatalf("release/restore = %d/%d, want 1/1", state.releases, state.restores)
-	}
-}
-
-func TestInteractiveHarnessSetupSignalCancelsBeforeChildOwnership(t *testing.T) {
-	entered := make(chan struct{})
-	state := &terminalStateStub{}
-	service := &harnessStub{
-		runFunc: func(ctx context.Context, request app.HarnessRunRequest) (app.HarnessRunResult, error) {
-			if request.RunInteractive == nil {
-				return app.HarnessRunResult{}, errors.New("interactive runner is missing")
-			}
-			close(entered)
-			<-ctx.Done()
-			return app.HarnessRunResult{}, ctx.Err()
-		},
-	}
-	dispatcher := NewDispatcher(Dependencies{Harness: service, TerminalState: state})
-	ctx, stopSignals := terminal.CommandSignalContext(context.Background())
-	defer stopSignals()
-	result := make(chan int, 1)
-	go func() {
-		result <- dispatcher.runHarness(ctx, app.HarnessRunRequest{Interactive: true}, io.Discard)
-	}()
-	select {
-	case <-entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("harness setup did not start")
-	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case exit := <-result:
-		if exit != 1 {
-			t.Fatalf("dispatcher exit = %d, want cancellation failure", exit)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("SIGINT did not cancel harness setup")
-	}
-	if state.releases != 0 || state.restores != 0 {
-		t.Fatalf("terminal changed before child handoff: release/restore = %d/%d", state.releases, state.restores)
-	}
-}
-
-type terminalStateStub struct {
-	releases int
-	restores int
-	release  error
-	restore  error
-}
-
-func (state *terminalStateStub) Release() error {
-	state.releases++
-	return state.release
-}
-
-func (state *terminalStateStub) Restore() error {
-	state.restores++
-	return state.restore
-}
-
-func TestInteractiveRunnerRestoresTerminalAfterSuccessFailureAndCancellation(t *testing.T) {
-	cases := []struct {
-		name  string
-		ctx   context.Context
-		child app.InteractiveChild
-	}{
-		{name: "success", ctx: context.Background(), child: app.InteractiveChild{Argv: []string{"/bin/sh", "-c", "exit 0"}}},
-		{name: "failure", ctx: context.Background(), child: app.InteractiveChild{Argv: []string{"/definitely/missing/dsx-child"}}},
-		{name: "cancel", ctx: cancelledContext(), child: app.InteractiveChild{Argv: []string{"/bin/sh", "-c", "sleep 10"}}},
-	}
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			state := &terminalStateStub{}
-			dispatcher := NewDispatcher(Dependencies{TerminalState: state})
-			_, _ = dispatcher.runInteractive(test.ctx, test.child)
-			if state.releases != 1 || state.restores != 1 {
-				t.Fatalf("release/restore = %d/%d", state.releases, state.restores)
-			}
-		})
-	}
-}
-
-func TestInteractiveRunnerReleaseFailureDoesNotStartChildAndRestores(t *testing.T) {
-	state := &terminalStateStub{release: errors.New("release failed")}
-	dispatcher := NewDispatcher(Dependencies{TerminalState: state})
-	exit, err := dispatcher.runInteractive(context.Background(), app.InteractiveChild{Argv: []string{"/bin/sh", "-c", "exit 0"}})
-	if err == nil || exit.Code != nil || exit.Signal != "" || state.releases != 1 || state.restores != 1 {
-		t.Fatalf("exit = %#v, err = %v, release/restore = %d/%d", exit, err, state.releases, state.restores)
-	}
-}
-
-func shellResult(code int) app.ShellResult {
-	return app.ShellResult{Exit: runtime.Exit{Code: &code}}
-}
-
-func cancelledContext() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	return ctx
-}
-
-var _ terminal.TerminalState = (*terminalStateStub)(nil)

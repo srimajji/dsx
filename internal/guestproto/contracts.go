@@ -120,7 +120,7 @@ func (params StartParams) Validate() error {
 	seen := make(map[string]struct{}, len(params.Processes))
 	for index := range params.Processes {
 		process := &params.Processes[index]
-		parsed, err := model.ParseSandboxName(process.ID)
+		parsed, err := model.ParseWorkspaceName(process.ID)
 		if err != nil || string(parsed) != process.ID {
 			return fmt.Errorf("process[%d] has invalid id %q", index, process.ID)
 		}

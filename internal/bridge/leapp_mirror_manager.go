@@ -58,7 +58,7 @@ type leappMirrorResponse struct {
 }
 
 type leappMirrorPaths struct {
-	root, project, sandbox, run                  string
+	root, project, workspace, run                string
 	ledger, token, failure, socket, lock, mirror string
 }
 
@@ -176,7 +176,7 @@ func (manager *ProductionLeappMirrorManager) Path(identity LeaseIdentity) (strin
 	if err := identity.Validate(); err != nil {
 		return "", model.NewError(model.CodeInvalidInput, "invalid Leapp mirror identity", err)
 	}
-	return filepath.Join(manager.stateRoot, leappMirrorDirectoryName, string(identity.ProjectID), string(identity.Sandbox), string(identity.RunID), leappMirrorDataName), nil
+	return filepath.Join(manager.stateRoot, leappMirrorDirectoryName, string(identity.ProjectID), string(identity.Workspace), string(identity.RunID), leappMirrorDataName), nil
 }
 
 func (manager *ProductionLeappMirrorManager) Stop(ctx context.Context, identity LeaseIdentity) error {
@@ -583,23 +583,23 @@ func (manager *ProductionLeappMirrorManager) ensurePaths(identity LeaseIdentity)
 	if err != nil {
 		return leappMirrorPaths{}, err
 	}
-	sandbox, err := ensurePrivateChildDirectory(project, string(identity.Sandbox))
+	workspace, err := ensurePrivateChildDirectory(project, string(identity.Workspace))
 	if err != nil {
 		return leappMirrorPaths{}, err
 	}
-	run, err := ensurePrivateChildDirectory(sandbox, string(identity.RunID))
+	run, err := ensurePrivateChildDirectory(workspace, string(identity.RunID))
 	if err != nil {
 		return leappMirrorPaths{}, err
 	}
-	return makeLeappMirrorPaths(root, project, sandbox, run), nil
+	return makeLeappMirrorPaths(root, project, workspace, run), nil
 }
 
 func (manager *ProductionLeappMirrorManager) existingPaths(identity LeaseIdentity) (leappMirrorPaths, bool, error) {
 	root := filepath.Join(manager.stateRoot, leappMirrorDirectoryName)
 	project := filepath.Join(root, string(identity.ProjectID))
-	sandbox := filepath.Join(project, string(identity.Sandbox))
-	run := filepath.Join(sandbox, string(identity.RunID))
-	for _, path := range []string{manager.stateRoot, root, project, sandbox} {
+	workspace := filepath.Join(project, string(identity.Workspace))
+	run := filepath.Join(workspace, string(identity.RunID))
+	for _, path := range []string{manager.stateRoot, root, project, workspace} {
 		if err := verifyPrivateDirectory(path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return leappMirrorPaths{}, false, nil
@@ -613,11 +613,11 @@ func (manager *ProductionLeappMirrorManager) existingPaths(identity LeaseIdentit
 		}
 		return leappMirrorPaths{}, false, model.NewError(model.CodeAmbiguous, "Leapp mirror run directory is unsafe", err)
 	}
-	return makeLeappMirrorPaths(root, project, sandbox, run), true, nil
+	return makeLeappMirrorPaths(root, project, workspace, run), true, nil
 }
 
-func makeLeappMirrorPaths(root, project, sandbox, run string) leappMirrorPaths {
-	return leappMirrorPaths{root: root, project: project, sandbox: sandbox, run: run, ledger: filepath.Join(run, leappMirrorLedgerName), token: filepath.Join(run, leappMirrorTokenName), failure: filepath.Join(run, leappMirrorFailureName), socket: filepath.Join(run, leappMirrorSocketName), lock: filepath.Join(sandbox, leappMirrorLockName), mirror: filepath.Join(run, leappMirrorDataName)}
+func makeLeappMirrorPaths(root, project, workspace, run string) leappMirrorPaths {
+	return leappMirrorPaths{root: root, project: project, workspace: workspace, run: run, ledger: filepath.Join(run, leappMirrorLedgerName), token: filepath.Join(run, leappMirrorTokenName), failure: filepath.Join(run, leappMirrorFailureName), socket: filepath.Join(run, leappMirrorSocketName), lock: filepath.Join(workspace, leappMirrorLockName), mirror: filepath.Join(run, leappMirrorDataName)}
 }
 
 func (manager *ProductionLeappMirrorManager) verifyExecutable() error {

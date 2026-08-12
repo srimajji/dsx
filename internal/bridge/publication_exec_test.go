@@ -16,11 +16,12 @@ import (
 )
 
 func TestDialOwnedWorkspaceLoopbackUsesPinnedExecStream(t *testing.T) {
-	projectID, err := model.NewProjectID(filepath.Join(t.TempDir(), "project"))
+	canonicalRoot := filepath.Join(t.TempDir(), "project")
+	projectID, err := model.NewProjectID(canonicalRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sandbox, err := model.ParseSandboxName("main")
+	workspace, err := model.ParseWorkspaceName("main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,8 +29,8 @@ func TestDialOwnedWorkspaceLoopbackUsesPinnedExecStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease := LeaseIdentity{ProjectID: projectID, Sandbox: sandbox, RunID: runID}
-	owned, err := ownership.NewIdentity(projectID, sandbox, runID, runtime.ResourceWorkspace, "workspace")
+	lease := LeaseIdentity{ProjectID: projectID, CanonicalRoot: canonicalRoot, Workspace: workspace, RunID: runID}
+	owned, err := ownership.NewIdentity(projectID, canonicalRoot, workspace, runID, runtime.ResourceWorkspace, "workspace")
 	if err != nil {
 		t.Fatal(err)
 	}

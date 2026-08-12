@@ -10,38 +10,52 @@ import (
 )
 
 const (
-	ManagedLabel  = state.OwnershipManagedLabel
-	ProjectLabel  = state.OwnershipProjectLabel
-	SandboxLabel  = state.OwnershipSandboxLabel
-	RunLabel      = state.OwnershipRunLabel
-	KindLabel     = state.OwnershipKindLabel
-	RoleLabel     = state.OwnershipRoleLabel
-	ContractLabel = state.OwnershipContractLabel
-
-	ContractValue        = state.OwnershipContractValue
-	maxResourceNameBytes = 63
+	ManagedLabel        = state.OwnershipManagedLabel
+	ProjectLabel        = state.OwnershipProjectLabel
+	WorkspaceLabel      = state.OwnershipWorkspaceLabel
+	RunLabel            = state.OwnershipRunLabel
+	KindLabel           = state.OwnershipKindLabel
+	RoleLabel           = state.OwnershipRoleLabel
+	ContractLabel       = state.OwnershipContractLabel
+	LegacySandboxLabel  = state.LegacySandboxLabel
+	ContractValue       = state.OwnershipContractValue
+	LegacyContractValue = state.LegacyContractValue
 )
 
 var ownershipLabelOrder = [...]string{
 	ManagedLabel,
 	ContractLabel,
 	ProjectLabel,
-	SandboxLabel,
+	WorkspaceLabel,
+	RunLabel,
+	KindLabel,
+	RoleLabel,
+}
+
+var legacyOwnershipLabelOrder = [...]string{
+	ManagedLabel,
+	ContractLabel,
+	ProjectLabel,
+	LegacySandboxLabel,
 	RunLabel,
 	KindLabel,
 	RoleLabel,
 }
 
 type Identity struct {
-	ProjectID model.ProjectID
-	Sandbox   model.SandboxName
-	RunID     model.RunID
-	Kind      runtime.ResourceKind
-	Role      string
+	ProjectID     model.ProjectID
+	CanonicalRoot string
+	Workspace     model.WorkspaceName
+	RunID         model.RunID
+	Kind          runtime.ResourceKind
+	Role          string
 }
 
-func NewIdentity(projectID model.ProjectID, sandbox model.SandboxName, runID model.RunID, kind runtime.ResourceKind, role string) (Identity, error) {
-	identity := Identity{ProjectID: projectID, Sandbox: sandbox, RunID: runID, Kind: kind, Role: role}
+func NewIdentity(projectID model.ProjectID, canonicalRoot string, workspace model.WorkspaceName, runID model.RunID, kind runtime.ResourceKind, role string) (Identity, error) {
+	identity := Identity{
+		ProjectID: projectID, CanonicalRoot: canonicalRoot, Workspace: workspace,
+		RunID: runID, Kind: kind, Role: role,
+	}
 	if err := identity.Validate(); err != nil {
 		return Identity{}, err
 	}
@@ -52,8 +66,12 @@ func (identity Identity) Validate() error {
 	if _, err := model.ParseProjectID(string(identity.ProjectID)); err != nil {
 		return fmt.Errorf("ownership project: %w", err)
 	}
-	if _, err := model.ParseSandboxName(string(identity.Sandbox)); err != nil {
-		return fmt.Errorf("ownership sandbox: %w", err)
+	derivedProjectID, err := model.NewProjectID(identity.CanonicalRoot)
+	if err != nil || derivedProjectID != identity.ProjectID {
+		return fmt.Errorf("ownership canonical project root does not match project ID")
+	}
+	if _, err := model.ParseWorkspaceName(string(identity.Workspace)); err != nil {
+		return fmt.Errorf("ownership workspace: %w", err)
 	}
 	if _, err := model.ParseRunID(string(identity.RunID)); err != nil {
 		return fmt.Errorf("ownership run: %w", err)
@@ -63,21 +81,19 @@ func (identity Identity) Validate() error {
 	default:
 		return fmt.Errorf("unsupported ownership resource kind %q", identity.Kind)
 	}
-	if _, err := model.ParseSandboxName(identity.Role); err != nil {
-		return fmt.Errorf("ownership role: %w", err)
-	}
-	if len(identity.Name()) > maxResourceNameBytes {
-		return fmt.Errorf("canonical resource name exceeds %d bytes", maxResourceNameBytes)
+	if _, err := runtime.CanonicalResourceName(identity.CanonicalRoot, identity.Workspace, identity.Role); err != nil {
+		return fmt.Errorf("ownership resource name: %w", err)
 	}
 	return nil
 }
 
 func (identity Identity) Name() string {
-	return state.CanonicalResourceName(identity.ProjectID, identity.Sandbox, identity.Role)
+	name, _ := runtime.CanonicalResourceName(identity.CanonicalRoot, identity.Workspace, identity.Role)
+	return name
 }
 
 func (identity Identity) Labels() []runtime.Label {
-	recordLabels := state.ResourceOwnershipLabels(identity.ProjectID, identity.Sandbox, identity.RunID, string(identity.Kind), identity.Role)
+	recordLabels := state.ResourceOwnershipLabels(identity.ProjectID, identity.Workspace, identity.RunID, string(identity.Kind), identity.Role)
 	labels := make([]runtime.Label, len(recordLabels))
 	for index, label := range recordLabels {
 		labels[index] = runtime.Label{Key: label.Key, Value: label.Value}
@@ -92,7 +108,7 @@ func (identity Identity) ManifestRecord() state.ResourceRecord {
 		Role:       identity.Role,
 		Name:       name,
 		ExpectedID: name,
-		Labels:     state.ResourceOwnershipLabels(identity.ProjectID, identity.Sandbox, identity.RunID, string(identity.Kind), identity.Role),
+		Labels:     state.ResourceOwnershipLabels(identity.ProjectID, identity.Workspace, identity.RunID, string(identity.Kind), identity.Role),
 	}
 }
 
@@ -100,6 +116,7 @@ type Outcome string
 
 const (
 	OutcomeOwned     Outcome = "owned"
+	OutcomeLegacy    Outcome = "legacy"
 	OutcomeOrphaned  Outcome = "orphaned"
 	OutcomeAmbiguous Outcome = "ambiguous"
 	OutcomeForeign   Outcome = "foreign"
@@ -110,8 +127,14 @@ type Classification struct {
 	Outcome       Outcome
 	Reason        string
 	DeleteAllowed bool
+	AdoptAllowed  bool
+	Legacy        bool
 }
 
+// Classify authorizes current resources for lifecycle use only when the
+// manifest and runtime corroborate one another exactly. A legacy v1 resource
+// may be authorized for explicit cleanup, but never for adoption or lifecycle
+// operations in the current workspace model.
 func Classify(record *state.ResourceRecord, observed *runtime.ResourceSnapshot) Classification {
 	if isBuilderResource(record, observed) {
 		return Classification{Outcome: OutcomeExcluded, Reason: "Apple runtime builder resources are never DSX-owned"}
@@ -122,7 +145,7 @@ func Classify(record *state.ResourceRecord, observed *runtime.ResourceSnapshot) 
 	if record == nil {
 		if !hasDSXLabel(observed.Labels) {
 			if strings.HasPrefix(observed.Name, "dsx-") {
-				return Classification{Outcome: OutcomeAmbiguous, Reason: "DSX-like runtime name has no ownership labels"}
+				return Classification{Outcome: OutcomeAmbiguous, Reason: "DSX-like runtime name has no corroborating ownership labels"}
 			}
 			return Classification{Outcome: OutcomeForeign, Reason: "runtime resource has no DSX ownership evidence"}
 		}
@@ -130,16 +153,20 @@ func Classify(record *state.ResourceRecord, observed *runtime.ResourceSnapshot) 
 		if err != nil {
 			return Classification{Outcome: OutcomeAmbiguous, Reason: err.Error()}
 		}
-		identity, err := identityFromLabels(labels)
-		if err != nil || observed.Name != identity.Name() || observed.Kind != identity.Kind {
+		identity, legacy, err := identityFromLabels(labels)
+		if err != nil || observed.Kind != identity.Kind {
 			return Classification{Outcome: OutcomeAmbiguous, Reason: "runtime ownership evidence is incomplete or inconsistent"}
+		}
+		if legacy {
+			return Classification{Outcome: OutcomeLegacy, Reason: "legacy runtime resource has no corroborating manifest", Legacy: true}
 		}
 		return Classification{Outcome: OutcomeOrphaned, Reason: "runtime resource has no corroborating manifest"}
 	}
 	if observed == nil {
 		return Classification{Outcome: OutcomeOrphaned, Reason: "manifest resource is absent from the runtime"}
 	}
-	if err := validateRecord(*record); err != nil {
+	legacy, err := validateRecord(*record)
+	if err != nil {
 		return Classification{Outcome: OutcomeAmbiguous, Reason: "invalid manifest ownership: " + err.Error()}
 	}
 	expectedID := record.RuntimeID
@@ -147,74 +174,108 @@ func Classify(record *state.ResourceRecord, observed *runtime.ResourceSnapshot) 
 		expectedID = record.ExpectedID
 	}
 	if observed.ID == "" || expectedID == "" || string(observed.ID) != expectedID {
-		return Classification{Outcome: OutcomeAmbiguous, Reason: "runtime identity does not match manifest"}
+		return Classification{Outcome: OutcomeAmbiguous, Reason: "runtime identity does not match manifest", Legacy: legacy}
 	}
 	if observed.Name != record.Name || string(observed.Kind) != record.Kind {
-		return Classification{Outcome: OutcomeAmbiguous, Reason: "runtime name or kind does not match manifest"}
+		return Classification{Outcome: OutcomeAmbiguous, Reason: "runtime name or kind does not match manifest", Legacy: legacy}
 	}
 	if err := compareLabels(record.Labels, observed.Labels); err != nil {
-		return Classification{Outcome: OutcomeAmbiguous, Reason: err.Error()}
+		return Classification{Outcome: OutcomeAmbiguous, Reason: err.Error(), Legacy: legacy}
 	}
 	if record.Deleted {
-		return Classification{Outcome: OutcomeAmbiguous, Reason: "manifest marks a still-present resource deleted"}
+		return Classification{Outcome: OutcomeAmbiguous, Reason: "manifest marks a still-present resource deleted", Legacy: legacy}
 	}
+	if legacy {
+		return Classification{
+			Outcome: OutcomeLegacy, Reason: "legacy manifest and runtime ownership corroborate for cleanup only",
+			DeleteAllowed: true, Legacy: true,
+		}
+	}
+	reason := "manifest and runtime ownership corroborate"
 	if !record.Created {
-		return Classification{Outcome: OutcomeOwned, Reason: "write-ahead intent and runtime ownership corroborate", DeleteAllowed: true}
+		reason = "write-ahead intent and runtime ownership corroborate"
 	}
-	return Classification{Outcome: OutcomeOwned, Reason: "manifest and runtime ownership corroborate", DeleteAllowed: true}
+	return Classification{Outcome: OutcomeOwned, Reason: reason, DeleteAllowed: true, AdoptAllowed: true}
 }
 
-func validateRecord(record state.ResourceRecord) error {
+func validateRecord(record state.ResourceRecord) (bool, error) {
 	labels, err := stateLabelMap(record.Labels)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if len(labels) != len(ownershipLabelOrder) {
-		return fmt.Errorf("manifest must contain exactly %d ownership labels", len(ownershipLabelOrder))
-	}
-	identity, err := identityFromLabels(labels)
+	identity, legacy, err := identityFromLabels(labels)
 	if err != nil {
-		return err
+		return legacy, err
 	}
-	if record.Name != identity.Name() || record.ExpectedID != record.Name || record.Kind != string(identity.Kind) || record.Role != identity.Role {
-		return fmt.Errorf("record fields do not match canonical ownership labels")
+	if record.ExpectedID != record.Name || record.Kind != string(identity.Kind) || record.Role != identity.Role {
+		return legacy, fmt.Errorf("record fields do not match ownership labels")
 	}
 	if record.Created && record.RuntimeID != record.ExpectedID {
-		return fmt.Errorf("created record runtime identity does not match its write-ahead identity")
+		return legacy, fmt.Errorf("created record runtime identity does not match its write-ahead identity")
 	}
 	if !record.Created && record.RuntimeID != "" {
-		return fmt.Errorf("uncreated record contains a runtime identity")
+		return legacy, fmt.Errorf("uncreated record contains a runtime identity")
 	}
-	return nil
+	return legacy, nil
 }
 
-func identityFromLabels(labels map[string]string) (Identity, error) {
-	for _, key := range ownershipLabelOrder {
+type labelIdentity struct {
+	ProjectID model.ProjectID
+	Workspace model.WorkspaceName
+	RunID     model.RunID
+	Kind      runtime.ResourceKind
+	Role      string
+}
+
+func identityFromLabels(labels map[string]string) (labelIdentity, bool, error) {
+	legacy := labels[ContractLabel] == LegacyContractValue
+	order := ownershipLabelOrder[:]
+	workspaceLabel := WorkspaceLabel
+	contractValue := ContractValue
+	if legacy {
+		order = legacyOwnershipLabelOrder[:]
+		workspaceLabel = LegacySandboxLabel
+		contractValue = LegacyContractValue
+	}
+	for _, key := range order {
 		if _, exists := labels[key]; !exists {
-			return Identity{}, fmt.Errorf("missing ownership label %q", key)
+			return labelIdentity{}, legacy, fmt.Errorf("missing ownership label %q", key)
 		}
+	}
+	if len(labels) != len(order) {
+		return labelIdentity{}, legacy, fmt.Errorf("ownership must contain exactly %d labels", len(order))
 	}
 	for key := range labels {
-		if strings.HasPrefix(key, "dev.dsx.") && !isOwnershipLabel(key) {
-			return Identity{}, fmt.Errorf("unknown DSX ownership label %q", key)
+		if strings.HasPrefix(key, "dev.dsx.") && !containsLabel(order, key) {
+			return labelIdentity{}, legacy, fmt.Errorf("unknown DSX ownership label %q", key)
 		}
 	}
-	if labels[ManagedLabel] != "true" || labels[ContractLabel] != ContractValue {
-		return Identity{}, fmt.Errorf("managed or contract label is invalid")
+	if labels[ManagedLabel] != "true" || labels[ContractLabel] != contractValue {
+		return labelIdentity{}, legacy, fmt.Errorf("managed or contract label is invalid")
 	}
 	projectID, err := model.ParseProjectID(labels[ProjectLabel])
 	if err != nil {
-		return Identity{}, err
+		return labelIdentity{}, legacy, err
 	}
-	sandbox, err := model.ParseSandboxName(labels[SandboxLabel])
+	workspace, err := model.ParseWorkspaceName(labels[workspaceLabel])
 	if err != nil {
-		return Identity{}, err
+		return labelIdentity{}, legacy, err
 	}
 	runID, err := model.ParseRunID(labels[RunLabel])
 	if err != nil {
-		return Identity{}, err
+		return labelIdentity{}, legacy, err
 	}
-	return NewIdentity(projectID, sandbox, runID, runtime.ResourceKind(labels[KindLabel]), labels[RoleLabel])
+	kind := runtime.ResourceKind(labels[KindLabel])
+	switch kind {
+	case runtime.ResourceWorkspace, runtime.ResourceBrowser, runtime.ResourceNetwork, runtime.ResourceVolume:
+	default:
+		return labelIdentity{}, legacy, fmt.Errorf("unsupported ownership resource kind %q", kind)
+	}
+	role := labels[RoleLabel]
+	if _, err := model.ParseWorkspaceName(role); err != nil || (!legacy && len(role) > runtime.MaxResourceRoleBytes) {
+		return labelIdentity{}, legacy, fmt.Errorf("invalid ownership role %q", role)
+	}
+	return labelIdentity{ProjectID: projectID, Workspace: workspace, RunID: runID, Kind: kind, Role: role}, legacy, nil
 }
 
 func compareLabels(expected []state.OwnershipLabel, observed []runtime.Label) error {
@@ -226,14 +287,19 @@ func compareLabels(expected []state.OwnershipLabel, observed []runtime.Label) er
 	if err != nil {
 		return err
 	}
-	if len(observedMap) != len(ownershipLabelOrder) {
-		return fmt.Errorf("runtime must contain exactly %d ownership labels", len(ownershipLabelOrder))
+	_, expectedLegacy, err := identityFromLabels(expectedMap)
+	if err != nil {
+		return fmt.Errorf("manifest ownership labels: %w", err)
 	}
-	if _, err := identityFromLabels(observedMap); err != nil {
+	_, observedLegacy, err := identityFromLabels(observedMap)
+	if err != nil {
 		return fmt.Errorf("runtime ownership labels: %w", err)
 	}
-	for _, key := range ownershipLabelOrder {
-		if expectedMap[key] != observedMap[key] {
+	if expectedLegacy != observedLegacy || len(expectedMap) != len(observedMap) {
+		return fmt.Errorf("runtime ownership contract does not match manifest")
+	}
+	for key, value := range expectedMap {
+		if observedMap[key] != value {
 			return fmt.Errorf("runtime ownership label %q does not match manifest", key)
 		}
 	}
@@ -268,8 +334,8 @@ func stateLabelMap(labels []state.OwnershipLabel) (map[string]string, error) {
 	return result, nil
 }
 
-func isOwnershipLabel(key string) bool {
-	for _, known := range ownershipLabelOrder {
+func containsLabel(labels []string, key string) bool {
+	for _, known := range labels {
 		if key == known {
 			return true
 		}

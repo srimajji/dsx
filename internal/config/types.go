@@ -8,21 +8,20 @@ import (
 )
 
 type ConfigDocument struct {
-	Schema        string                       `json:"$schema,omitempty"`
-	SchemaVersion int                          `json:"schemaVersion"`
-	Workspace     WorkspaceConfig              `json:"workspace"`
-	Image         ImageConfig                  `json:"image"`
-	Setup         []CommandSpec                `json:"setup,omitempty"`
-	Processes     map[string]ProcessSpec       `json:"processes,omitempty"`
-	Volumes       map[string]VolumeSpec        `json:"volumes,omitempty"`
-	Mounts        []MountSpec                  `json:"mounts,omitempty"`
-	Agents        AgentConfig                  `json:"agents,omitempty"`
-	AuthProfiles  map[string]AuthProfileConfig `json:"authProfiles,omitempty"`
-	Browser       BrowserConfig                `json:"browser,omitempty"`
-	AWS           AWSConfig                    `json:"aws,omitempty"`
-	Network       NetworkConfig                `json:"network,omitempty"`
-	Ports         []PortConfig                 `json:"ports,omitempty"`
-	Resources     ResourceLimits               `json:"resources,omitempty"`
+	Schema        string                 `json:"$schema,omitempty"`
+	SchemaVersion int                    `json:"schemaVersion"`
+	Workspace     WorkspaceConfig        `json:"workspace"`
+	Image         ImageConfig            `json:"image"`
+	Setup         []CommandSpec          `json:"setup,omitempty"`
+	Processes     map[string]ProcessSpec `json:"processes,omitempty"`
+	Volumes       map[string]VolumeSpec  `json:"volumes,omitempty"`
+	Mounts        []MountSpec            `json:"mounts,omitempty"`
+	Agents        AgentConfig            `json:"agents"`
+	Auth          AuthConfig             `json:"auth,omitempty"`
+	AWS           AWSConfig              `json:"aws,omitempty"`
+	Network       NetworkConfig          `json:"network,omitempty"`
+	Ports         []PortConfig           `json:"ports,omitempty"`
+	Resources     ResourceLimits         `json:"resources,omitempty"`
 }
 
 type WorkspaceConfig struct {
@@ -106,17 +105,12 @@ type MountSource struct {
 }
 
 type AgentConfig struct {
-	Default string   `json:"default,omitempty"`
-	Allowed []string `json:"allowed,omitempty"`
+	Default string   `json:"default"`
+	Allowed []string `json:"allowed"`
 }
 
-type AuthProfileConfig struct {
-	Harness     string `json:"harness"`
-	Persistence string `json:"persistence"`
-}
-
-type BrowserConfig struct {
-	Enabled bool `json:"enabled,omitempty"`
+type AuthConfig struct {
+	Imports []string `json:"imports,omitempty"`
 }
 
 type AWSConfig struct {
@@ -175,9 +169,9 @@ func (port HostPort) MarshalJSON() ([]byte, error) {
 }
 
 type ResourceLimits struct {
-	CPUs                int    `json:"cpus,omitempty"`
-	Memory              string `json:"memory,omitempty"`
-	MaxConcurrentClones int    `json:"maxConcurrentClones,omitempty"`
+	CPUs                    int    `json:"cpus,omitempty"`
+	Memory                  string `json:"memory,omitempty"`
+	MaxConcurrentWorkspaces int    `json:"maxConcurrentWorkspaces,omitempty"`
 }
 
 type SourceRef struct {

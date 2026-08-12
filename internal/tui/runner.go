@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -15,7 +14,6 @@ import (
 	xterm "github.com/charmbracelet/x/term"
 
 	"github.com/srimajji/dsx/internal/app"
-	modelpkg "github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/terminal"
 )
 
@@ -23,8 +21,8 @@ type RunRequest struct {
 	Root          string
 	ForceSetup    bool
 	Accessible    bool
-	Sandboxes     []app.SandboxSummary
-	setupApproved bool
+	Dashboard     DashboardData
+	LoadDashboard func(context.Context, string) (DashboardData, error)
 }
 
 // Runner composes application state with Bubble Tea. It returns lifecycle
@@ -65,19 +63,24 @@ func (runner *Runner) Run(ctx context.Context, request RunRequest) (Intent, bool
 			return Intent{}, false, nil
 		}
 		model = setup
-	case app.BareLauncher:
-		action := NewLauncherModel(state, request.Sandboxes...)
-		action.accessible = request.Accessible
-		model = action
 	case app.BareDashboard:
-		action := NewDashboardModel(state, request.Sandboxes...)
+		if request.LoadDashboard != nil {
+			request.Dashboard, err = request.LoadDashboard(ctx, request.Root)
+			if err != nil {
+				return Intent{}, false, err
+			}
+		}
+		if request.Dashboard.Root == "" {
+			request.Dashboard.Root = request.Root
+		}
+		action := NewDashboardModel(request.Dashboard)
 		action.accessible = request.Accessible
 		model = action
 	default:
 		return Intent{}, false, fmt.Errorf("unknown bare-command screen %q", state.Screen)
 	}
 	var final tea.Model
-	if action, ok := model.(*ActionModel); ok && request.Accessible {
+	if action, ok := model.(*DashboardModel); ok && request.Accessible {
 		final, err = runner.runAccessibleAction(action)
 	} else {
 		final, err = runner.runModel(model)
@@ -91,28 +94,13 @@ func (runner *Runner) Run(ctx context.Context, request RunRequest) (Intent, bool
 		}
 		return Intent{}, false, nil
 	}
-	action, ok := final.(*ActionModel)
+	action, ok := final.(*DashboardModel)
 	if !ok {
 		return Intent{}, false, nil
 	}
 	intent, found := action.Intent()
 	if !found {
 		return Intent{}, false, nil
-	}
-	if intent.Action == "start-container-system" {
-		if err := runner.Application.StartContainerSystem(ctx); err != nil {
-			return Intent{}, false, err
-		}
-		return runner.Run(ctx, request)
-	}
-	if intent.Action == "new-clone" {
-		return runner.runCloneCreate(ctx, request)
-	}
-	if intent.Action == "configure-ports" {
-		return runner.runPortConfiguration(ctx, request)
-	}
-	if state.Screen == app.BareLauncher && !request.setupApproved && requiresConfiguredApproval(intent.Action) {
-		return runner.approveConfiguredAction(ctx, request, intent)
 	}
 	return intent, true, nil
 }
@@ -126,11 +114,10 @@ func (runner *Runner) continueAfterSetup(ctx context.Context, request RunRequest
 		return Intent{}, false, fmt.Errorf("setup completed but the project is still unconfigured")
 	}
 	request.ForceSetup = false
-	request.setupApproved = true
 	return runner.Run(ctx, request)
 }
 
-func (runner *Runner) runAccessibleAction(model *ActionModel) (tea.Model, error) {
+func (runner *Runner) runAccessibleAction(model *DashboardModel) (tea.Model, error) {
 	reader := bufio.NewReader(&singleByteReader{reader: runner.Input})
 	for {
 		if _, err := io.WriteString(runner.Output, "\n"+model.View().Content+"\n"); err != nil {
@@ -143,20 +130,26 @@ func (runner *Runner) runAccessibleAction(model *ActionModel) (tea.Model, error)
 		if err != nil {
 			return model, fmt.Errorf("read accessible project action: %w", err)
 		}
-		if key == 'q' || key == 'Q' || key == 3 {
-			return model, nil
-		}
 		message := tea.KeyPressMsg(tea.Key{Text: string(key), Code: rune(key)})
 		if key == '\n' || key == '\r' {
 			message = tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter})
+		} else if key == '\t' {
+			message = tea.KeyPressMsg(tea.Key{Code: tea.KeyTab})
+		} else if key == 27 {
+			message = tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape})
+		} else if key == 127 || key == 8 {
+			message = tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace})
 		}
 		updated, _ := model.Update(message)
-		action, ok := updated.(*ActionModel)
+		action, ok := updated.(*DashboardModel)
 		if !ok {
 			return model, fmt.Errorf("accessible project action returned an unexpected model")
 		}
 		model = action
 		if _, found := model.Intent(); found {
+			return model, nil
+		}
+		if key == 3 || key == 'q' && model.screen == dashboardHome {
 			return model, nil
 		}
 	}
@@ -168,191 +161,6 @@ func (runner *Runner) runModel(model tea.Model) (tea.Model, error) {
 		options = append(options, tea.WithColorProfile(colorprofile.NoTTY))
 	}
 	return tea.NewProgram(model, options...).Run()
-}
-
-func (runner *Runner) approveConfiguredAction(ctx context.Context, request RunRequest, intent Intent) (Intent, bool, error) {
-	preview, err := runner.Application.PreviewExisting(ctx, app.BareStateRequest{Root: request.Root})
-	if err != nil {
-		return Intent{}, false, err
-	}
-	setup := NewExistingApprovalModel(ctx, runner.Application, request.Root, preview, request.Accessible)
-	if request.Accessible {
-		if _, _, err := runner.runAccessibleSetup(ctx, setup); err != nil {
-			return Intent{}, false, err
-		}
-	} else {
-		if _, err := runner.runModel(setup); err != nil {
-			return Intent{}, false, err
-		}
-	}
-	if setup.stage != setupDone {
-		return Intent{}, false, nil
-	}
-	return intent, true, nil
-}
-
-func (runner *Runner) runCloneCreate(ctx context.Context, request RunRequest) (Intent, bool, error) {
-	base, err := runner.Application.PreviewExisting(ctx, app.BareStateRequest{Root: request.Root})
-	if err != nil {
-		return Intent{}, false, err
-	}
-	sandbox := ""
-	agent := base.Config.Agents.Default
-	profile := "default"
-	profiles := make([]string, 0, len(base.Config.AuthProfiles))
-	for name, configured := range base.Config.AuthProfiles {
-		if configured.Harness == agent {
-			profiles = append(profiles, name)
-		}
-	}
-	sort.Strings(profiles)
-	if len(profiles) != 0 {
-		profile = profiles[0]
-	}
-	prompt := ""
-	browserEnabled := base.Config.Browser.Enabled
-	input := runner.Input
-	if request.Accessible {
-		input = &singleByteReader{reader: runner.Input}
-	}
-	fields := []huh.Field{
-		huh.NewInput().Title("Named clone sandbox").Description("Lowercase letters, digits, and hyphens.").Value(&sandbox),
-		huh.NewInput().Title("Coding agent").Value(&agent),
-		huh.NewInput().Title("Authentication profile").Value(&profile),
-		huh.NewInput().Title("One-shot prompt").Value(&prompt),
-	}
-	if base.Config.Browser.Enabled {
-		fields = append(fields, huh.NewNote().Title("Isolated browser").Description("Enabled by project configuration."))
-	} else {
-		fields = append(fields, huh.NewConfirm().Title("Enable isolated browser?").Affirmative("Enable").Negative("Disable").Value(&browserEnabled))
-	}
-	form := huh.NewForm(huh.NewGroup(fields...)).
-		WithInput(input).
-		WithOutput(runner.Output).
-		WithAccessible(request.Accessible)
-	if request.Accessible || !terminal.ColorEnabled() {
-		form.WithTheme(huh.ThemeFunc(huh.ThemeBase))
-	}
-	if err := form.RunWithContext(ctx); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			return Intent{}, false, nil
-		}
-		return Intent{}, false, err
-	}
-	parsedSandbox, err := modelpkg.ParseSandboxName(strings.TrimSpace(sandbox))
-	if err != nil {
-		return Intent{}, false, fmt.Errorf("named clone sandbox is invalid: %w", err)
-	}
-	if parsedSandbox == "main" {
-		return Intent{}, false, fmt.Errorf("named clone sandbox must not be main")
-	}
-	if strings.TrimSpace(agent) == "" || strings.TrimSpace(profile) == "" || strings.TrimSpace(prompt) == "" {
-		return Intent{}, false, fmt.Errorf("agent, authentication profile, and prompt are required")
-	}
-	preview, err := runner.Application.PreviewClone(ctx, app.ClonePreviewRequest{
-		Root: request.Root, Sandbox: string(parsedSandbox), Agent: strings.TrimSpace(agent), Browser: browserEnabled,
-	})
-	if err != nil {
-		return Intent{}, false, err
-	}
-	review := NewPlanReviewModel(ctx, runner.Application, request.Root, preview, request.Accessible)
-	if request.Accessible {
-		if _, _, err := runner.runAccessibleSetup(ctx, review); err != nil {
-			return Intent{}, false, err
-		}
-	} else if _, err := runner.runModel(review); err != nil {
-		return Intent{}, false, err
-	}
-	if review.stage != setupDone {
-		return Intent{}, false, nil
-	}
-	return Intent{
-		Action: "clone-run", Project: preview.Facts.CanonicalRoot, Sandbox: string(parsedSandbox),
-		Agent: strings.TrimSpace(agent), Profile: strings.TrimSpace(profile), Prompt: strings.TrimSpace(prompt),
-		Browser: browserEnabled, ApproveConfig: preview.Hash,
-	}, true, nil
-}
-
-func (runner *Runner) runPortConfiguration(ctx context.Context, request RunRequest) (Intent, bool, error) {
-	current, err := runner.Application.PreviewExisting(ctx, app.BareStateRequest{Root: request.Root})
-	if err != nil {
-		return Intent{}, false, err
-	}
-	value := formatGuestPorts(current.Config.Ports)
-	mainExists := false
-	for _, sandbox := range request.Sandboxes {
-		if sandbox.Sandbox == "main" && sandbox.State != modelpkg.StateDeleted {
-			mainExists = true
-			break
-		}
-	}
-	fields := []huh.Field{
-		huh.NewInput().
-			Title("Published guest ports").
-			Description("Comma-separated guest ports. DSX assigns dynamic loopback host ports. Leave empty to publish none.").
-			Value(&value).
-			Validate(validateGuestPorts),
-	}
-	recreate := !mainExists
-	if mainExists {
-		fields = append(fields, huh.NewConfirm().
-			Title("Recreate the main workspace to apply this change?").
-			Description("The container is replaced; the live project and DSX-owned volumes are preserved.").
-			Affirmative("Recreate").
-			Negative("Cancel").
-			Value(&recreate))
-	}
-	input := runner.Input
-	if request.Accessible {
-		input = &singleByteReader{reader: runner.Input}
-	}
-	form := huh.NewForm(huh.NewGroup(fields...)).
-		WithInput(input).
-		WithOutput(runner.Output).
-		WithAccessible(request.Accessible)
-	if request.Accessible || !terminal.ColorEnabled() {
-		form.WithTheme(huh.ThemeFunc(huh.ThemeBase))
-	}
-	if err := form.RunWithContext(ctx); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			return Intent{}, false, nil
-		}
-		return Intent{}, false, err
-	}
-	if !recreate {
-		return Intent{}, false, nil
-	}
-	ports, err := parseGuestPorts(value)
-	if err != nil {
-		return Intent{}, false, err
-	}
-	document := current.Config
-	document.Ports = ports
-	candidate, err := runner.Application.PreviewSetup(ctx, app.SetupPreviewRequest{Root: request.Root, Config: document})
-	if err != nil {
-		return Intent{}, false, err
-	}
-	review := NewPortUpdateReviewModel(ctx, runner.Application, request.Root, current, candidate, request.Accessible)
-	if request.Accessible {
-		if _, _, err := runner.runAccessibleSetup(ctx, review); err != nil {
-			return Intent{}, false, err
-		}
-	} else if _, err := runner.runModel(review); err != nil {
-		return Intent{}, false, err
-	}
-	if review.stage != setupDone {
-		return Intent{}, false, nil
-	}
-	if !mainExists {
-		return runner.Run(ctx, request)
-	}
-	return Intent{
-		Action: "recreate-ports", Project: candidate.Facts.CanonicalRoot, Sandbox: "main", ApproveConfig: candidate.Hash,
-	}, true, nil
-}
-
-func requiresConfiguredApproval(action string) bool {
-	return action == "create" || action == "start" || action == "attach"
 }
 
 func (runner *Runner) runAccessibleSetup(ctx context.Context, model *SetupModel) (Intent, bool, error) {

@@ -13,13 +13,13 @@ import (
 )
 
 const (
-	projectIDLength  = 20
-	maxSandboxLength = 24
+	projectIDLength    = 20
+	maxWorkspaceLength = 24
 )
 
 type ProjectID string
 
-type SandboxName string
+type WorkspaceName string
 
 type RunID string
 
@@ -39,16 +39,16 @@ func ParseProjectID(value string) (ProjectID, error) {
 	return ProjectID(value), nil
 }
 
-func ParseSandboxName(value string) (SandboxName, error) {
-	if len(value) == 0 || len(value) > maxSandboxLength || value[0] == '-' || value[len(value)-1] == '-' {
-		return "", fmt.Errorf("invalid sandbox name %q", value)
+func ParseWorkspaceName(value string) (WorkspaceName, error) {
+	if len(value) == 0 || len(value) > maxWorkspaceLength || value[0] == '-' || value[len(value)-1] == '-' {
+		return "", fmt.Errorf("invalid workspace name %q", value)
 	}
 	for _, character := range value {
 		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
-			return "", fmt.Errorf("invalid sandbox name %q", value)
+			return "", fmt.Errorf("invalid workspace name %q", value)
 		}
 	}
-	return SandboxName(value), nil
+	return WorkspaceName(value), nil
 }
 
 func NewRunID(now time.Time) (RunID, error) {

@@ -1,8 +1,6 @@
 package app
 
 import (
-	"bytes"
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -20,66 +18,6 @@ const (
 	maxStagedSecretEnvironmentBytes = 1 << 20
 	secretEnvironmentCleanupTimeout = 30 * time.Second
 )
-
-type stagedExecEnvironment struct {
-	ordinary []string
-	guest    runtime.GuestPath
-}
-
-func (service *LifecycleService) stageExecEnvironment(ctx context.Context, snapshot runtime.ResourceSnapshot, runID model.RunID, environment map[string]string, secretKeys []string) (stagedExecEnvironment, error) {
-	ordinary, secret, err := partitionExecEnvironment(environment, secretKeys)
-	if err != nil {
-		return stagedExecEnvironment{}, model.Wrap(model.CodeInvalidInput, "validate shell environment", err)
-	}
-	staged := stagedExecEnvironment{ordinary: harnessEnvironment(ordinary)}
-	if len(secret) == 0 {
-		return staged, nil
-	}
-	contents, err := encodeSecretEnvironment(secret)
-	if err != nil {
-		return stagedExecEnvironment{}, model.Wrap(model.CodeInvalidInput, "encode secret environment", err)
-	}
-	guestName, err := secretEnvironmentGuestPath(runID)
-	if err != nil {
-		return stagedExecEnvironment{}, model.Wrap(model.CodeInternal, "allocate secret environment path", err)
-	}
-	stageSpec := runtime.ExecSpec{
-		Argv:       []string{DefaultGuestHelperPath, "stage-env", "--path", string(guestName)},
-		WorkingDir: workspaceGuestRoot,
-		User:       service.user(),
-	}
-	exit, stageErr := service.runtime.Exec(ctx, snapshot, stageSpec, runtime.ExecIO{Stdin: bytes.NewReader(contents)})
-	if stageErr == nil && (exit.Code == nil || *exit.Code != 0 || exit.Signal != "") {
-		stageErr = model.NewError(model.CodeUnavailable, "stage guest secret environment failed", nil)
-	}
-	if stageErr != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), secretEnvironmentCleanupTimeout)
-		defer cancel()
-		cleanupErr := service.cleanupGuestSecretEnvironment(cleanupCtx, snapshot, guestName)
-		return stagedExecEnvironment{}, errors.Join(stageErr, cleanupErr)
-	}
-	staged.guest = guestName
-	return staged, nil
-}
-
-func (service *LifecycleService) cleanupGuestSecretEnvironment(ctx context.Context, snapshot runtime.ResourceSnapshot, name runtime.GuestPath) error {
-	if name == "" {
-		return nil
-	}
-	spec := runtime.ExecSpec{
-		Argv:       []string{DefaultGuestHelperPath, "exec", "--", "/bin/rm", "-rf", "--", string(name)},
-		WorkingDir: workspaceGuestRoot,
-		User:       service.user(),
-	}
-	exit, err := service.runtime.Exec(ctx, snapshot, spec, runtime.ExecIO{})
-	if err != nil {
-		return err
-	}
-	if exit.Code == nil || *exit.Code != 0 {
-		return model.NewError(model.CodeUnavailable, "remove guest secret environment failed", nil)
-	}
-	return nil
-}
 
 func partitionExecEnvironment(environment map[string]string, secretKeys []string) (map[string]string, map[string]string, error) {
 	secretNames := make(map[string]struct{}, len(secretKeys))

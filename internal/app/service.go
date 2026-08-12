@@ -27,25 +27,13 @@ type Commands interface {
 }
 
 type InspectRequest struct {
-	Root          string
-	CLIOverrides  CLIOverrides
-	SandboxName   string
-	Mode          string
-	ApproveConfig string
+	Root         string
+	CLIOverrides CLIOverrides
 }
 
 type CLIOverrides struct {
-	Agent   string
-	Browser *bool
-	CPUs    *int
-	Memory  string
-}
-
-type ClonePreviewRequest struct {
-	Root    string
-	Sandbox string
-	Agent   string
-	Browser bool
+	CPUs   *int
+	Memory string
 }
 
 type InspectResult struct {
@@ -56,6 +44,9 @@ type InspectResult struct {
 
 type ProjectFacts struct {
 	CanonicalRoot string         `json:"canonical_root"`
+	Branch        string         `json:"branch,omitempty"`
+	Revision      string         `json:"revision,omitempty"`
+	Clean         bool           `json:"clean"`
 	ConfigPath    string         `json:"config_path,omitempty"`
 	ConfigExists  bool           `json:"config_exists"`
 	GitRoots      []DetectedPath `json:"git_roots"`
@@ -82,7 +73,6 @@ type BareScreen string
 
 const (
 	BareSetup     BareScreen = "setup"
-	BareLauncher  BareScreen = "launcher"
 	BareDashboard BareScreen = "dashboard"
 )
 

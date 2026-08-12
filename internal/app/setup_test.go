@@ -132,7 +132,7 @@ func setupTestService(t *testing.T, root string, approvals state.ApprovalReposit
 	})
 }
 
-func TestSetupLauncherDashboardSelection(t *testing.T) {
+func TestSetupDashboardSelection(t *testing.T) {
 	root := t.TempDir()
 	service := setupTestService(t, root, &setupApprovalRepository{}, setupInventory{})
 	stateResult, err := service.BareState(context.Background(), BareStateRequest{Root: root})
@@ -142,12 +142,12 @@ func TestSetupLauncherDashboardSelection(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, ".dsx"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, projectConfigPath), []byte(`{"schemaVersion":1,"workspace":{"root":"."},"image":{"standard":true}}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, projectConfigPath), []byte(`{"schemaVersion":1,"workspace":{"root":"."},"image":{"standard":true},"agents":{"default":"codex","allowed":["codex"]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stateResult, err = service.BareState(context.Background(), BareStateRequest{Root: root})
-	if err != nil || stateResult.Screen != BareLauncher {
-		t.Fatalf("configured state = %#v, err = %v", stateResult, err)
+	if err != nil || stateResult.Screen != BareDashboard {
+		t.Fatalf("configured dashboard state = %#v, err = %v", stateResult, err)
 	}
 	service.inventory = setupInventory{count: 2}
 	stateResult, err = service.BareState(context.Background(), BareStateRequest{Root: root})

@@ -526,7 +526,7 @@ func (client *GuestClient) validateStatus(status guestproto.StatusResult) error 
 	}
 	seen := make(map[string]struct{}, len(status.Processes))
 	for _, process := range status.Processes {
-		parsed, err := model.ParseSandboxName(process.ID)
+		parsed, err := model.ParseWorkspaceName(process.ID)
 		if err != nil || string(parsed) != process.ID || process.Generation != status.Generation || !validGuestState(process.State) || len(process.Failure) > guestproto.MaxStringBytes || len(process.Log) > client.logLimitBytes {
 			return model.NewError(model.CodeUnavailable, "guest returned an invalid status result", nil)
 		}

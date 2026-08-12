@@ -260,12 +260,12 @@ func (request Request) Validate() error {
 		return protocolError(CodeInvalidRequest, fmt.Sprintf("operation %q is unknown", request.Operation), nil)
 	}
 	if requiresTarget {
-		parsed, err := model.ParseSandboxName(request.Target)
+		parsed, err := model.ParseWorkspaceName(request.Target)
 		if err != nil || string(parsed) != request.Target {
 			return protocolError(CodeInvalidRequest, "target is not a valid configured process ID", err)
 		}
 	} else if request.Target != "" {
-		parsed, err := model.ParseSandboxName(request.Target)
+		parsed, err := model.ParseWorkspaceName(request.Target)
 		if err != nil || string(parsed) != request.Target {
 			return protocolError(CodeInvalidRequest, "target is invalid", err)
 		}

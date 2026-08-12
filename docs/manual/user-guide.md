@@ -1,16 +1,22 @@
 # DSX user and operator guide
 
-This guide describes the current MVP command and configuration contracts. It is not evidence that an optional integration or release gate has passed. See [External evidence and release gates](#external-evidence-and-release-gates) for the exact blocked items.
+This guide describes the DSX multi-workspace command, configuration, security, and operator contracts. It does not by itself prove that an external release or physical-runtime evidence gate has passed. New users should begin with [Getting started with DSX](./getting-started.md).
 
-New to DSX? Start with [Getting started with DSX](./getting-started.md) for installation, first-project, live workspace, named clone, authentication, browser, and cleanup walkthroughs.
+## 1. Product model and requirements
 
-## 1. Requirements and setup
+DSX runs on Apple-silicon (`arm64`) Macs with macOS 26 or newer and uses Apple's `container` runtime. The initially supported compatibility range is `>=1.2.2 <1.3.0`; untested or mismatched CLI/API-server versions fail before mutation.
 
-DSX runs only on Apple-silicon (`arm64`) Macs with macOS 26 or newer. Install Apple `container` separately. The current compatibility allowlist admits only the exact pair `container` CLI 1.2.2 and API server 1.2.2; versions below 1.2.2, 1.3.0 or newer, mismatched CLI/server versions, and untested 1.2.x patches fail before resource creation.
+Every DSX workspace is:
 
-A DSX installation consists of the Darwin/arm64 `dsx` binary and the static Linux/arm64 `dsx-guest` binary beside it. Do not copy only `dsx`: the host stages and digest-verifies the adjacent guest helper for each workspace. No registry package or signed/notarized public installer is available until the release gates below pass.
+- explicitly named;
+- a peer of every other workspace;
+- an Apple container/microVM;
+- backed by guest-owned storage and independent Git metadata; and
+- populated from committed local revisions through restrictive verified Git bundles.
 
-After installation, run the read-only checks:
+The local Git checkout is the source and integration point, not a workspace. DSX never mounts host project source or the host home directory into a workspace. There is no implicit workspace, distinguished workspace, or workspace-mode choice.
+
+Install the Darwin/ARM64 `dsx` and Linux/ARM64 `dsx-guest` binaries beside one another. The host verifies and stages the guest helper read-only. Check the installation without creating resources:
 
 ```console
 $ dsx version
@@ -18,249 +24,46 @@ $ dsx doctor
 $ dsx doctor --require-builder
 ```
 
-`doctor` checks the host OS and architecture, exact CLI/API-server pair, Apple system service, compatibility allowlist, and builder health. Without `--require-builder`, an unhealthy builder is a warning; with it, the check fails. DSX may tell an operator to run Apple-native `container system start` or `container builder start`; DSX does not install, uninstall, stop, prune, or delete the Apple runtime or its builder.
+DSX may direct an operator to Apple-native system or builder startup. It does not install, stop, uninstall, prune, or delete Apple's runtime, default network, or builder.
 
-## 2. Bare `dsx`, setup, and non-TTY behavior
+## 2. Project configuration and trust
 
-In a terminal, bare `dsx` resolves the canonical current project and routes to the setup wizard, launcher, or dashboard according to configuration and owned resources. `dsx init [--root PATH]` opens the setup flow directly. Its review gives each topic a separate color-coded view for detected facts, the effective plan, executable commands, mounts, credential and network grants, ports, provenance, and the executable hash. The shared TUI column, stepper, panels, status, and footer controls use consistent centered alignment and outer padding. Page position, section continuation, and navigation cues remain visible before confirmation. Cancelling before final confirmation must not write configuration or create runtime resources. After confirmation, a development build without published image metadata builds and verifies the embedded DSX Standard image; release builds continue to use their published digest-pinned standard image.
+### 2.1 Configuration location
 
-Setup includes optional comma-separated guest-port entry plus CPU and memory selectors. Entered ports receive dynamic loopback host mappings. New sandbox configurations default to 4 CPUs and 6 GiB. The review's `b` action returns to the first environment screen and preserves all in-memory choices; it does not write configuration or mutate runtime resources.
+Setup writes the normal home-local contract to:
 
-After final confirmation, setup performs a read-only `container system status --format json` preflight before writing configuration or approval state. A missing Apple container CLI or a service state other than `running` stops setup without persistence; start a stopped service with `container system start`, then retry. Confirmed setup renders an animated, bounded checklist instead of raw command logs and then opens the configured project screen without exiting. The immediately following **Create & open** action uses the approval just completed, reports fixed plan, image, resource, workspace, service, and readiness milestones, and attaches only after readiness.
-
-If either stdin or stdout is not a TTY, bare `dsx` prints command help and exits without prompting or changing state. `dsx init` instead fails because setup is interactive. Use explicit commands and their text/JSON output in automation. Set `DSX_ACCESSIBLE=1` for the accessible TUI form mode; `NO_COLOR` is also respected.
-
-By default, setup writes `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`. A repository `.dsx/config.jsonc` is supported as an explicit shared alternative. DSX requires exactly one location and refuses to continue if both exist. Configuration precedence is CLI flag, the active DSX configuration, then default. Dev Container declarations are not discovered or imported; inferred lifecycle commands are not executed automatically.
-
-## 3. Inspect and approve before mutation
-
-`inspect` is read-only:
-
-```console
-$ dsx inspect [--format text|json] [--root PATH] [--mode live|clone] [--sandbox NAME] [--agent NAME]
+```text
+~/.dsx/projects/<project-name>-<project-id>/config.jsonc
 ```
 
-It reports detected project facts and, when configuration is complete, the effective image, workspace members, commands, processes and health checks, mounts and volumes, auth profile, browser choice, network grants, ports, resources, provenance, and `executable_hash`. Clone inspection requires `--mode clone --sandbox NAME`, where `NAME` is not `main`.
+A maintainer may instead explicitly use `.dsx/config.jsonc` as the repository-shared contract. Exactly one may be active. DSX fails on ambiguity and never merges configuration files.
 
-Before a noninteractive mutation, copy the exact 64-character lowercase hash printed as `Executable hash:` (text) or `plan.executable_hash` (JSON) and pass it through `--approve-config`. A stale or wrong hash fails. `--force` never bypasses this trust check.
+Configuration precedence is:
 
-```console
-$ dsx inspect --mode clone --sandbox fix-test --agent codex
-$ dsx run --name fix-test --agent codex --approve-config 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- "fix the failing test"
+```text
+CLI override
+  > one active project configuration
+  > DSX standard default
 ```
 
-The hash above is syntactically valid documentation data, not approval for a real project. Replace it with the exact hash from the immediately preceding inspection.
+`dsx inspect` is read-only. It shows detected facts, effective values, the source of each value, and the executable-configuration hash. A changed executable plan requires review. Non-interactive mutation must provide the exact `--approve-config` hash. `--force` never bypasses approval.
 
-## 4. Live workspace and named clone sandboxes
+Dev Container declarations are not discovered, imported, parsed, or executed. Suggestions from lockfiles, Dockerfiles, Containerfiles, or `devenv.nix` remain inert until represented in reviewed DSX configuration.
 
-The modes deliberately do not coexist for one project:
+### 2.2 Strict offline schema
 
-- `shell` uses the one live workspace named `main` and mounts selected host repositories read/write. Changes propagate immediately in both directions. The sandbox can modify or delete those host files.
-- `run --name NAME` uses a guest-owned private clone created from restrictive Git bundles. It does not persistently mount host source. The host tracked tree must be clean; ignored and untracked host files are excluded. Each clone gets independent Git metadata, dependency state, services, dynamic ports, and writable auth state.
+`schema/dsx-config-v1.schema.json` is embedded and evaluated offline. Remote references are disabled, input is bounded, duplicate keys are rejected with source locations, and unknown fields fail rather than being ignored.
 
-Multiple named clones may run concurrently, subject to `resources.maxConcurrentClones`; DSX does not schedule prompts or merge results. Multiple editing agents in the live workspace can conflict and require an explicit warning.
+The workspace-model cutover is strict:
 
-### Start, shell, and run
+- `agents.allowed` and `agents.default` are the only project agent-selection authority;
+- the default must be one of the allowed harnesses;
+- portable host-import eligibility is declared with `auth.imports`;
+- per-workspace volume scope is spelled `workspace`;
+- concurrency is `resources.maxConcurrentWorkspaces`; and
+- creation-time authentication, browser, profile, or workspace-mode defaults are not configuration fields.
 
-```console
-$ dsx start [--root PATH] --approve-config HASH
-$ dsx shell [--root PATH] [--approve-config HASH] [-- command args...]
-$ dsx shell [--root PATH] [--approve-config HASH] --agent omp|codex|claude|opencode [--profile NAME]
-$ dsx run --name NAME --agent omp|codex|claude|opencode [--profile NAME] [--browser] --approve-config HASH -- "one prompt"
-```
-
-`start` starts the approved live workspace without attaching. `shell` starts or attaches to it. A direct command must follow `--`; `shell --agent` is interactive and cannot also take a direct command. `run` requires exactly one non-empty prompt after `--` and creates or resumes a named clone in the current project. Interactive child exit status, signals, terminal resize, and cancellation are propagated.
-
-Bare `dsx` keeps these operations on the same application services. After setup, one project screen reports Apple Container, live workspace, and configured-port state, then offers exactly one primary lifecycle action. **More options** includes published-port editing and only the applicable clone, stop, clean, and Git actions. Active sandbox entries show final URLs. Changing ports reviews and approves a new plan; when the live workspace exists, DSX asks before replacing only that container, preserves its network and DSX-owned volumes, and then attaches.
-
-### Managed DSX Standard shell and toolchains
-
-For the managed **DSX Standard — Ubuntu** image, bare `dsx shell` attaches with `/bin/zsh -il` and a DSX-managed Starship prompt. DSX never reads, copies, mounts, or executes host dotfiles. The pinned plugin code and generated initialization are built into the image; shell startup is offline and static, with no network fetch or plugin regeneration.
-
-The managed Zsh environment loads `zsh-completions`, `fzf-tab`, `zsh-history-substring-search`, `zsh-autosuggestions`, and `zsh-syntax-highlighting` for additional completions, interactive tab selection, substring history search, suggestions, and syntax highlighting. Native `fzf` and `direnv` shell integration is also available. Antidote is available from managed Zsh for inspection, but the managed pinned plugin bundle is static and Antidote does not update it at startup.
-
-It defines exactly these portable aliases:
-
-| Alias | Expansion |
-|---|---|
-| `ll` | `ls -alF` |
-| `la` | `ls -A` |
-| `l` | `ls -CF` |
-| `..` | `cd ..` |
-| `...` | `cd ../..` |
-| `....` | `cd ../../..` |
-| `g` | `git` |
-| `gs` | `git status --short --branch` |
-| `gd` | `git diff` |
-| `gl` | `git log --graph --decorate --oneline -20` |
-| `reload` | `exec zsh -il` |
-
-The portable functions are:
-
-- `mkcd DIR` creates a directory and enters it;
-- `extract FILE` unpacks common tar, zip, and gzip formats;
-- `serve [PORT]` runs `python -m http.server`, using port `8000` by default; and
-- `path` prints `PATH` entries one per line.
-
-The standard image includes Node with `npm` and `pnpm`, Python 3 with `pip` and virtual-environment support, Go, and a supported LTS JDK with `java` and `javac`. Tool paths are set at image level rather than only in Zsh startup, so interactive shells and direct commands discover the same executables.
-
-Anything after `dsx shell --` remains direct structured arguments: DSX runs the named executable without Zsh parsing or startup, so aliases and functions do not apply. For example, `dsx shell -- node --version` executes `node` directly; use bare `dsx shell` when you want the managed interactive environment.
-
-Use these checks to troubleshoot tool discovery and installed versions:
-
-```console
-$ dsx shell -- /bin/zsh -lc 'command -v zsh starship antidote fzf direnv node npm pnpm python python3 pip go java javac'
-$ dsx shell -- zsh --version
-$ dsx shell -- starship --version
-$ dsx shell -- node --version
-$ dsx shell -- npm --version
-$ dsx shell -- pnpm --version
-$ dsx shell -- python --version
-$ dsx shell -- python -m pip --version
-$ dsx shell -- go version
-$ dsx shell -- java -version
-$ dsx shell -- javac -version
-```
-
-Custom images do not inherit or receive this environment. They must provide their own shell, startup files, toolchains, and image-level `PATH`; DSX does not inject the standard image's Zsh configuration or command suite.
-
-### List, status, logs, stop, and clean
-
-```console
-$ dsx list [--root PATH] [--format text|json]
-$ dsx ls [--root PATH] [--format text|json]
-$ dsx status [--root PATH] [--format text|json]
-$ dsx logs [--root PATH] [--format text|json] PROCESS
-$ dsx stop [--root PATH] [--name NAME]
-$ dsx clean [--root PATH] [--name NAME] [--force] [--discard-unfetched]
-$ dsx clean --all [--force] [--discard-unfetched]
-```
-
-`list`/`ls` lists owned sandboxes and published ports. `status` reports URLs and configured process state for the current live workspace. `logs` returns the bounded retained log for exactly one configured live-workspace process; it is not a follow mode and currently has no named-clone selector. `stop` without `--name` selects the live workspace; `--name main` is rejected. Stop retains explicitly persistent state. Clean without `--name` removes all proven DSX-owned resources for the current project; `--name` removes one clone; `--all` spans every DSX project.
-
-Clean requires a TTY confirmation unless `--force` is present. `--force` bypasses only that confirmation. It does not bypass config approval, ownership proof, or the unfetched-result guard. Ambiguous resources are retained and reported rather than guessed at. Ordinary clean preserves global authentication.
-
-## 5. Clone result recovery and Git transfer
-
-All Git commands require a named clone. For a composite workspace, omit `--repo` to operate on every member or select one exact configured member.
-
-```console
-$ dsx git status NAME [--repo MEMBER] [--root PATH] [--format text|json]
-$ dsx git diff NAME [--repo MEMBER] [--root PATH] [--format text|json]
-$ dsx git fetch NAME [--repo MEMBER] [--root PATH] [--format text|json]
-$ dsx git apply NAME [--repo MEMBER] [--root PATH] [--format text|json]
-```
-
-`status` shows source/result commits, branch, tracked-host fingerprint, untracked/ignored warnings, and fetched state. `diff` safely renders text patches, omits binary content, and truncates output above its bound. `fetch` finalizes changes and imports a verified result bundle to a sandbox-specific host remote-tracking ref; it does not merge. `apply` safety-checks the host fingerprint and ref collisions, then applies the result as a squashed working-tree change. A composite apply fails without partial host mutation.
-
-Before cleanup, run `git status`, then preserve each result with `git fetch` or `git apply`. If the guest is unavailable or any member has an uncaptured/unfetched result, cleanup fails closed. Recover or restart the sandbox and fetch again. Only when loss is intentional may an operator combine `--discard-unfetched` with the normal interactive confirmation or `--force`; this permanently discards the guarded result.
-
-## 6. Authentication profiles
-
-Declare profiles in `.dsx/config.jsonc` and select one with `--profile`. `persistence: "global"` survives ordinary project cleanup; `persistence: "sandbox"` is scoped to the project and sandbox. A persistent seed is never writable-mounted into a sandbox: every login/run receives an independent writable copy, and successful updates are promoted with compare-and-swap semantics.
-
-Login is always explicit, interactive, and tied to an approved plan:
-
-```console
-$ dsx login --agent omp|codex|claude|opencode --profile NAME --root PATH --approve-config HASH
-```
-
-Normal `shell`/`run` never initiates provider login. A successful login promotes only the adapter's allowlisted credential artifacts. Concurrent refreshes never overwrite a changed seed: DSX reports a conflict and preserves a candidate rather than attempting a generic secret merge. Stop active copies and resolve by performing a fresh explicit login; no public candidate-merge command exists.
-
-There is currently no public `dsx auth import` command. The internal repository can validate/import allowlisted portable credential artifacts, but the CLI deliberately does not claim ambient host-auth import. In particular, arbitrary OMP databases and macOS Keychain-backed Claude credentials are not portable imports. OMP seed/promotion requires a closed-process `agent.db` plus `agent.db-wal` snapshot; this remains an external harness experiment gate.
-
-Purge selected persisted authentication only as an explicit clean option:
-
-```console
-$ dsx clean --purge-auth --agent omp|codex|claude|opencode [--profile NAME] [--root PATH] [--force]
-```
-
-The default profile is `default`. Purge occurs after resource cleanup and refuses while the selected profile has active run copies. It removes only the exact DSX-managed harness/profile; ordinary clean preserves it.
-
-## 7. Browser, Leapp, private relay, and ports
-
-### Isolated browser
-
-`browser.enabled: true` or `dsx run --browser` requests a separate disposable browser VM on only the owning sandbox's private network. The CLI flag is enable-only: it cannot disable an approved `browser.enabled` grant. The current implementation starts pinned Playwright MCP 0.0.79 with zero mounts and zero host-published ports. Its fixed entrypoint requires exactly one private IPv4 address and restricts MCP Host validation to that address plus port; DSX independently verifies the same inspected address, injects exactly one per-run harness server named `playwright`, rejects a caller-supplied server with that reserved name, and deletes the browser before Git result capture. A reproducible local recipe exists at `images/browser/Containerfile`; its current local Apple runtime digest is `sha256:dce1d9a9cc9ad38edf545ad29a7f2f3448210a73be3a1cf3651d1c8932b023c0`. Release builds must replace the development-local reference with a compiled published registry digest.
-To approve a CLI-enabled browser, inspect and run the identical clone projection; `--browser` changes the executable hash:
-
-```console
-$ dsx inspect --mode clone --sandbox web --agent codex --browser
-$ dsx run --name web --agent codex --profile work --browser --approve-config <inspected-hash> -- "exercise the application"
-```
-
-
-### Leapp/AWS warning
-
-`aws.mode: "leapp"` is opt-in. `aws.directory` must resolve to a canonical physical, non-symlink directory containing regular non-symlink `config` and `credentials` files. A session-scoped helper copies only a stable paired snapshot into private DSX state, publishes both files as one atomic generation, and mounts that mirror read-only at `/run/dsx/aws`. `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` resolve through `/run/dsx/aws/current`; optional `aws.profile` sets `AWS_PROFILE`. Replacing the approved source directory invalidates the hash. Source rotation that cannot prove a coherent pair fails closed and leaves the last complete generation selected. Abrupt helper death is recoverable only after exact ledger, executable, socket, token, and PID-absence checks. DSX refuses a whole-home/ancestor grant and never renders credential values. **Profile selection is convenience, not credential isolation:** warning `aws_all_profiles_readable` means an agent able to read the mirrored directory may read every profile in it and can exfiltrate those credentials. Release support still requires repeated real Leapp rotation evidence on every supported Apple runtime.
-
-### Destination-specific private relay
-
-Each `network.hostGrants` item validates one name, hostname-or-IP destination, and TCP port. One sandbox-scoped durable helper pins the listener interface, exact owner workspace source IP, resolved destination, and bounded lease. The guest receives only `DSX_BRIDGE_<NAME>_HOST` and `_PORT`; it receives no host identity, Tailscale state, runtime socket, or generic proxy. The relay rejects wildcard/loopback/link-local listeners, public owners, route or address-family mismatch, self-relay, DNS changes, CONNECT/SOCKS/UDP, and alternate sources or destinations. The helper survives the invoking terminal, renews only while fresh Apple inspection corroborates the exact running workspace and complete ownership labels, and stops through authenticated lifecycle control. Failed corroboration allows bounded expiry. Stop/clean terminates the listener and active connections; lifecycle counters contain no payload bytes.
-
-The OAuth callback bridge likewise has no public CLI or configuration surface and is not application-wired. Its internal lease accepts one bounded exact loopback callback with random state and never logs query values, but the pinned harnesses do not expose a validated caller-supplied callback URI plus guest delivery path. Provider login therefore uses only the explicit supported login flow and validated HTTPS host URL opener; DSX does not claim a working guest callback bridge.
-
-### Published ports
-
-Each `ports` entry names a guest TCP port and uses either a fixed host port or `"dynamic"`. Setup accepts guest ports only and emits dynamic `127.0.0.1` mappings. Bare `dsx` shows configured guest ports and active final URLs; **More options** → **Configure published ports** edits the list. An existing live workspace must be explicitly confirmed before its container is replaced, while its project network and DSX-owned volumes remain. On Apple `container` 1.2.2, DSX uses durable, ownership-pinned host listeners for the compatibility-gated fallback path; fixed-port conflicts fail without taking over an existing listener.
-
-## 8. Security boundaries
-
-Treat the workspace and every executable declaration as untrusted code:
-
-- The workspace is non-root by default and receives no host home, runtime control socket, SSH/GPG agent, Keychain, Tailscale identity/state, or unrelated repository.
-- Setup commands, hooks, dependencies, skills, plugins, MCP servers, and harness configuration have the sandbox authority shown by `inspect`.
-- Live mode grants full read/write authority over selected host repositories. Clone mode excludes ignored/untracked host files but does not prevent source exfiltration over allowed internet access.
-- Any secret deliberately injected or mounted into a workspace can be read and exfiltrated by the agent. Secret references, not values, belong in configuration.
-- The browser boundary isolates untrusted web content from source and credentials; the private network and origin allowlists do not make explicitly proxied workspace data secret.
-- DSX uses exact ownership evidence and reverse dependency cleanup. It never adopts or broadly prunes the Apple builder, default network, unrelated Apple resources, host processes, databases, or dependency directories.
-- DSX provides Apple microVM isolation, not process-to-process isolation inside the integrated workspace, task scheduling, merge coordination, destination egress policy, Docker Engine APIs, Docker Compose, nested containers, Kubernetes, Rosetta, or amd64 emulation.
-
-Do not follow Docker or Podman setup/cleanup instructions for DSX. Project Dockerfiles may be image build inputs, but DSX's runtime boundary is Apple's `container` CLI.
-
-## 9. Reference-project examples
-
-These examples are review plans, not successful physical-run evidence. They use no credential values or secret host paths.
-
-### `course-intelligence-agency`
-
-The repository contains a Dev Container declaration, but DSX does not read it. The DSX configuration explicitly selects the Dockerfile, setup commands, credentials, and ports that belong to the sandbox contract.
-
-```jsonc
-{
-  "$schema": "https://dsx.dev/schema/config-v1.json",
-  "schemaVersion": 1,
-  "workspace": { "root": "." },
-  "image": {
-    "build": {
-      "context": ".",
-      "file": ".devcontainer/Dockerfile"
-    }
-  },
-  "agents": { "default": "codex", "allowed": ["codex", "claude", "omp", "opencode"] },
-  "authProfiles": { "work": { "harness": "codex", "persistence": "global" } },
-  "browser": { "enabled": false },
-  "ports": [
-    { "name": "kestra", "guest": 8080, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" },
-    { "name": "syllabus", "guest": 3001, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" }
-  ]
-}
-```
-
-```console
-$ dsx inspect --root /Volumes/Dev/work/course-intelligence-agency --mode clone --sandbox fix-test --agent codex
-$ cd /Volumes/Dev/work/course-intelligence-agency
-$ dsx run --name fix-test --agent codex --profile work --approve-config 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- "fix the failing test"
-$ dsx git diff fix-test
-$ dsx git fetch fix-test
-$ dsx clean --name fix-test
-```
-
-Replace the illustrative approval hash with the exact inspected hash. Add `--browser` only after the browser gate is supported in the target release.
-
-### `devenv`
-
-DSX detects `devenv.nix` facts but does not interpret or execute arbitrary Nix. A maintainer must explicitly translate only reviewed Linux commands, repositories, services, and ports into DSX configuration. This nonsecret skeleton intentionally does not promise that the real composite stack is complete:
+A representative configuration is:
 
 ```jsonc
 {
@@ -269,63 +72,486 @@ DSX detects `devenv.nix` facts but does not interpret or execute arbitrary Nix. 
   "workspace": {
     "root": ".",
     "members": [
-      { "name": "backend", "path": "studocu" },
-      { "name": "frontend", "path": "studocu-frontend" }
+      { "name": "api", "path": "services/api" },
+      { "name": "web", "path": "services/web" }
     ]
   },
-  "image": { "ref": "registry.example.invalid/dsx/devenv@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-  "agents": { "default": "claude", "allowed": ["claude"] },
-  "authProfiles": { "default": { "harness": "claude", "persistence": "global" } },
+  "image": { "standard": true },
+  "setup": [
+    { "argv": ["pnpm", "install", "--frozen-lockfile"], "cwd": "/workspace" }
+  ],
   "processes": {
-    "frontend": {
-      "argv": ["yarn", "dev"],
-      "cwd": "/workspace/studocu-frontend",
+    "web": {
+      "argv": ["pnpm", "dev"],
+      "cwd": "/workspace/services/web",
       "required": true,
-      "health": { "tcp": { "address": "127.0.0.1:3001" }, "interval": "1s", "timeout": "2s", "retries": 30 }
+      "health": {
+        "http": { "url": "http://127.0.0.1:3000/health" },
+        "interval": "1s",
+        "timeout": "2s",
+        "retries": 30
+      }
     }
   },
+  "volumes": {
+    "node-modules": {
+      "target": "/workspace/node_modules",
+      "scope": "workspace",
+      "persistent": true
+    }
+  },
+  "mounts": [
+    {
+      "source": { "type": "volume", "volume": "node-modules" },
+      "target": "/workspace/node_modules"
+    }
+  ],
+  "agents": {
+    "default": "omp",
+    "allowed": ["omp", "codex", "claude", "opencode"]
+  },
+  "auth": {
+    "imports": ["omp", "codex", "opencode"]
+  },
+  "network": { "internet": true, "hostGrants": [] },
   "ports": [
-    { "name": "frontend", "guest": 3001, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" }
-  ]
+    {
+      "name": "web",
+      "guest": 3000,
+      "host": "dynamic",
+      "bind": "127.0.0.1",
+      "protocol": "tcp"
+    }
+  ],
+  "resources": {
+    "cpus": 4,
+    "memory": "6GiB",
+    "maxConcurrentWorkspaces": 4
+  }
 }
 ```
 
-`registry.example.invalid` is intentionally non-routable; replace it with a reviewed Linux ARM64 image pinned by digest before approval.
+Structured `argv` is executed directly. It is not converted to a host shell string and does not depend on guest shell rc files. An explicitly declared shell command remains executable configuration and appears in approval review.
+
+### 2.3 Repository and mount rules
+
+`workspace.root` and `workspace.members` identify local Git repositories whose committed revisions are bundled into independent guest clones. A `mounts` source of type `workspace` resolves inside that private guest clone; it does not refer to a live host source mount.
+
+Reviewed host-directory grants, where supported for narrow integrations, must be canonical and read-only. Semantic validation denies host home, project source, runtime sockets, SSH/GPG agents, Keychain, Tailscale state, browser profiles, temporary/runtime directories, symlink escapes, and the reserved `dsx-guest` target.
+
+## 3. Setup and TUI
+
+### 3.1 Bare command and setup
+
+With a terminal, bare `dsx` opens setup for an unconfigured project or the dashboard for a configured project. `dsx init [--root PATH]` opens the same setup flow directly. If stdin or stdout is not a TTY, bare `dsx` prints help and changes nothing; interactive setup fails rather than prompting invisibly.
+
+Setup covers:
+
+- detected project facts and image source;
+- allowed and default agents;
+- supported authentication-import declarations;
+- setup, processes, services, mounts, and volumes;
+- internet and private-network grants;
+- published guest ports;
+- CPU, memory, and maximum concurrent workspaces; and
+- provenance plus executable-configuration hash.
+
+Authentication import is a separate explicit approval. Setup does not silently import credentials. No configuration, approval, credential, or runtime resource is persisted before final confirmation. A post-confirmation Apple runtime preflight must succeed before project mutation.
+
+Use `DSX_ACCESSIBLE=1` for accessible form mode. `NO_COLOR` is respected. Narrow terminals, resize, masked secret input, and terminal-safe rendering are part of the interface contract.
+
+### 3.2 Dashboard
+
+The dashboard shows:
+
+- canonical local checkout branch, commit, and cleanliness;
+- workspaces in deterministic order;
+- lifecycle state and active mutation;
+- source branch and revision;
+- workspace default and project-allowed agents;
+- final URLs and published ports;
+- unfetched or unresolved-work warnings; and
+- `Legacy — cleanup only` resources.
+
+Actions for the selected workspace are state-aware:
+
+| Key | Action |
+|---|---|
+| **c** | Create a workspace. |
+| **Enter** | Open the selected workspace. |
+| **a** | Open the agent form. |
+| **u** | Update from the local checkout. |
+| **s** | Start or stop. |
+| **r** | Restart. |
+| **g** | Review Git status or diff. |
+| **d** | Remove. |
+| **q** | Quit. |
+
+Update and restart are disabled while another lifecycle mutation is active. A workspace needing conflict resolution remains openable.
+
+The create form contains only the validated name, recorded source branch/revision, and optional default agent selected from `agents.allowed`. It offers create-and-open or background creation. It never asks for credentials, a task prompt, browser selection, or a workspace mode.
+
+The agent form contains only an agent selection and an **Enable isolated browser** checkbox. Browser selection is per session and is not stored as a workspace-creation default.
+
+Before handing the terminal to an interactive workspace shell or agent, the TUI exits its alternate screen and restores normal terminal state. It may restore the dashboard after the child exits. Confirmed work shows bounded milestones rather than unbounded raw runtime logs.
+
+## 4. Command reference
+
+| Command | Contract |
+|---|---|
+| `dsx` | Open setup or the multi-workspace dashboard; print help without a TTY. |
+| `dsx inspect` | Read-only effective plan, provenance, and configuration hash. |
+| `dsx init` | Open the setup flow. |
+| `dsx workspace create NAME` | Create a private-clone workspace from the committed local revision. |
+| `dsx workspace create NAME --default-agent AGENT` | Set an approved workspace-specific default. |
+| `dsx workspace list` | List current workspaces and legacy cleanup-only resources. |
+| `dsx workspace open NAME` | Start if needed, wait for readiness, and open the shell. |
+| `dsx workspace start NAME` | Start the workspace and only `dsx-guest`, without attaching. |
+| `dsx workspace stop NAME` | Stop while preserving private state. |
+| `dsx workspace restart NAME` | Stop and start without restoring agent or project processes. |
+| `dsx workspace update NAME` | Rebase the workspace branch onto the latest committed local revision. |
+| `dsx workspace remove NAME` | Remove one proven workspace subject to result protection. |
+| `dsx workspace remove --all` | Remove removable current-project workspaces. |
+| `dsx workspace remove --legacy-resources` | Remove proven current-project legacy resources. |
+| `dsx workspace remove --all-projects` | Remove proven workspace resources across projects after confirmation. |
+| `dsx agent WORKSPACE [--agent AGENT] [--browser] [-- PROMPT]` | Run an interactive or prompted agent session in an existing workspace. |
+| `dsx auth status` | Report project authentication availability without secret values. |
+| `dsx auth import --agent AGENT` | Review and import only the harness's allowed portable artifact. |
+| `dsx auth login --agent AGENT` | Perform an explicit DSX-scoped login. |
+| `dsx auth refresh --agent AGENT` | Refresh canonical project credentials through the harness adapter. |
+| `dsx auth purge --agent AGENT` | Confirm removal of canonical credentials and inactive copies. |
+| `dsx git status WORKSPACE [--repo MEMBER]` | Show source, result, dirty, rebase, fingerprint, and fetch state. |
+| `dsx git diff WORKSPACE [--repo MEMBER]` | Render bounded, terminal-safe changes. |
+| `dsx git fetch WORKSPACE [--repo MEMBER]` | Import verified committed history into the named host ref. |
+| `dsx git apply WORKSPACE [--repo MEMBER]` | Guard and apply a squashed working-tree result. |
+| `dsx doctor [--require-builder]` | Read-only host/runtime compatibility checks. |
+| `dsx version [--json]` | Print build and pinned component metadata. |
+
+Every workspace operation requires a name unless it uses an explicit cleanup-set selector. The unreleased cutover has no compatibility aliases or unnamed lifecycle behavior.
+
+Destructive operations prompt in a terminal. `--force` may explicitly confirm loss during removal, but it cannot bypass configuration approval, resource ownership, workspace identity, or bundle verification.
+
+## 5. Workspace lifecycle
+
+### 5.1 Names and states
+
+Workspace names are 1–24 bytes of lowercase letters, digits, and hyphens, with no leading or trailing hyphen. The durable states are:
+
+- `planned`;
+- `creating`;
+- `running`;
+- `stopped`;
+- `needs_resolution`;
+- `failed`;
+- `cleaning`; and
+- `deleted`.
+
+Mutations use per-workspace and project locks with a fixed ordering. Manifests are written before runtime mutation and use optimistic generations. Cancellation stops forward work and runs bounded rollback without losing the original error.
+
+### 5.2 Create
 
 ```console
-$ dsx inspect --root /Volumes/Dev/work/devenv
-$ dsx init --root /Volumes/Dev/work/devenv
-$ dsx shell --root /Volumes/Dev/work/devenv --agent claude --profile default --approve-config 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-$ dsx status --root /Volumes/Dev/work/devenv
-$ dsx stop --root /Volumes/Dev/work/devenv
-$ dsx clean --root /Volumes/Dev/work/devenv
+$ dsx workspace create feature-a
 ```
 
-Replace the illustrative hash with the exact approved hash.
+Creation:
 
-## 10. Runner quarantine and recovery
+1. verifies a clean tracked local checkout;
+2. records its checked-out branch and commit;
+3. warns that ignored and untracked files are excluded;
+4. creates a restrictive source bundle in a private temporary location;
+5. verifies the bundle and repository identities;
+6. writes lifecycle intent before runtime changes;
+7. creates isolated source, dependency, service, session, and network resources;
+8. clones without object hardlinks or shared Git metadata;
+9. checks out `dsx/feature-a`; and
+10. starts only `dsx-guest`.
 
-Destructive Apple acceptance runs belong only on dedicated physical Apple-silicon runners. A run must attest the host/runtime, acquire the host-local lock, write a unique run ledger before mutation, inventory unrelated sentinels and builder identity, clean only exact proven IDs, and emit evidence JSON. A boot/pre-job sweeper may reconcile a ledger only when ownership and the upstream run's terminal state are certain.
+Finite approved setup commands may execute during creation, but no agent, browser, application, watcher, process manager, manually started database, or other persistent project process starts implicitly.
 
-If a ledger, ownership tuple, runtime state, sentinel, builder identity, or run status is uncertain, write `$DSX_CI_STATE_ROOT/QUARANTINED.json`, remove job eligibility out of band, preserve the marker, lock, ledgers, and evidence, and investigate manually. Only a human operator plus an independent reviewer may approve evidence and clear the exact stale lock/marker; any remaining ambiguity keeps the host quarantined. Never use broad `--all`, `prune`, `container system stop`, uninstall, default-network deletion, or builder deletion as recovery. The [runner operations guide](../runner-operations.md) is authoritative. No macOS 26/27 runner, canary, sweeper, quarantine drill, or recovery drill has been provisioned or exercised yet.
+### 5.3 Open, start, and stop
 
-## 11. External evidence and release gates
+```console
+$ dsx workspace open feature-a
+$ dsx workspace start feature-a
+$ dsx workspace stop feature-a
+```
 
-Implemented code and release support are different claims. The following gates are currently external or blocked and must fail closed:
+`open` is permitted for `running`, `stopped`, and `needs_resolution` workspaces. It starts a stopped workspace, waits for guest readiness, and enters the shell. `start` performs the same state restoration without terminal attachment. `stop` terminates active agents and temporary helpers, removes live publications as appropriate, and preserves private clone data, credentials, dependencies, service volumes, configuration, and ownership.
 
-The reproducible dry-run build requires Go 1.26.5, pinned Syft 1.29.0, a concrete SemVer, full 40-character lowercase commit ID, `SOURCE_DATE_EPOCH`, and digest-pinned published `DSX_AGENT_IMAGE` and `DSX_BROWSER_IMAGE` references. It produces `bin/dsx` plus the digest-bound adjacent `bin/dsx-guest`, a deterministic Darwin/arm64 zip, `release-manifest.json`, canonical SPDX 2.3 JSON, and checksums. Those files remain an unsigned dry run.
+The managed DSX Standard shell is login interactive Zsh with pinned, image-owned Antidote plugin content and pre-generated Starship initialization. Startup is offline. Node/npm/pnpm, Python/pip/venv, Go, and an LTS JDK are exported at image level so direct structured commands do not need rc files. Custom images remain responsible for their own shell and toolchain.
 
-A release operator must additionally provide a real `Developer ID Application: ...` Keychain identity and a valid `xcrun notarytool` Keychain profile. The gate requires strict code-sign verification with the expected authority and trusted timestamp, notarization status `Accepted` with a submission ID, Gatekeeper (`spctl`) assessment, and a clean temporary-prefix artifact-verification plus read-only `dsx doctor` smoke on a supported physical runner. Missing runtime support fails that smoke; tooling never substitutes an installer or publishes on failure.
+### 5.4 Restart
 
-| Gate | Current status |
+```console
+$ dsx workspace restart feature-a
+```
+
+Restart transitions a running or stopped workspace through stopped to running. It preserves files, Git and rebase state, commits, uncommitted changes, dependencies, service volumes, credential copies, configuration, and ownership.
+
+Restart terminates and never restores agent sessions, browsers, development servers, watchers, manually started databases, background commands, process managers, or application processes. Only `dsx-guest` starts automatically. Sibling workspaces remain untouched.
+
+### 5.5 Update and conflict recovery
+
+```console
+$ dsx workspace update feature-a
+```
+
+Update means **Update from local checkout**. It requires:
+
+- a clean, committed local checkout;
+- the same checked-out source branch recorded for the workspace;
+- a verifiable restrictive source bundle; and
+- a workspace branch that can be safely rebased.
+
+DSX transfers the latest source revision, verifies it, records a backup ref, and rebases `dsx/feature-a`. It does not stash uncommitted files, synthesize commits, merge unrelated branches, or attempt semantic resolution.
+
+On conflict the manifest durably records the conflict, the state becomes `needs_resolution`, and the valid Git rebase state is preserved:
+
+```console
+$ dsx workspace open feature-a
+$ git status
+$ git rebase --continue
+# or
+$ git rebase --abort
+```
+
+Opening remains allowed for recovery. Re-run Git status afterward. An update does not affect any sibling workspace.
+
+### 5.6 List and remove
+
+```console
+$ dsx workspace list
+$ dsx workspace remove feature-a
+```
+
+List output includes source revision, lifecycle state, default and allowed agents, URLs, mutation state, warnings, result/fetch state, and legacy cleanup-only records. Ordering is deterministic and rendered text is terminal-sanitized.
+
+Removal inventories the exact manifest and inspected runtime resources, verifies ownership labels, respects reverse dependencies, and deletes only proven resources. It is idempotent after interruption or partial startup.
+
+Removal refuses uncertain or unexported work, including:
+
+- unfetched commits;
+- uncommitted files;
+- in-progress or conflicted rebase state;
+- a result bundle not confirmed imported; or
+- a guest whose result state cannot be established.
+
+Fetch or apply first. An explicit loss confirmation may discard work, but no option bypasses ownership proof. Canonical project credentials survive workspace removal.
+
+## 6. Agent lifecycle
+
+An agent always targets an existing workspace:
+
+```console
+$ dsx agent feature-a
+$ dsx agent feature-a --agent codex
+$ dsx agent feature-a --agent omp -- "implement the API"
+```
+
+Resolution order is explicit override, workspace default, then project default. Every choice must occur in `agents.allowed`. An override applies only to that invocation.
+
+No prompt opens an interactive session. Text after `--` is passed as the task prompt using the harness's exact structured argument contract. DSX streams output, propagates exit status, signals, cancellation, and terminal resize, and preserves the workspace when the agent exits. Repeated sessions reuse the same files and processes. An agent request never creates a workspace.
+
+Workspace stop or restart terminates active sessions and never restores them. Multiple workspaces may run different harnesses concurrently without writable Git, auth, session, or network sharing.
+
+## 7. Authentication lifecycle
+
+### 7.1 Import allowlists
+
+`auth.imports` may contain only `omp`, `codex`, and `opencode`. It is onboarding policy, not an instruction to copy files. Each command presents the discovered source and exact artifact set for separate approval:
+
+```console
+$ dsx auth status
+$ dsx auth import --agent omp
+$ dsx auth import --agent codex
+$ dsx auth import --agent opencode
+```
+
+The artifact allowlist is exact:
+
+| Harness | Import contract |
 |---|---|
-| Registry and image publication identity | Blocked: no production registry identity or published digest-pinned agent/browser image references supplied. |
-| Apple signing and notarization identity | Blocked: no Developer ID Application identity or notarytool Keychain profile supplied; unsigned dry-run output is not a release. |
-| macOS 26 and 27 physical Apple-silicon runners | Blocked: runners are not provisioned, so destructive, compatibility, browser, relay, Leapp, and end-to-end harness evidence cannot be claimed. |
-| Browser private-network/isolation experiment | Observed locally on macOS 27 and Apple `container` 1.2.2: owner pairs connected, both cross-network directions and the host path failed, browser mounts/publications were empty, and exact cleanup removed the experiment. Release support remains blocked on registry/signing and provisioned macOS 26/27 lane evidence. |
-| Leapp atomic-rotation experiment | Observed locally on macOS 27 and Apple `container` 1.2.2: repeated complete generations crossed the production mirror's read-only directory mount, guest writes failed, and workspace/network baselines were restored. Release support remains blocked on provisioned macOS 26/27 lane evidence. |
-| Private relay experiment | Application wiring exists for live and clone startup. Release support remains blocked pending provisioned-lane private-route, destination-abuse, lease/crash, and cross-sandbox proof. |
-| Harness provider authentication, callback, and PTY experiments | Blocked where real provider credentials/flows, callback behavior, OMP closed snapshots, or physical PTY/runtime evidence are absent. The callback lease is internal and deliberately unwired because no pinned harness exposes a validated caller-supplied callback URI plus guest delivery contract. |
-| Release | Blocked until the Darwin/arm64 host binary and Linux/arm64 guest helper are reproducibly packaged together; embedded host metadata verifies the adjacent helper digest and pinned image refs; artifact digests, canonical SBOM, signature, notarization, Gatekeeper assessment, clean-install smoke, complete evidence matrix, and security sign-off all pass. |
+| OMP | A consistent snapshot taken with `agent.db` closed, plus the optional WAL belonging to that snapshot. |
+| Codex CLI | Only its approved portable `auth.json`. |
+| OpenCode | Only its approved provider-auth artifact. |
+| Claude Code | Host import unsupported; perform DSX login. |
 
-Hosted macOS CI may compile and run non-virtualized checks only; it is not evidence for Apple nested-virtualization paths. Workflows must use trusted refs and pinned actions. Release tooling must refuse missing identities, credentials, helper/image digests, SBOM, signatures, notarization, or required evidence rather than publishing a partial artifact.
+DSX does not copy complete harness directories, adjacent unapproved files, host home contents, macOS Keychain data, or Claude host state. It never imports silently. OMP's embedded Codex identity remains OMP data and is never converted to Codex CLI format.
+
+Import uses restrictive temporary files and a canonical per-project store separated by harness. Secret values never enter configuration, plan hashes, manifests, logs, errors, TUI output, or process arguments.
+
+### 7.2 Login, refresh, copies, and purge
+
+```console
+$ dsx auth login --agent claude
+$ dsx auth refresh --agent omp
+$ dsx auth purge --agent omp
+```
+
+Login is explicit and DSX-scoped. A temporary callback bridge, when supported, belongs only to that login and is removed on completion or cancellation.
+
+The first agent session for a harness lazily seeds an independent writable workspace credential copy from the canonical project store. Only that harness's artifacts are injected. Writable copies are never mounted concurrently into multiple workspaces. Promotion back to the canonical store is serialized; a conflicting refresh is preserved or rejected rather than generically merging secrets.
+
+Purge is a separate confirmed operation. Active copies block it until the relevant sessions stop or the safe shutdown path is followed. Ordinary workspace removal does not purge canonical credentials.
+
+## 8. Browser-session lifecycle
+
+Browser support is an invocation-level choice:
+
+```console
+$ dsx agent feature-a --browser
+$ dsx agent feature-a --agent codex --browser -- "exercise the application"
+```
+
+For each enabled session, DSX:
+
+1. creates one new disposable browser VM;
+2. attaches it only to the selected workspace's private network;
+3. waits for the pinned Playwright MCP endpoint;
+4. injects one ephemeral MCP configuration into that session;
+5. publishes no browser control port to the host; and
+6. removes the browser on success, error, cancellation, or terminal closure.
+
+The browser has no source, harness credentials, AWS state, host home, runtime socket, host-control publication, or mounts copied from the workspace. It is never created during workspace creation, shared between workspaces, reused between sessions, persisted, or restored after workspace restart.
+
+## 9. Git update and result integration
+
+All Git operations name a workspace:
+
+```console
+$ dsx git status feature-a
+$ dsx git diff feature-a
+$ dsx git fetch feature-a
+$ dsx git apply feature-a
+```
+
+`status` reports recorded source branch/revision, `dsx/feature-a`, dirty state, rebase/conflict state, host fingerprint, last fetched revision, and unexported work.
+
+`diff` safely renders committed and uncommitted changes, omits unsafe terminal control sequences, describes binary changes without dumping their content, and bounds output.
+
+`fetch` creates and verifies a restrictive result bundle and imports committed history to:
+
+```text
+refs/remotes/dsx/feature-a
+```
+
+It does not merge. The user may merge the remote-tracking ref normally. `apply` is a convenience that checks the recorded host fingerprint and ref state before applying a squashed working-tree result. It refuses without partial host mutation on mismatch. New, deleted, renamed, and binary files are preserved.
+
+Composite projects accept `--repo MEMBER`. Cross-repository atomicity is not claimed. DSX never semantically merges parallel results.
+
+A recommended parallel flow is:
+
+1. Create `feature-a` and `feature-b`.
+2. Run independent agents.
+3. Commit new local work.
+4. Update both workspaces.
+5. Fetch and merge `feature-a`.
+6. Update `feature-b` from the newly merged local branch.
+7. Fetch and merge `feature-b`.
+
+## 10. Processes, networking, AWS, and ports
+
+### 10.1 Guest processes
+
+The integrated workspace may run agents, application processes, workers, MySQL, Redis, Caddy, or a configured project process manager. Processes share guest loopback and the workspace trust boundary. Configured dependencies and health checks gate explicitly requested actions. Output retained by DSX is bounded and process-labeled.
+
+Workspace create, start, and restart do not implicitly restore long-running project processes. DSX performs no automatic project-process restart in the MVP. A process manager explicitly run by the user may apply its own policy.
+
+### 10.2 Internet and private destinations
+
+`network.internet` is explicit project policy. Every `network.hostGrants` entry names one hostname-or-IP destination and TCP port. The workspace receives only a scoped relay endpoint, never host identity, Tailscale state, a generic proxy, or runtime control. Relays are tied to the owning workspace lease and stop with it.
+
+Sibling workspace networks are not bridged. A browser connects only to the selected workspace network.
+
+### 10.3 AWS and Leapp
+
+`aws.mode: "leapp"` is opt-in. The reviewed source directory must resolve to the canonical physical directory containing the required standard AWS files. DSX copies a stable paired generation into private state and exposes only that mirror read-only. Optional `aws.profile` sets standard `AWS_PROFILE`; it is convenience, not credential isolation, because every profile in the approved files may be readable.
+
+Browser VMs never receive AWS state. DSX never prints credential values.
+
+### 10.4 Published ports
+
+Each `ports` entry names a guest TCP port and chooses `"dynamic"` or a fixed host port. Omitted bind defaults to `127.0.0.1`; a non-loopback bind is an explicit reviewed trust grant. Runtime bind results are authoritative.
+
+Dynamic loopback ports are recommended for parallel workspaces. Fixed ports must not collide. Final mappings and URLs are reported per workspace. Port reconfiguration may replace only the selected runtime container after confirmation while retaining private clone, network, volumes, credentials, and ownership. That replacement terminates agent and project processes and does not restore them automatically.
+
+## 11. Naming, ownership, cleanup, and legacy state
+
+### 11.1 New resource names
+
+New runtime container names follow:
+
+```text
+dsx-<project:16>-<workspace:24>-<role:9>-<path-hash:6>
+```
+
+Examples:
+
+```text
+dsx-tracking-chrome-feature-a-workspace-a81f2c
+dsx-tracking-chrome-feature-b-workspace-a81f2c
+dsx-tracking-chrome-feature-a-browser-a81f2c
+```
+
+The project folder component is sanitized and limited to 16 characters; workspace to 24; role to 9; and deterministic canonical-path hash to 6. The complete name is at most 62 bytes. Sanitized display collisions remain distinct through canonical identities and ownership metadata.
+
+Names improve readability but never authorize mutation. DSX requires authoritative ownership labels plus a matching write-ahead manifest containing project, workspace, and run identity. Ambiguous resources are reported and preserved.
+
+### 11.2 Legacy cleanup only
+
+Previous-model manifests and owned resources may be recognized only for safe inspection and removal. They retain their existing names and are shown as `Legacy — cleanup only`.
+
+They cannot be started, opened, restarted, updated, adopted, migrated, renamed, or targeted by an agent. Cleanup requires the same ownership proof and result protection as a current workspace:
+
+```console
+$ dsx workspace remove --legacy-resources
+```
+
+A legacy record never causes an unrelated resource to be classified as DSX-owned.
+
+### 11.3 Cleanup sets and unfetched guard
+
+```console
+$ dsx workspace remove feature-a
+$ dsx workspace remove --all
+$ dsx workspace remove --all-projects
+```
+
+Cleanup removes only the proven selected scope: VM/container, private network, ports, proxies, private clones, workspace caches, dependency and service volumes, logs, temporary files, helper processes, and lifecycle manifest. It is safe after cancellation, terminal closure, partial creation, partial cleanup, and stale runtime state.
+
+The unfetched-work guard applies to current and legacy resources. Cleanup fails closed when result state is dirty, conflicted, unfetched, unexported, or uncertain. An explicit loss confirmation may discard work; it never weakens ownership checks. Apple builders, default networks, unrelated resources, another project's state, and ambiguous records are never deleted.
+
+Canonical project credentials remain until a separate `dsx auth purge`.
+
+## 12. Security boundary
+
+Treat workspace code, agents, dependencies, setup commands, hooks, skills, plugins, MCP servers, shell commands, process declarations, and browser content as untrusted.
+
+Required controls include:
+
+- non-root workspace execution by default;
+- no host source or host-home mount;
+- no host dotfile read, copy, mount, import, or execution;
+- no Apple runtime socket, SSH/GPG agent, Keychain, or Tailscale state;
+- independent Git objects and writable state for each workspace;
+- distinct source, authentication, reusable configuration, session, dependency, and service-data stores;
+- structured subprocess argv rather than constructed host shell commands;
+- restrictive temporary files for Git and authentication transfer;
+- exact per-harness credential allowlists and separate approval;
+- browser isolation from source, credentials, AWS, and host control;
+- loopback publication by default;
+- bounded I/O and terminal-safe rendering;
+- write-ahead manifests, optimistic generation checks, and deterministic lock ordering;
+- cancellation rollback on a bounded independent context; and
+- ownership proof before every mutation or deletion.
+
+An agent can read and change anything deliberately placed in its private workspace and can exfiltrate reachable data when internet access is allowed. Processes inside one workspace share a trust boundary. DSX does not provide task scheduling, semantic merge coordination, destination egress filtering, Docker Engine APIs, Docker Compose, nested containers, Kubernetes, Rosetta, or amd64 emulation.
+
+## 13. Physical runners and release evidence
+
+Destructive Apple acceptance runs belong only on dedicated physical Apple-silicon runners. A run must attest the host/runtime, acquire the host-local lock, write a unique ledger before mutation, inventory unrelated sentinels and builder identity, clean only exact proven IDs, and emit evidence.
+
+Any uncertain ledger, ownership tuple, runtime state, sentinel, builder identity, or upstream run status quarantines the host. Only a human operator and independent reviewer may clear the exact stale marker or lock after reviewing evidence. Broad pruning, runtime shutdown, uninstall, default-network deletion, and builder deletion are never recovery actions. The [runner operations guide](../runner-operations.md) is authoritative.
+
+Implemented code and release support are distinct claims. Registry publication identity, digest-pinned production images, Apple signing and notarization identity, provisioned macOS 26/27 runners, real provider authentication, PTY behavior, browser isolation, network relay, Leapp rotation, fault cleanup, and end-to-end workflow evidence must all pass their applicable gates before release support is claimed. Hosted macOS CI may compile and run non-virtualized checks but is not evidence for nested Apple virtualization.

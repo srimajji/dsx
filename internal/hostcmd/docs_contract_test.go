@@ -20,20 +20,14 @@ func TestDocumentedCommandHelpContract(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "global", args: []string{"help"}, want: "dsx run --name NAME --agent omp|codex|claude|opencode [--profile NAME] [--browser] --approve-config HASH -- PROMPT"},
+		{name: "global", args: []string{"help"}, want: "dsx workspace create NAME"},
 		{name: "init", args: []string{"init", "--help"}, want: "Usage: dsx init [--root PATH]"},
-		{name: "inspect", args: []string{"inspect", "--help"}, want: "Usage: dsx inspect [--format text|json] [--root PATH] [--mode live|clone] [--sandbox NAME] [--agent NAME]"},
+		{name: "inspect", args: []string{"inspect", "--help"}, want: "Usage: dsx inspect [--format text|json] [--root PATH]"},
 		{name: "doctor", args: []string{"doctor", "--help"}, want: "Usage: dsx doctor [--format text|json] [--require-builder]"},
-		{name: "start", args: []string{"start", "--help"}, want: "Usage: dsx start [--root PATH] --approve-config HASH"},
-		{name: "stop", args: []string{"stop", "--help"}, want: "Usage: dsx stop [--root PATH] [--name NAME]"},
-		{name: "list", args: []string{"list", "--help"}, want: "Usage: dsx list [--root PATH] [--format text|json]"},
-		{name: "clean", args: []string{"clean", "--help"}, want: "[--purge-auth --agent NAME [--profile NAME]]"},
-		{name: "shell", args: []string{"shell", "--help"}, want: "Usage: dsx shell [--root PATH] [--approve-config HASH] [--agent omp|codex|claude|opencode] [--profile NAME] [-- command args...]"},
-		{name: "run", args: []string{"run", "--help"}, want: "Usage: dsx run --name NAME --agent omp|codex|claude|opencode [--profile NAME] [--browser] --approve-config HASH -- PROMPT"},
-		{name: "login", args: []string{"login", "--help"}, want: "Usage: dsx login --agent omp|codex|claude|opencode --profile NAME --root PATH --approve-config HASH"},
-		{name: "git", args: []string{"git", "--help"}, want: "dsx git apply NAME [--repo MEMBER] [--root PATH] [--format text|json]"},
-		{name: "status", args: []string{"status", "--help"}, want: "Usage: dsx status [--root PATH] [--format text|json]"},
-		{name: "logs", args: []string{"logs", "--help"}, want: "Usage: dsx logs [--root PATH] [--format text|json] PROCESS"},
+		{name: "workspace", args: []string{"workspace", "--help"}, want: "dsx workspace restart NAME"},
+		{name: "agent", args: []string{"agent", "--help"}, want: "Usage: dsx agent WORKSPACE"},
+		{name: "auth", args: []string{"auth", "--help"}, want: "dsx auth purge --agent"},
+		{name: "git", args: []string{"git", "--help"}, want: "dsx git apply WORKSPACE"},
 		{name: "version", args: []string{"version", "--help"}, want: "Usage: dsx version [--json]"},
 	}
 
@@ -102,7 +96,7 @@ func TestUserGuideConfigurationExamplesAreAccepted(t *testing.T) {
 		examples++
 		remaining = remaining[end+len(closing):]
 	}
-	if examples != 2 {
-		t.Fatalf("user guide configuration examples = %d, want 2", examples)
+	if examples != 1 {
+		t.Fatalf("user guide configuration examples = %d, want 1", examples)
 	}
 }

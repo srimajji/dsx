@@ -11,41 +11,41 @@ import (
 	term "github.com/charmbracelet/x/term"
 	"github.com/srimajji/dsx/internal/app"
 	"github.com/srimajji/dsx/internal/buildinfo"
-	"github.com/srimajji/dsx/internal/harness"
 	"github.com/srimajji/dsx/internal/model"
+	"github.com/srimajji/dsx/internal/state"
 	"github.com/srimajji/dsx/internal/terminal"
 	"github.com/srimajji/dsx/internal/tui"
 )
 
-const helpText = `DSX creates isolated Apple-container development sandboxes.
+const helpText = `DSX creates named, isolated Apple-container development workspaces.
 
 Usage:
   dsx
   dsx init [--root PATH]
-  dsx inspect [--format text|json] [--root PATH] [--mode live|clone] [--sandbox NAME] [--agent NAME]
+  dsx inspect [--format text|json] [--root PATH]
   dsx doctor [--format text|json] [--require-builder]
-  dsx start [--root PATH] --approve-config HASH
-  dsx stop [--root PATH] [--name NAME]
-  dsx list|ls [--root PATH] [--format text|json]
-  dsx clean [--root PATH] [--name NAME] [--force] [--discard-unfetched] [--purge-auth --agent NAME [--profile NAME]]
-  dsx clean --all [--force] [--discard-unfetched] [--purge-auth --agent NAME [--profile NAME]]
-  dsx shell [--root PATH] [--approve-config HASH] [--agent omp|codex|claude|opencode] [--profile NAME] [-- command args...]
-  dsx run --name NAME --agent omp|codex|claude|opencode [--profile NAME] [--browser] --approve-config HASH -- PROMPT
-  dsx login --agent omp|codex|claude|opencode --profile NAME --root PATH --approve-config HASH
-  dsx git status|diff|fetch|apply NAME [--repo MEMBER] [--root PATH] [--format text|json]
-  dsx status [--root PATH] [--format text|json]
-  dsx logs [--root PATH] [--format text|json] PROCESS
+  dsx workspace create NAME [--root PATH] [--default-agent AGENT] [--approve-config HASH] [--open]
+  dsx workspace list [--root PATH] [--format text|json]
+  dsx workspace open NAME [--root PATH]
+  dsx workspace start NAME [--root PATH]
+  dsx workspace stop NAME [--root PATH]
+  dsx workspace restart NAME [--root PATH]
+  dsx workspace update NAME [--root PATH]
+  dsx workspace remove NAME [--root PATH] [--force]
+  dsx workspace remove --all|--legacy-resources|--all-projects [--root PATH] [--force]
+  dsx agent WORKSPACE [--root PATH] [--agent omp|codex|claude|opencode] [--browser] [-- PROMPT]
+  dsx auth status [--root PATH] [--format text|json]
+  dsx auth import|login|refresh|purge --agent omp|codex|claude|opencode [--root PATH] [--force]
+  dsx git status|diff|fetch|apply WORKSPACE [--repo MEMBER] [--root PATH] [--format text|json]
   dsx version [--json]
   dsx --version [--json]
 Run "dsx help" for this help.
 `
 
-// Inspector is the read-only application boundary used by the inspect command.
 type Inspector interface {
 	Inspect(context.Context, app.InspectRequest) (app.InspectResult, error)
 }
 
-// Doctor is the read-only application boundary used by the doctor command.
 type Doctor interface {
 	Doctor(context.Context, app.DoctorRequest) (app.DoctorResult, error)
 }
@@ -54,54 +54,54 @@ type TUIRunner interface {
 	Run(context.Context, tui.RunRequest) (tui.Intent, bool, error)
 }
 
-type TUIProgressRunner interface {
-	RunProgress(context.Context, tui.ProgressRequest, tui.ProgressOperation) error
+type WorkspaceLifecycle interface {
+	Create(context.Context, app.WorkspaceCreateRequest) (app.WorkspaceResult, error)
+	Open(context.Context, app.WorkspaceOpenRequest) (app.WorkspaceOpenResult, error)
+	Start(context.Context, app.WorkspaceStartRequest) (app.WorkspaceResult, error)
+	Stop(context.Context, app.WorkspaceStopRequest) (app.WorkspaceResult, error)
+	Restart(context.Context, app.WorkspaceRestartRequest) (app.WorkspaceResult, error)
+	Remove(context.Context, app.WorkspaceRemoveRequest) (app.WorkspaceRemoveResult, error)
+	List(context.Context, app.WorkspaceListRequest) (app.WorkspaceListResult, error)
 }
 
-type LifecycleProgress interface {
-	StartWithProgress(context.Context, app.StartRequest, app.StartProgressReporter) (app.StartResult, error)
+type WorkspaceGit interface {
+	Update(context.Context, app.WorkspaceUpdateRequest) (app.WorkspaceResult, error)
+	GitStatus(context.Context, app.GitStatusRequest) (app.GitStatusResult, error)
+	GitDiff(context.Context, app.GitDiffRequest) (app.GitDiffResult, error)
+	GitFetch(context.Context, app.GitFetchRequest) (app.GitFetchResult, error)
+	GitApply(context.Context, app.GitApplyRequest) (app.GitApplyResult, error)
 }
 
-type Lifecycle interface {
-	Start(context.Context, app.StartRequest) (app.StartResult, error)
-	RecreatePorts(context.Context, app.StartRequest) (app.StartResult, error)
-	Stop(context.Context, app.StopRequest) (app.StopResult, error)
-	Clean(context.Context, app.CleanRequest) (app.CleanResult, error)
-	List(context.Context, app.ListRequest) (app.ListResult, error)
-	Shell(context.Context, app.ShellRequest) (app.ShellResult, error)
+type AgentRunner interface {
+	Run(context.Context, app.AgentRunRequest) (app.AgentRunResult, error)
 }
 
-type HarnessRunner interface {
-	Run(context.Context, app.HarnessRunRequest) (app.HarnessRunResult, error)
-	Login(context.Context, app.HarnessLoginRequest) (app.HarnessLoginResult, error)
-	PurgeAuth(context.Context, app.PurgeAuthRequest) error
+type AuthManager interface {
+	Status(context.Context, app.AuthStatusRequest) (app.AuthStatusResult, error)
+	Import(context.Context, app.AuthImportRequest) (app.AuthImportResult, error)
+	Login(context.Context, app.AuthLoginRequest) (app.AuthLoginResult, error)
+	Refresh(context.Context, app.AuthRefreshRequest) (app.AuthImportResult, error)
+	Purge(context.Context, app.AuthPurgeRequest) error
+}
+type WorkspaceInventory interface {
+	ListAllManifests(context.Context) ([]state.Manifest, error)
 }
 
-type ProcessStatus interface {
-	ProcessStatus(context.Context, app.ProcessStatusRequest) (app.ProcessStatusResult, error)
-}
-
-type ProcessLogs interface {
-	ProcessLogs(context.Context, app.ProcessLogsRequest) (app.ProcessLogsResult, error)
-}
-
-// Dependencies makes application services injectable without exposing command
-// parsing or rendering to the application layer.
 type Dependencies struct {
 	Inspector     Inspector
 	Doctor        Doctor
-	Lifecycle     Lifecycle
-	Harness       HarnessRunner
-	Clones        app.CloneManager
+	Workspaces    WorkspaceLifecycle
+	Git           WorkspaceGit
+	Agents        AgentRunner
+	Auth          AuthManager
+	Inventory     WorkspaceInventory
 	TUI           TUIRunner
 	Stdin         io.Reader
 	IsTTY         func(io.Reader, io.Writer) bool
 	TerminalState terminal.TerminalState
-	LoginBrowser  app.LoginBrowserOpener
 	Accessible    bool
 }
 
-// Dispatcher parses explicit, non-interactive host commands.
 type Dispatcher struct {
 	dependencies Dependencies
 }
@@ -110,8 +110,6 @@ func NewDispatcher(dependencies Dependencies) *Dispatcher {
 	return &Dispatcher{dependencies: dependencies}
 }
 
-// Execute preserves the simple entry point used by callers that only need
-// dependency-free help and version commands.
 func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return NewDispatcher(Dependencies{}).Execute(ctx, args, stdout, stderr)
 }
@@ -133,9 +131,7 @@ func (dispatcher *Dispatcher) Execute(ctx context.Context, args []string, stdout
 			return usageError(stderr, "dsx", "help does not accept arguments")
 		}
 		return writeHelp(stdout, stderr)
-	case "version":
-		return executeVersion(args[1:], stdout, stderr)
-	case "--version":
+	case "version", "--version":
 		return executeVersion(args[1:], stdout, stderr)
 	case "inspect":
 		return dispatcher.executeInspect(ctx, args[1:], stdout, stderr)
@@ -143,30 +139,19 @@ func (dispatcher *Dispatcher) Execute(ctx context.Context, args []string, stdout
 		return dispatcher.executeDoctor(ctx, args[1:], stdout, stderr)
 	case "init":
 		return dispatcher.executeInit(ctx, args[1:], stdout, stderr)
-	case "start":
-		return dispatcher.executeStart(ctx, args[1:], stdout, stderr)
-	case "stop":
-		return dispatcher.executeStop(ctx, args[1:], stdout, stderr)
-	case "list", "ls":
-		return dispatcher.executeList(ctx, args[1:], stdout, stderr)
-	case "clean":
-		return dispatcher.executeClean(ctx, args[1:], stdout, stderr)
-	case "shell":
-		return dispatcher.executeShell(ctx, args[1:], stdout, stderr)
-	case "login":
-		return dispatcher.executeLogin(ctx, args[1:], stdout, stderr)
-	case "run":
-		return dispatcher.executeRun(ctx, args[1:], stdout, stderr)
+	case "workspace":
+		return dispatcher.executeWorkspace(ctx, args[1:], stdout, stderr)
+	case "agent":
+		return dispatcher.executeAgent(ctx, args[1:], stdout, stderr)
+	case "auth":
+		return dispatcher.executeAuth(ctx, args[1:], stdout, stderr)
 	case "git":
 		return dispatcher.executeGit(ctx, args[1:], stdout, stderr)
-	case "status":
-		return dispatcher.executeProcessStatus(ctx, args[1:], stdout, stderr)
-	case "logs":
-		return dispatcher.executeProcessLogs(ctx, args[1:], stdout, stderr)
 	default:
 		return usageError(stderr, "dsx", fmt.Sprintf("unknown command %q", args[0]))
 	}
 }
+
 func (dispatcher *Dispatcher) executeInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("init")
 	root := flags.String("root", ".", "project root")
@@ -176,11 +161,17 @@ func (dispatcher *Dispatcher) executeInit(ctx context.Context, args []string, st
 	if flags.NArg() != 0 {
 		return usageError(stderr, "dsx init", "init does not accept positional arguments")
 	}
+	if err := validateRoot(*root); err != nil {
+		return reportError(stderr, "dsx init", err)
+	}
 	return dispatcher.executeTUI(ctx, tui.RunRequest{Root: *root, ForceSetup: true}, stdout, stderr)
 }
 
 func (dispatcher *Dispatcher) executeTUI(ctx context.Context, request tui.RunRequest, stdout, stderr io.Writer) int {
 	request.Accessible = dispatcher.dependencies.Accessible
+	if request.LoadDashboard == nil {
+		request.LoadDashboard = dispatcher.loadDashboard
+	}
 	if !dispatcher.interactive(stdout) {
 		if request.ForceSetup {
 			return usageError(stderr, "dsx init", "init requires an interactive terminal")
@@ -189,12 +180,6 @@ func (dispatcher *Dispatcher) executeTUI(ctx context.Context, request tui.RunReq
 	}
 	if dispatcher == nil || dispatcher.dependencies.TUI == nil {
 		return reportError(stderr, "dsx", model.NewError(model.CodeUnavailable, "terminal UI is unavailable", nil))
-	}
-	if !request.ForceSetup && dispatcher.dependencies.Lifecycle != nil {
-		listed, err := dispatcher.dependencies.Lifecycle.List(ctx, app.ListRequest{Root: request.Root})
-		if err == nil {
-			request.Sandboxes = append([]app.SandboxSummary(nil), listed.Sandboxes...)
-		}
 	}
 	intent, found, err := dispatcher.dependencies.TUI.Run(ctx, request)
 	if err != nil {
@@ -238,10 +223,6 @@ func (dispatcher *Dispatcher) executeInspect(ctx context.Context, args []string,
 	flags := newFlagSet("inspect")
 	format := flags.String("format", "text", "output format: text or json")
 	root := flags.String("root", ".", "project root")
-	mode := flags.String("mode", string(model.ModeLive), "workspace mode: live or clone")
-	sandbox := flags.String("sandbox", "", "named clone sandbox")
-	agent := flags.String("agent", "", "agent harness")
-	browser := flags.Bool("browser", false, "enable isolated Playwright browser in the inspected plan")
 	if exit, done := parseFlags(flags, args, stdout, stderr, inspectHelp); done {
 		return exit
 	}
@@ -251,38 +232,13 @@ func (dispatcher *Dispatcher) executeInspect(ctx context.Context, args []string,
 	if err := validateFormat(*format); err != nil {
 		return reportError(stderr, "dsx inspect", err)
 	}
-	parsedMode, err := model.ParseWorkspaceMode(*mode)
-	if err != nil {
-		return usageError(stderr, "dsx inspect", err.Error())
-	}
-	if *agent != "" {
-		if _, err := harness.ParseName(*agent); err != nil {
-			return usageError(stderr, "dsx inspect", err.Error())
-		}
-	}
-	if parsedMode == model.ModeClone {
-		parsedSandbox, err := model.ParseSandboxName(*sandbox)
-		if err != nil || parsedSandbox == model.SandboxName("main") {
-			return usageError(stderr, "dsx inspect", "--mode clone requires a named --sandbox other than main")
-		}
-	} else if *sandbox != "" && *sandbox != "main" {
-		return usageError(stderr, "dsx inspect", "--sandbox is only available with --mode clone")
+	if err := validateRoot(*root); err != nil {
+		return reportError(stderr, "dsx inspect", err)
 	}
 	if dispatcher == nil || dispatcher.dependencies.Inspector == nil {
 		return reportError(stderr, "dsx inspect", model.NewError(model.CodeUnavailable, "inspection service is unavailable", nil))
 	}
-
-	var browserOverride *bool
-	if *browser {
-		enabled := true
-		browserOverride = &enabled
-	}
-	result, err := dispatcher.dependencies.Inspector.Inspect(ctx, app.InspectRequest{
-		Root:         *root,
-		Mode:         string(parsedMode),
-		SandboxName:  *sandbox,
-		CLIOverrides: app.CLIOverrides{Agent: *agent, Browser: browserOverride},
-	})
+	result, err := dispatcher.dependencies.Inspector.Inspect(ctx, app.InspectRequest{Root: *root})
 	if err != nil {
 		_ = renderDiagnostics(stderr, result.Diagnostics)
 		return reportError(stderr, "dsx inspect", err)
@@ -314,7 +270,6 @@ func (dispatcher *Dispatcher) executeDoctor(ctx context.Context, args []string, 
 	if dispatcher == nil || dispatcher.dependencies.Doctor == nil {
 		return reportError(stderr, "dsx doctor", model.NewError(model.CodeUnavailable, "doctor service is unavailable", nil))
 	}
-
 	result, err := dispatcher.dependencies.Doctor.Doctor(ctx, app.DoctorRequest{RequireBuilder: *requireBuilder})
 	if err != nil {
 		_ = renderDiagnostics(stderr, result.Diagnostics)
