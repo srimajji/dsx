@@ -168,6 +168,28 @@ func (lock *guestHelperCacheLock) release() {
 	}
 }
 
+func validateGuestHelperSource(source runtime.HostPath) error {
+	name := string(source)
+	if name == "" || !filepath.IsAbs(name) || filepath.Clean(name) != name {
+		return errors.New("guest helper source must be a clean absolute path")
+	}
+	resolved, err := filepath.EvalSymlinks(name)
+	if err != nil {
+		return err
+	}
+	if resolved != name {
+		return errors.New("guest helper source must not contain symlinks")
+	}
+	info, err := os.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("guest helper source type or mode is unsafe")
+	}
+	return nil
+}
+
 func validateGuestHelperMountSource(source runtime.HostPath) error {
 	if err := validateGuestHelperSource(source); err != nil {
 		return err

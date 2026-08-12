@@ -62,15 +62,16 @@ func ad(t *testing.T, r Runner) *Adapter {
 	}
 	return a
 }
-func oi(t *testing.T, k runtime.ResourceKind, role string) ownership.Identity {
-	p, _ := model.ParseProjectID("abcdefghijklmnopqrst")
-	s, _ := model.ParseSandboxName("main")
-	u, _ := model.ParseRunID("01890f5c-7b00-7000-8000-000000000001")
-	i, e := ownership.NewIdentity(p, s, u, k, role)
-	if e != nil {
-		t.Fatal(e)
+func oi(t *testing.T, kind runtime.ResourceKind, role string) ownership.Identity {
+	root := "/Volumes/Dev/work/tracking-chrome-extension"
+	projectID, _ := model.NewProjectID(root)
+	workspace, _ := model.ParseWorkspaceName("feature-a")
+	runID, _ := model.ParseRunID("01890f5c-7b00-7000-8000-000000000001")
+	identity, err := ownership.NewIdentity(projectID, root, workspace, runID, kind, role)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return i
+	return identity
 }
 func nf(a []string, noun, name string) call {
 	return call{a: a, o: []byte("Error: " + noun + " not found: " + name), e: errors.New("exit 1"), c: 1}
@@ -187,9 +188,9 @@ func TestCreate(t *testing.T) {
 	p := uint16(8080)
 	a := []string{
 		"create", "--name", i.Name(), "--user", "1000", "--workdir", "/workspace",
-		"--mount", "type=bind,source=/Volumes/Dev/project,target=/workspace,readonly",
+		"--mount", "type=volume,source=workspace,target=/workspace",
 		"--mount", "type=volume,source=cache,target=/cache",
-		"--network", "dsx-abcdefghijklmnopqrst-main-network",
+		"--network", "dsx-tracking-chrome-feature-a-network-1abbf9",
 		"--publish", "127.0.0.1:8080:3000/tcp",
 	}
 	a = labelArgs(a, i.Labels())
@@ -203,10 +204,10 @@ func TestCreate(t *testing.T) {
 		Name: i.Name(), Image: runtime.Image{Reference: "image:tag", Digest: "sha256:" + strings.Repeat("a", 64), Local: true},
 		Entrypoint: []string{"/guest"}, WorkingDir: "/workspace", User: "1000",
 		Mounts: []runtime.Mount{
-			{Source: "/Volumes/Dev/project", Target: "/workspace", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityRepository},
+			{Source: "workspace", Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume},
 			{Source: "cache", Target: "/cache", Type: "volume", Authority: runtime.MountAuthorityVolume},
 		},
-		Networks: []string{"dsx-abcdefghijklmnopqrst-main-network"},
+		Networks: []string{"dsx-tracking-chrome-feature-a-network-1abbf9"},
 		Ports:    []runtime.PortRequest{{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: &p, GuestPort: 3000, Protocol: "tcp"}},
 		Labels:   i.Labels(),
 	}
@@ -237,14 +238,80 @@ func TestCreate(t *testing.T) {
 	}
 	s.Ports[0].HostIP = netip.MustParseAddr("127.0.0.1")
 	s.Ports[0].HostPort = nil
-	if _, e := ad(t, &cr{t: t}).CreateWorkspace(context.Background(), s); e == nil {
-		t.Fatal("dynamic accepted")
+	if _, e := validWorkspace(s); e != nil {
+		t.Fatalf("dynamic loopback port rejected: %v", e)
 	}
+	s.Ports[0].HostPort = &p
 	s.User = "root"
 	if _, e := ad(t, &cr{t: t}).CreateWorkspace(context.Background(), s); e == nil {
 		t.Fatal("root accepted")
 	}
 }
+func TestDynamicPortUsesExactStructuredArgument(t *testing.T) {
+	request := runtime.PortRequest{
+		HostIP: netip.MustParseAddr("127.0.0.1"), GuestPort: 3000, Protocol: "tcp",
+	}
+	if got, want := portArg(request), "127.0.0.1::3000/tcp"; got != want {
+		t.Fatalf("portArg() = %q, want %q", got, want)
+	}
+}
+func TestCreateAuthLoginUsesProjectScopedIsolatedSpecAndExactArgv(t *testing.T) {
+	root := "/Volumes/Dev/work/tracking-chrome-extension"
+	projectID, _ := model.NewProjectID(root)
+	runID, _ := model.ParseRunID("01890f5c-7b00-7000-8000-000000000001")
+	labels, err := runtime.AuthLoginOwnershipLabels(projectID, runID, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _ := runtime.CanonicalAuthLoginName(root, "codex")
+	digest := "sha256:" + strings.Repeat("a", 64)
+	volumeFixture, _ := json.Marshal([]any{map[string]any{
+		"id": name, "configuration": map[string]any{"name": name, "labels": labelMap(labels)},
+	}})
+	containerFixture, _ := json.Marshal([]any{map[string]any{
+		"configuration": map[string]any{
+			"id": name, "labels": labelMap(labels),
+			"image":    map[string]any{"descriptor": map[string]any{"digest": digest}},
+			"mounts":   []any{map[string]any{"type": "volume", "source": name, "destination": "/auth", "options": []string{}}},
+			"networks": []any{}, "publishedPorts": []any{},
+		},
+		"status": map[string]any{"state": "stopped", "networks": []any{}},
+	}})
+	volumeArgs := labelArgs([]string{"volume", "create"}, labels)
+	volumeArgs = append(volumeArgs, name)
+	spec := runtime.AuthLoginSpec{
+		Name: name, CanonicalRoot: root, Harness: "codex",
+		Image:      runtime.Image{Reference: "image:test@" + digest, Digest: digest},
+		Entrypoint: []string{"/usr/bin/codex", "login"}, Env: []string{"TERM=xterm"},
+		WorkingDir: "/tmp", User: "1000:1000",
+		AuthVolume: runtime.Mount{Source: name, Target: "/auth", Type: "volume", Authority: runtime.MountAuthorityVolume},
+		Labels:     labels,
+	}
+	createArgs := []string{"create", "--name", name, "--user", "1000:1000", "--workdir", "/tmp", "--env", "TERM=xterm", "--mount", "type=volume,source=" + name + ",target=/auth"}
+	createArgs = labelArgs(createArgs, labels)
+	createArgs = append(createArgs, "--entrypoint", "/usr/bin/codex", "image:test@"+digest, "login")
+	runner := &cr{t: t, q: []call{
+		{a: volumeArgs, o: []byte(name + "\n")},
+		{a: []string{"volume", "inspect", name}, o: volumeFixture},
+		{a: createArgs, o: []byte(name + "\n")},
+		{a: []string{"inspect", name}, o: containerFixture},
+	}}
+	adapter := ad(t, runner)
+	if _, err := adapter.CreateAuthLoginVolume(context.Background(), runtime.AuthLoginVolumeSpec{Name: name, CanonicalRoot: root, Harness: "codex", Labels: labels}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.CreateAuthLogin(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	runner.done()
+
+	hostMount := spec
+	hostMount.AuthVolume = runtime.Mount{Source: "/Users/developer", Target: "/auth", Type: "bind", Authority: runtime.MountAuthorityVolume}
+	if err := validAuthLogin(hostMount); err == nil {
+		t.Fatal("auth login accepted host source/home mount")
+	}
+}
+
 func TestCreateBrowserUsesExactIsolatedArgv(t *testing.T) {
 	spec := browserSpec(t)
 	args := []string{
@@ -355,7 +422,7 @@ func TestCreateBrowserEnforcesInspectPostconditions(t *testing.T) {
 			return replaceFixture(t, f(t, "browser-inspect-1.2.2.json"), `"publishedPorts": []`, `"publishedPorts": [{"hostAddress":"127.0.0.1","hostPort":8931,"containerPort":8931,"proto":"tcp","count":1}]`)
 		}},
 		{"network", func(t *testing.T) []byte {
-			return bytes.ReplaceAll(f(t, "browser-inspect-1.2.2.json"), []byte("dsx-abcdefghijklmnopqrst-main-network"), []byte("foreign-network"))
+			return bytes.ReplaceAll(f(t, "browser-inspect-1.2.2.json"), []byte("dsx-tracking-chrome-feature-a-network-1abbf9"), []byte("foreign-network"))
 		}},
 		{"image", func(t *testing.T) []byte {
 			return replaceFixture(t, f(t, "browser-inspect-1.2.2.json"), `"digest": "sha256:`+strings.Repeat("a", 64)+`"`, `"digest": "sha256:`+strings.Repeat("b", 64)+`"`)
@@ -385,7 +452,7 @@ func TestDecodeContainerNetworkAddresses(t *testing.T) {
 	if err != nil || len(snapshots) != 1 {
 		t.Fatalf("decodeContainers() count=%d error=%v", len(snapshots), err)
 	}
-	network := "dsx-abcdefghijklmnopqrst-main-network"
+	network := "dsx-tracking-chrome-feature-a-network-1abbf9"
 	want := map[string][]netip.Addr{
 		network: {
 			netip.MustParseAddr("192.168.64.5"),
@@ -407,12 +474,12 @@ func TestDecodeContainerNetworkAddresses(t *testing.T) {
 			return replaceFixture(t, f(t, "browser-inspect-1.2.2.json"), `"ipv4Address":"192.168.64.5/24"`, `"ipv4Address":"fdb1:370c:1cb4:c412::5/64"`)
 		}},
 		{"unknown status network", func(t *testing.T) []byte {
-			return replaceFixture(t, f(t, "browser-inspect-1.2.2.json"), `"network":"dsx-abcdefghijklmnopqrst-main-network",`+"\n"+`        "variant"`, `"network":"foreign-network",`+"\n"+`        "variant"`)
+			return replaceFixture(t, f(t, "browser-inspect-1.2.2.json"), `"network":"dsx-tracking-chrome-feature-a-network-1abbf9",`+"\n"+`        "variant"`, `"network":"foreign-network",`+"\n"+`        "variant"`)
 		}},
 		{"duplicate status network", ambiguousBrowserInspect},
 		{"duplicate address across networks", duplicateNetworkAddressInspect},
 		{"duplicate configured network", func(t *testing.T) []byte {
-			return replaceFixture(t, f(t, "browser-inspect-1.2.2.json"), `[{"network":"dsx-abcdefghijklmnopqrst-main-network","options":{"hostname":"browser"}}]`, `[{"network":"dsx-abcdefghijklmnopqrst-main-network"},{"network":"dsx-abcdefghijklmnopqrst-main-network"}]`)
+			return replaceFixture(t, f(t, "browser-inspect-1.2.2.json"), `[{"network":"dsx-tracking-chrome-feature-a-network-1abbf9","options":{"hostname":"browser"}}]`, `[{"network":"dsx-tracking-chrome-feature-a-network-1abbf9"},{"network":"dsx-tracking-chrome-feature-a-network-1abbf9"}]`)
 		}},
 	}
 	for _, test := range tests {
@@ -568,7 +635,7 @@ func TestCopy(t *testing.T) {
 	r.done()
 }
 func TestInspect(t *testing.T) {
-	id := "dsx-abcdefghijklmnopqrst-main-workspace"
+	id := "dsx-tracking-chrome-feature-a-workspace-1abbf9"
 	r := &cr{t: t, q: []call{{a: []string{"inspect", id}, o: f(t, "container-inspect-1.2.2.json")}}}
 	s, e := ad(t, r).Inspect(context.Background(), runtime.ResourceID(id))
 	if e != nil || len(s.Mounts) != 2 || len(s.Networks) != 1 || len(s.Ports) != 1 || len(s.Labels) != 7 || len(s.NetworkAddresses[s.Networks[0]]) != 2 {
@@ -640,97 +707,37 @@ func TestDelete(t *testing.T) {
 	}
 	mismatchRunner.done()
 }
-
-func TestWorkspaceRejectsSensitiveReadOnlyWritableHostAliases(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		source func(*testing.T, string) string
-	}{
-		{
-			name: "writable parent",
-			source: func(_ *testing.T, sensitive string) string {
-				return filepath.Dir(sensitive)
-			},
-		},
-		{
-			name: "writable descendant",
-			source: func(_ *testing.T, sensitive string) string {
-				return filepath.Join(sensitive, "credentials")
-			},
-		},
-		{
-			name: "symlink alias",
-			source: func(t *testing.T, sensitive string) string {
-				alias := filepath.Join(t.TempDir(), "aws-alias")
-				if err := os.Symlink(sensitive, alias); err != nil {
-					t.Fatal(err)
-				}
-				return alias
-			},
-		},
-		{
-			name: "same inode alias",
-			source: func(t *testing.T, sensitive string) string {
-				writable := t.TempDir()
-				if err := os.Link(filepath.Join(sensitive, "credentials"), filepath.Join(writable, "credentials-alias")); err != nil {
-					t.Fatal(err)
-				}
-				return writable
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			parent := t.TempDir()
-			sensitive := filepath.Join(parent, "aws")
-			if err := os.Mkdir(sensitive, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(sensitive, "config"), []byte("[profile default]\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(sensitive, "credentials"), []byte("credential-content-must-not-appear"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			spec := sensitiveWorkspaceSpec(t, sensitive, test.source(t, sensitive))
-			_, err := validWorkspace(spec)
-			if err == nil {
-				t.Fatal("accepted writable alias of sensitive read-only source")
-			}
-			if strings.Contains(err.Error(), "credential-content-must-not-appear") {
-				t.Fatalf("validation error exposed credential contents: %v", err)
-			}
-		})
+func TestLegacyWorkspaceIsCleanupOnlyAtRuntimeBoundary(t *testing.T) {
+	fixture, legacy := legacyWorkspaceFixture(t)
+	if err := ad(t, &cr{t: t}).StartWorkspace(context.Background(), legacy); err == nil || model.ErrorCodeOf(err) != model.CodeInvalidInput {
+		t.Fatalf("StartWorkspace(legacy) error = %v", err)
 	}
-}
-
-func TestWorkspaceAllowsDisjointWritableAndSensitiveReadOnlySources(t *testing.T) {
-	sensitive := t.TempDir()
-	if err := os.WriteFile(filepath.Join(sensitive, "config"), []byte("[profile default]\n"), 0o600); err != nil {
+	id := string(legacy.ID)
+	runner := &cr{t: t, q: []call{
+		{a: []string{"inspect", id}, o: fixture},
+		{a: []string{"delete", id}},
+		nf([]string{"inspect", id}, "container", id),
+	}}
+	if err := ad(t, runner).Delete(context.Background(), legacy); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sensitive, "credentials"), []byte("credential-content-must-not-appear"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := validWorkspace(sensitiveWorkspaceSpec(t, sensitive, t.TempDir())); err != nil {
-		t.Fatalf("disjoint writable and sensitive read-only sources rejected: %v", err)
-	}
+	runner.done()
 }
 
-func sensitiveWorkspaceSpec(t *testing.T, sensitive, writable string) runtime.WorkspaceSpec {
-	t.Helper()
-	identity := oi(t, runtime.ResourceWorkspace, "workspace")
-	return runtime.WorkspaceSpec{
-		Name:       identity.Name(),
-		Image:      runtime.Image{Reference: "image:tag", Digest: "sha256:" + strings.Repeat("a", 64)},
-		Entrypoint: []string{"/bin/true"},
-		WorkingDir: "/workspace",
-		User:       "1000",
-		Labels:     identity.Labels(),
-		Mounts: []runtime.Mount{
-			{Source: writable, Target: "/workspace", Type: "bind", Authority: runtime.MountAuthorityRepository},
-			{Source: sensitive, Target: "/run/dsx/aws", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityLeappMirror},
-		},
+func TestListRetainsUnlabelledDSXNamesAsAmbiguousCleanupCandidates(t *testing.T) {
+	fixture := []byte(`[
+		{"configuration":{"id":"dsx-legacy-name","labels":{}},"status":{"state":"stopped"}},
+		{"configuration":{"id":"foreign-name","labels":{}},"status":{"state":"stopped"}}
+	]`)
+	runner := &cr{t: t, q: []call{{a: []string{"list", "--all", "--format", "json"}, o: fixture}}}
+	resources, err := ad(t, runner).List(context.Background(), runtime.ResourceWorkspace)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(resources) != 1 || resources[0].Name != "dsx-legacy-name" || resources[0].Kind != "" {
+		t.Fatalf("cleanup candidates = %#v", resources)
+	}
+	runner.done()
 }
 
 func TestCreateRejectsHostileLabelPathAndPostcondition(t *testing.T) {
@@ -744,7 +751,7 @@ func TestCreateRejectsHostileLabelPathAndPostcondition(t *testing.T) {
 	spec := runtime.WorkspaceSpec{
 		Name: i.Name(), Image: runtime.Image{Reference: "image:tag", Digest: "sha256:" + strings.Repeat("a", 64)},
 		Entrypoint: []string{"/bin/true"}, WorkingDir: "/workspace", User: "1000", Labels: i.Labels(),
-		Mounts: []runtime.Mount{{Source: "/tmp/../etc", Target: "/workspace", Type: "bind", Authority: runtime.MountAuthorityRepository}},
+		Mounts: []runtime.Mount{{Source: "/tmp/../etc", Target: "/workspace", Type: "bind", Authority: runtime.MountAuthorityVolume}},
 	}
 	if _, err := a.CreateWorkspace(context.Background(), spec); err == nil {
 		t.Fatal("accepted unclean host path")
@@ -756,7 +763,7 @@ func TestCreateRejectsHostileLabelPathAndPostcondition(t *testing.T) {
 
 func TestInspectDoesNotTreatOperationalNotFoundTextAsAbsence(t *testing.T) {
 
-	id := runtime.ResourceID("dsx-abcdefghijklmnopqrst-main-workspace")
+	id := runtime.ResourceID("dsx-tracking-chrome-feature-a-workspace-1abbf9")
 	runner := &cr{t: t, q: []call{{a: []string{"inspect", string(id)}, o: []byte("Error: runtime socket not found"), e: errors.New("exit 1"), c: 1}}}
 	_, err := ad(t, runner).Inspect(context.Background(), id)
 	if err == nil || errors.Is(err, runtime.ErrResourceNotFound) || model.ErrorCodeOf(err) != model.CodeUnavailable {
@@ -830,6 +837,7 @@ func TestWorkspaceAllowsOnlyPinnedRootGuestSupervisor(t *testing.T) {
 	spec := runtime.WorkspaceSpec{
 		Name: identity.Name(), Image: runtime.Image{Reference: "image:tag", Digest: "sha256:" + strings.Repeat("a", 64)},
 		Entrypoint: []string{"/bin/true"}, WorkingDir: "/workspace", User: "0:0", Labels: identity.Labels(),
+		Networks: []string{oi(t, runtime.ResourceNetwork, "network").Name()},
 	}
 	spec.User = "0:0"
 	if _, err := validWorkspace(spec); err == nil {
@@ -840,7 +848,10 @@ func TestWorkspaceAllowsOnlyPinnedRootGuestSupervisor(t *testing.T) {
 		"--socket", "/run/dsx/control.sock",
 		"--child-uid", "501", "--child-gid", "20",
 	}
-	spec.Mounts = []runtime.Mount{{Source: helperRoot, Target: "/usr/local/libexec/dsx", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityGuestHelper}}
+	spec.Mounts = []runtime.Mount{
+		{Source: helperRoot, Target: "/usr/local/libexec/dsx", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityGuestHelper},
+		{Source: "dsx-owned-workspace", Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume},
+	}
 	if _, err := validWorkspace(spec); err != nil {
 		t.Fatalf("pinned root supervisor rejected: %v", err)
 	}
@@ -849,104 +860,130 @@ func TestWorkspaceAllowsOnlyPinnedRootGuestSupervisor(t *testing.T) {
 		t.Fatalf("guest helper serialization = %q, %v", argument, err)
 	}
 	spec.Entrypoint = append(spec.Entrypoint, "--initialize-workspace", "/workspace")
-	spec.Mounts = append(spec.Mounts, runtime.Mount{Source: "dsx-owned-workspace", Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityInternal})
 	if _, err := validWorkspace(spec); err != nil {
 		t.Fatalf("owned-volume root supervisor rejected: %v", err)
 	}
-	spec.Mounts[len(spec.Mounts)-1] = runtime.Mount{Source: "/tmp/project", Target: "/workspace", Type: "bind", Authority: runtime.MountAuthorityRepository}
+	spec.Mounts[len(spec.Mounts)-1] = runtime.Mount{Source: "/tmp/project", Target: "/workspace", Type: "bind", Authority: runtime.MountAuthorityVolume}
 	if _, err := validWorkspace(spec); err == nil {
 		t.Fatal("host-mounted workspace initialization was accepted")
 	}
-	spec.Mounts = spec.Mounts[:1]
+	spec.Mounts[len(spec.Mounts)-1] = runtime.Mount{Source: "dsx-owned-workspace", Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume}
 	spec.Entrypoint = spec.Entrypoint[:8]
-	spec.Mounts = append(spec.Mounts, runtime.Mount{Source: "/tmp/hostile", Target: "/usr/local/libexec/dsx/dsx-guest", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityConfiguredHost})
+	spec.Mounts = append(spec.Mounts, runtime.Mount{Source: "/tmp/hostile", Target: "/usr/local/libexec/dsx/dsx-guest", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityVolume})
 	if _, err := validWorkspace(spec); err == nil {
 		t.Fatal("nested helper replacement mount was accepted")
 	}
 
-	spec.Mounts = spec.Mounts[:1]
+	spec.Mounts = spec.Mounts[:2]
 	spec.Entrypoint[2] = "--other"
 	if _, err := validWorkspace(spec); err == nil {
 		t.Fatal("modified root supervisor authority was accepted")
 	}
 }
-func TestHostMountPathRejectsRuntimeSocketAncestors(t *testing.T) {
+func TestWorkspaceAllowsOnlyNarrowReviewedHostMountOutsideSourceAndHome(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectRoot := filepath.Join(base, "project")
+	reviewedSource := filepath.Join(base, "reviewed")
+	if err := os.MkdirAll(projectRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(reviewedSource, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectID, _ := model.NewProjectID(projectRoot)
+	workspace, _ := model.ParseWorkspaceName("feature-a")
+	runID, _ := model.ParseRunID("01890f5c-7b00-7000-8000-000000000001")
+	workspaceOwner, _ := ownership.NewIdentity(projectID, projectRoot, workspace, runID, runtime.ResourceWorkspace, "workspace")
+	networkOwner, _ := ownership.NewIdentity(projectID, projectRoot, workspace, runID, runtime.ResourceNetwork, "network")
+	volumeOwner, _ := ownership.NewIdentity(projectID, projectRoot, workspace, runID, runtime.ResourceVolume, "source")
+	spec := runtime.WorkspaceSpec{
+		Name: workspaceOwner.Name(), CanonicalRoot: runtime.HostPath(projectRoot),
+		Image:      runtime.Image{Reference: "image:test", Digest: "sha256:" + strings.Repeat("a", 64)},
+		Entrypoint: []string{"/bin/true"}, WorkingDir: "/workspace", User: "1000:1000",
+		Mounts: []runtime.Mount{
+			{Source: volumeOwner.Name(), Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume},
+			{Source: reviewedSource, Target: "/reviewed", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityReviewedHost},
+		},
+		Networks: []string{networkOwner.Name()}, Labels: workspaceOwner.Labels(),
+	}
+	if _, err := validWorkspace(spec); err != nil {
+		t.Fatalf("reviewed host mount rejected: %v", err)
+	}
+	if argument, err := mountArg(spec.Mounts[1]); err != nil || argument != "type=bind,source="+reviewedSource+",target=/reviewed,readonly" {
+		t.Fatalf("reviewed mount serialization = %q, %v", argument, err)
+	}
+
+	unsafe := spec
+	unsafe.Mounts = append([]runtime.Mount(nil), spec.Mounts...)
+	unsafe.Mounts[1].Source = projectRoot
+	if _, err := validWorkspace(unsafe); err == nil {
+		t.Fatal("reviewed host mount accepted project source root")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsafe = spec
+	unsafe.Mounts = append([]runtime.Mount(nil), spec.Mounts...)
+	unsafe.Mounts[1].Source = canonicalHome
+	if _, err := validWorkspace(unsafe); err == nil {
+		t.Fatal("reviewed host mount accepted host home")
+	}
+	unsafe = spec
+	unsafe.Mounts = append([]runtime.Mount(nil), spec.Mounts...)
+	unsafe.Mounts[1].Target = "/workspace/reviewed"
+	if _, err := validWorkspace(unsafe); err == nil {
+		t.Fatal("reviewed host mount accepted protected workspace target")
+	}
+	link := filepath.Join(base, "reviewed-link")
+	if err := os.Symlink(reviewedSource, link); err != nil {
+		t.Fatal(err)
+	}
+	unsafe = spec
+	unsafe.Mounts = append([]runtime.Mount(nil), spec.Mounts...)
+	unsafe.Mounts[1].Source = link
+	if _, err := validWorkspace(unsafe); err == nil {
+		t.Fatal("reviewed host mount accepted symlink source")
+	}
+}
+
+func TestWorkspaceMountsRejectAllHostSourceAndHomePaths(t *testing.T) {
 	for _, source := range []string{
-		"/private",
-		"/private/var",
-		"/private/var/run",
-		"/private/tmp",
-		"/var",
-		"/var/run",
-		"/run",
-		"/tmp",
-		"/usr/local/libexec",
+		"/Volumes/Dev/project",
+		"/Users/dsx",
+		"/Users/dsx/project",
+		"/home/dsx",
+		"/root",
+		"/private/tmp/dsx-source",
 	} {
-		if err := hostMountPath(runtime.HostPath(source)); err == nil {
-			t.Errorf("hostMountPath(%q) accepted runtime/control overlap", source)
+		mount := runtime.Mount{
+			Source: source, Target: "/workspace", Type: "bind",
+			Authority: runtime.MountAuthorityVolume,
 		}
-		if _, err := mountArg(runtime.Mount{Source: source, Target: "/reviewed", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityConfiguredHost}); err == nil {
-			t.Errorf("mountArg(%q) accepted runtime/control overlap", source)
+		if _, err := mountArg(mount); err == nil {
+			t.Errorf("mountArg(%q) accepted a host source or home path", source)
 		}
-	}
-	if err := hostMountPath("/Volumes/Dev/project/data"); err != nil {
-		t.Fatalf("safe host mount rejected: %v", err)
 	}
 }
 
-func TestMountAuthorityKeepsUsersSourcesScoped(t *testing.T) {
-	repository := runtime.Mount{
-		Source:    "/Users/dsx/project",
-		Target:    "/workspace",
-		Type:      "bind",
-		Authority: runtime.MountAuthorityRepository,
-	}
-	if argument, err := mountArg(repository); err != nil || argument != "type=bind,source=/Users/dsx/project,target=/workspace" {
-		t.Fatalf("approved repository serialization = %q, %v", argument, err)
-	}
-
-	leapp := runtime.Mount{
-		Source:    "/Users/dsx/Library/Application Support/dsx/leapp/project/run/mirror",
-		Target:    "/run/dsx/aws",
-		Type:      "bind",
-		ReadOnly:  true,
-		Authority: runtime.MountAuthorityLeappMirror,
-	}
-	if _, err := mountArg(leapp); err != nil {
-		t.Fatalf("DSX Leapp mirror serialization failed: %v", err)
-	}
-
-	optional := runtime.Mount{
-		Source:    "/Users/dsx/reviewed",
-		Target:    "/reviewed",
-		Type:      "bind",
-		ReadOnly:  true,
-		Authority: runtime.MountAuthorityConfiguredHost,
-	}
-	if _, err := mountArg(optional); err == nil {
-		t.Fatal("optional /Users mount was accepted")
-	}
-
-	repository.Source = "/Users/dsx"
-	if _, err := mountArg(repository); err == nil {
-		t.Fatal("complete home was accepted as a repository")
-	}
-}
-
-func TestMountAuthorityRejectsWrongSourcePairingAndMissingAuthority(t *testing.T) {
-	tests := []runtime.Mount{
-		{Source: "/Users/dsx/project", Target: "/reviewed", Type: "bind", Authority: runtime.MountAuthorityRepository},
-		{Source: "/Users/dsx/Library/Application Support/dsx/leapp/mirror", Target: "/workspace", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityLeappMirror},
-		{Source: "cache", Target: "/cache", Type: "volume", Authority: runtime.MountAuthorityRepository},
+func TestMountAuthorityAllowsOnlyVolumesAndPinnedGuestHelper(t *testing.T) {
+	for _, mount := range []runtime.Mount{
 		{Source: "/Volumes/Dev/reviewed", Target: "/reviewed", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityVolume},
 		{Source: "/Volumes/Dev/reviewed", Target: "/reviewed", Type: "bind", ReadOnly: true},
-	}
-	for _, mount := range tests {
+		{Source: "cache", Target: "/cache", Type: "volume"},
+		{Source: "cache", Target: "/usr/local/libexec/dsx", Type: "volume", Authority: runtime.MountAuthorityGuestHelper},
+	} {
 		if _, err := mountArg(mount); err == nil {
 			t.Errorf("mountArg(%#v) accepted wrong authority/source pairing", mount)
 		}
 	}
-
 	volume := runtime.Mount{Source: "cache", Target: "/cache", Type: "volume", Authority: runtime.MountAuthorityVolume}
 	if argument, err := mountArg(volume); err != nil || argument != "type=volume,source=cache,target=/cache" {
 		t.Fatalf("volume serialization = %q, %v", argument, err)
@@ -1011,6 +1048,7 @@ func ambiguousBrowserInspect(t *testing.T) []byte {
 	if err := json.Unmarshal(f(t, "browser-inspect-1.2.2.json"), &containers); err != nil || len(containers) != 1 || len(containers[0].Status.Networks) != 1 {
 		t.Fatalf("decode browser fixture for mutation: count=%d error=%v", len(containers), err)
 	}
+
 	containers[0].Status.Networks = append(containers[0].Status.Networks, containers[0].Status.Networks[0])
 	output, err := json.Marshal(containers)
 	if err != nil {
@@ -1051,4 +1089,25 @@ func expectedBrowser(t *testing.T) runtime.ResourceSnapshot {
 		t.Fatalf("decode expected browser: count=%d err=%v", len(snapshots), err)
 	}
 	return snapshots[0]
+}
+
+func legacyWorkspaceFixture(t *testing.T) ([]byte, runtime.ResourceSnapshot) {
+	t.Helper()
+	currentName := "dsx-tracking-chrome-feature-a-workspace-1abbf9"
+	legacyName := "dsx-dk57swfmuu5gpt6knms5-feature-a-workspace"
+	fixture := bytes.ReplaceAll(f(t, "container-inspect-1.2.2.json"), []byte(currentName), []byte(legacyName))
+	fixture = bytes.ReplaceAll(fixture, []byte(`"dsx.ownership/v2"`), []byte(`"dsx.ownership/v1"`))
+	fixture = bytes.ReplaceAll(fixture, []byte(`"dev.dsx.workspace"`), []byte(`"dev.dsx.sandbox"`))
+	snapshots, err := decodeContainers(fixture)
+	if err != nil || len(snapshots) != 1 {
+		t.Fatalf("decode legacy fixture: count=%d err=%v", len(snapshots), err)
+	}
+	return fixture, snapshots[0]
+}
+func labelMap(labels []runtime.Label) map[string]string {
+	result := make(map[string]string, len(labels))
+	for _, label := range labels {
+		result[label.Key] = label.Value
+	}
+	return result
 }

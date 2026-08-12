@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,10 +9,7 @@ import (
 
 	"github.com/srimajji/dsx/internal/buildinfo"
 	projectinspect "github.com/srimajji/dsx/internal/inspect"
-	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
-	"github.com/srimajji/dsx/internal/ports"
-	"github.com/srimajji/dsx/internal/runtime"
 )
 
 func TestInspectConfiguredProjectBuildsHashedPlan(t *testing.T) {
@@ -27,8 +23,7 @@ func TestInspectConfiguredProjectBuildsHashedPlan(t *testing.T) {
   "schemaVersion": 1,
   "workspace": {"root": "."},
   "image": {"ref": "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-  "agents": {"default": "codex", "allowed": ["codex"]},
-  "browser": {"enabled": true}
+  "agents": {"default": "codex", "allowed": ["codex"]}
 }
 `
 	if err := os.WriteFile(filepath.Join(configDirectory, "config.jsonc"), []byte(configuration), 0o600); err != nil {
@@ -45,13 +40,13 @@ func TestInspectConfiguredProjectBuildsHashedPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect: %v, diagnostics: %#v", err, result.Diagnostics)
 	}
-	if !result.Facts.ConfigExists || result.Plan.Image.Reference == "" || result.Plan.Agent != "codex" {
+	if !result.Facts.ConfigExists || result.Plan.Image.Reference == "" || result.Plan.Agents.Default != "codex" {
 		t.Fatalf("incomplete result: %#v", result)
 	}
-	if len(result.Plan.ExecutableHash) != 64 || result.Plan.Provenance["/agent"].Kind != "project" {
+	if len(result.Plan.ExecutableHash) != 64 || result.Plan.Provenance["/agents/default"].Kind != "project" {
 		t.Fatalf("hash/provenance missing: %#v", result.Plan)
 	}
-	if result.Plan.Browser == nil || !result.Plan.Browser.Enabled || result.Plan.Browser.ImageReference != standardBrowserImageReference || result.Plan.Browser.ImageDigest != standardBrowserImageDigest {
+	if result.Plan.Browser == nil || result.Plan.Browser.ImageReference != standardBrowserImageReference || result.Plan.Browser.ImageDigest != standardBrowserImageDigest {
 		t.Fatalf("browser authority missing: %#v", result.Plan.Browser)
 	}
 }
@@ -84,79 +79,6 @@ func TestBrowserImageAuthorityUsesPublishedReleasePinAndFailsClosed(t *testing.T
 	}
 }
 
-func TestInspectClonePortResolutionIsDynamicAndHashed(t *testing.T) {
-	root := t.TempDir()
-	configDirectory := filepath.Join(root, ".dsx")
-	if err := os.Mkdir(configDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	configuration := `{
-  "schemaVersion": 1,
-  "workspace": {"root": "."},
-  "image": {"ref": "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-  "ports": [{"name": "web", "guest": 3000, "host": 3100, "protocol": "tcp", "bind": "127.0.0.1"}]
-}`
-	if err := os.WriteFile(filepath.Join(configDirectory, "config.jsonc"), []byte(configuration), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	service := NewInspectionServiceWithDependencies(InspectionDependencies{
-		InspectProject: func(string) (projectinspect.Facts, error) {
-			return projectinspect.Facts{WorkspaceRoot: root, GitRoots: []string{"."}}, nil
-		},
-		Resolver: plan.NewResolver(),
-	})
-	first, err := service.Inspect(context.Background(), InspectRequest{Root: root, Mode: string(model.ModeClone), SandboxName: "first"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := service.Inspect(context.Background(), InspectRequest{Root: root, Mode: string(model.ModeClone), SandboxName: "second"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, result := range map[string]InspectResult{"first": first, "second": second} {
-		if len(result.Plan.Ports) != 1 || result.Plan.Ports[0].HostPort != nil || result.Plan.Ports[0].GuestPort != 3000 || result.Plan.Ports[0].Protocol != "tcp" || result.Plan.Ports[0].HostIP.String() != "127.0.0.1" {
-			t.Fatalf("%s clone inspection port = %#v", name, result.Plan.Ports)
-		}
-	}
-	if first.Plan.ExecutableHash != second.Plan.ExecutableHash {
-		t.Fatal("sandbox display identity unexpectedly changed executable approval hash")
-	}
-
-	capabilities := runtime.Capabilities{FixedPublication: true, MachineReadableInspection: true}
-	firstPublication, err := ports.Plan(first.Plan.Ports, capabilities)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer firstPublication.Abort()
-	secondPublication, err := ports.Plan(second.Plan.Ports, capabilities)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer secondPublication.Abort()
-	firstRequests, err := firstPublication.RequestedBindings()
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondRequests, err := secondPublication.RequestedBindings()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if firstRequests[0].HostPort == nil || secondRequests[0].HostPort == nil || *firstRequests[0].HostPort == *secondRequests[0].HostPort {
-		t.Fatalf("clone publications cannot coexist: first=%#v second=%#v", firstRequests, secondRequests)
-	}
-
-	live, err := service.Inspect(context.Background(), InspectRequest{Root: root, Mode: string(model.ModeLive), SandboxName: "main"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if live.Plan.Ports[0].HostPort == nil || *live.Plan.Ports[0].HostPort != 3100 {
-		t.Fatalf("live inspection did not preserve fixed host port: %#v", live.Plan.Ports)
-	}
-	if live.Plan.ExecutableHash == first.Plan.ExecutableHash {
-		t.Fatal("clone dynamic port transformation is absent from inspection hash")
-	}
-}
-
 func TestInspectWithoutConfigDoesNotInventPlan(t *testing.T) {
 	root := t.TempDir()
 	service := NewInspectionServiceWithDependencies(InspectionDependencies{
@@ -185,7 +107,8 @@ func TestHashBuildInputBytesChangePlan(t *testing.T) {
 	configuration := []byte(`{
   "schemaVersion": 1,
   "workspace": {"root": "."},
-  "image": {"build": {"context": ".", "file": "Dockerfile"}}
+  "image": {"build": {"context": ".", "file": "Dockerfile"}},
+  "agents": {"default": "codex", "allowed": ["codex"]}
 }`)
 	if err := os.WriteFile(filepath.Join(root, ".dsx", "config.jsonc"), configuration, 0o600); err != nil {
 		t.Fatal(err)
@@ -223,45 +146,6 @@ func TestHashBuildInputBytesChangePlan(t *testing.T) {
 	}
 }
 
-func TestHostMountSymlinkSwapRefused(t *testing.T) {
-	root := t.TempDir()
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mountPath := filepath.Join(canonicalRoot, "reviewed")
-	if err := os.Mkdir(mountPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	rendered := []byte(fmt.Sprintf(`{
-  "schemaVersion": 1,
-  "workspace": {"root": "."},
-  "image": {"ref": "example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-  "mounts": [{"source": {"type": "host", "path": %q}, "target": "/reviewed", "readOnly": true}]
-}`, mountPath))
-	service := NewSetupService(NewInspectionService(plan.NewResolver()), nil, nil)
-	first, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: canonicalRoot, RenderedConfig: rendered})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(first.Plan.Mounts) != 1 || first.Plan.Mounts[0].Source != mountPath || first.Plan.Mounts[0].SourceIdentity == "" {
-		t.Fatalf("host mount authority missing from plan: %#v", first.Plan.Mounts)
-	}
-	original := mountPath + ".original"
-	if err := os.Rename(mountPath, original); err != nil {
-		t.Fatal(err)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(home, mountPath); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.PreviewSetup(context.Background(), SetupPreviewRequest{Root: canonicalRoot, RenderedConfig: rendered}); err == nil || !strings.Contains(err.Error(), "symlink") {
-		t.Fatalf("post-preview symlink swap error = %v, want refusal", err)
-	}
-}
 func TestResolveHostMountRejectsNonstandardCurrentHome(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

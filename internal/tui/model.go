@@ -17,9 +17,7 @@ import (
 	"github.com/srimajji/dsx/internal/app"
 	"github.com/srimajji/dsx/internal/config"
 	"github.com/srimajji/dsx/internal/harness"
-	modelpkg "github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
-	"github.com/srimajji/dsx/internal/runtime"
 	"github.com/srimajji/dsx/internal/terminal"
 )
 
@@ -31,25 +29,10 @@ var errSetupReviewTooLarge = errors.New("complete setup review exceeds the safe 
 // perform lifecycle transitions themselves.
 type Application interface {
 	BareState(context.Context, app.BareStateRequest) (app.BareState, error)
-	StartContainerSystem(context.Context) error
 	PreviewSetup(context.Context, app.SetupPreviewRequest) (app.SetupPreview, error)
-	PreviewExisting(context.Context, app.BareStateRequest) (app.SetupPreview, error)
-	PreviewClone(context.Context, app.ClonePreviewRequest) (app.SetupPreview, error)
 	Initialize(context.Context, app.InitializeRequest) (app.InitializeResult, error)
 	ApproveExisting(context.Context, app.InitializeRequest) (app.InitializeResult, error)
 	UpdateExisting(context.Context, app.InitializeRequest) (app.InitializeResult, error)
-}
-
-type Intent struct {
-	Action        string
-	Project       string
-	Sandbox       string
-	Repository    string
-	Agent         string
-	Profile       string
-	Prompt        string
-	Browser       bool
-	ApproveConfig string
 }
 
 type setupStage int
@@ -66,16 +49,12 @@ type SetupModel struct {
 	application         Application
 	root                string
 	form                *huh.Form
-	customForm          *huh.Form
 	stage               setupStage
 	spinner             spinner.Model
 	preview             app.SetupPreview
 	document            config.ConfigDocument
-	image               string
-	imageChoice         string
-	imageOptions        []app.SetupImageOption
+	setupChoice         string
 	agent               string
-	initialImage        string
 	initialAgent        string
 	initialConfigDigest string
 	internet            bool
@@ -119,11 +98,8 @@ func NewSetupModel(ctx context.Context, application Application, root string, in
 		spinner:      spinner.New(spinner.WithSpinner(spinner.Line)),
 		preview:      initial,
 		document:     initial.Config,
-		image:        terminal.SanitizeLine(initial.Config.Image.Ref),
-		imageChoice:  initial.SelectedImageOption,
-		imageOptions: append([]app.SetupImageOption(nil), initial.ImageOptions...),
+		setupChoice:  "ubuntu-default",
 		agent:        terminal.SanitizeLine(initial.Config.Agents.Default),
-		initialImage: initial.Config.Image.Ref,
 		initialAgent: initial.Config.Agents.Default,
 		internet:     true,
 		cpus:         initial.Config.Resources.CPUs,
@@ -146,8 +122,7 @@ func NewSetupModel(ctx context.Context, application Application, root string, in
 	if model.memory == "" {
 		model.memory = setupMemoryValue(initial.Plan.Limits.MemoryBytes)
 	}
-	model.prepareImageOptions()
-	model.buildSetupForms()
+	model.buildSetupForm()
 	model.resetReview(initial)
 	return model
 }
@@ -252,123 +227,50 @@ func validateGuestPorts(value string) error {
 	return err
 }
 
-func (model *SetupModel) buildSetupForms() {
-	imageOptions := make([]huh.Option[string], 0, len(model.imageOptions))
-	for _, option := range model.imageOptions {
-		imageOptions = append(imageOptions, huh.NewOption(option.Name, option.ID))
-	}
-	imageSelect := huh.NewSelect[string]().
-		Options(imageOptions...).
-		Value(&model.imageChoice).
-		Validate(model.validateImageChoice)
-	imageInput := huh.NewInput().
-		Title("Container image reference (advanced)").
-		Description("Use a complete OCI reference ending in @sha256:<64-hex-digit-digest>.").
-		Value(&model.image).
-		Validate(validateCustomImage)
-	model.form = huh.NewForm(
-		huh.NewGroup(imageSelect),
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Coding assistant").
-				Description("Choose the assistant DSX will open inside your workspace.").
-				Options(
-					huh.NewOption("Codex", string(harness.Codex)),
-					huh.NewOption("Claude Code", string(harness.Claude)),
-					huh.NewOption("OMP", string(harness.OMP)),
-					huh.NewOption("OpenCode", string(harness.OpenCode)),
-				).
-				Value(&model.agent),
-			huh.NewConfirm().
-				Title("Let this workspace access the internet?").
-				Description("Needed for package downloads, documentation, and most coding assistants.").
-				Affirmative("Allow").
-				Negative("Keep offline").
-				Value(&model.internet).
-				WithButtonAlignment(lipgloss.Left),
-		),
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Published guest ports").
-				Description("Optional comma-separated guest ports, for example 3000, 8080. DSX assigns dynamic loopback host ports.").
-				Value(&model.portInput).
-				Validate(validateGuestPorts),
-		),
-		huh.NewGroup(
-			huh.NewSelect[int]().
-				Title("CPU allocation").
-				Description("Compute available to each workspace sandbox.").
-				Options(setupCPUOptions(model.cpus)...).
-				Value(&model.cpus),
-			huh.NewSelect[string]().
-				Title("Memory allocation").
-				Description("RAM available to each workspace sandbox.").
-				Options(setupMemoryOptions(model.memory)...).
-				Value(&model.memory),
-		),
-	).WithAccessible(model.accessible)
-	model.customForm = huh.NewForm(huh.NewGroup(imageInput)).WithAccessible(model.accessible)
+func (model *SetupModel) buildSetupForm() {
+	ubuntuChoice := huh.NewSelect[string]().
+		Title("Choose your Ubuntu workspace").
+		Description("Default uses 6 CPUs, 6 GiB memory, network allowed, and no browser.").
+		Options(
+			huh.NewOption("Ubuntu — Default settings", "ubuntu-default"),
+			huh.NewOption("Ubuntu — Custom", "ubuntu-custom"),
+		).
+		Value(&model.setupChoice)
+	custom := huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Coding assistant").
+			Description("Choose the assistant DSX will open inside your workspace.").
+			Options(
+				huh.NewOption("Codex", string(harness.Codex)),
+				huh.NewOption("Claude Code", string(harness.Claude)),
+				huh.NewOption("OMP", string(harness.OMP)),
+				huh.NewOption("OpenCode", string(harness.OpenCode)),
+			).
+			Value(&model.agent),
+		huh.NewConfirm().
+			Title("Let this workspace access the internet?").
+			Description("Needed for package downloads, documentation, and most coding assistants.").
+			Affirmative("Allow").
+			Negative("Keep offline").
+			Value(&model.internet).
+			WithButtonAlignment(lipgloss.Left),
+		huh.NewInput().
+			Title("Published guest ports").
+			Description("Optional comma-separated guest ports. DSX assigns dynamic loopback host ports.").
+			Value(&model.portInput).
+			Validate(validateGuestPorts),
+		huh.NewSelect[int]().
+			Title("CPU allocation").
+			Options(setupCPUOptions(model.cpus)...).
+			Value(&model.cpus),
+		huh.NewSelect[string]().
+			Title("Memory allocation").
+			Options(setupMemoryOptions(model.memory)...).
+			Value(&model.memory),
+	).WithHideFunc(func() bool { return model.setupChoice != "ubuntu-custom" })
+	model.form = huh.NewForm(huh.NewGroup(ubuntuChoice), custom).WithAccessible(model.accessible)
 	if model.accessible || !model.color {
-		theme := huh.ThemeFunc(huh.ThemeBase)
-		model.form.WithTheme(theme)
-		model.customForm.WithTheme(theme)
-	}
-}
-
-func validateCustomImage(value string) error {
-	if strings.TrimSpace(value) == "" {
-		return errors.New("Enter a digest-pinned image reference")
-	}
-	return nil
-}
-
-func (model *SetupModel) prepareImageOptions() {
-	available := model.imageOptions[:0]
-	selectedAvailable := model.imageChoice == ""
-	for _, option := range model.imageOptions {
-		if !option.Available {
-			continue
-		}
-		available = append(available, option)
-		selectedAvailable = selectedAvailable || option.ID == model.imageChoice
-	}
-	model.imageOptions = available
-	if !selectedAvailable {
-		model.imageChoice = ""
-	}
-
-	if len(model.imageOptions) == 0 {
-		option := app.SetupImageOption{ID: "custom", Name: "Custom OCI image", Available: true}
-		if model.document.Image.Build != nil || model.document.Image.Ref != "" {
-
-			option = app.SetupImageOption{
-				ID: "configured", Name: "Configured image", Description: "Use the current configuration",
-				Available: true, Image: model.document.Image,
-			}
-		}
-		model.imageOptions = append(model.imageOptions, option)
-	}
-	if model.imageChoice == "" {
-		if model.document.Image.Build != nil || model.document.Image.Ref != "" {
-			for _, option := range model.imageOptions {
-				if option.Available && option.ID != "custom" {
-					model.imageChoice = option.ID
-					break
-				}
-			}
-		}
-		if model.imageChoice == "" {
-			model.imageChoice = "custom"
-		}
-	}
-	hasCustom := false
-	for _, option := range model.imageOptions {
-		hasCustom = hasCustom || option.ID == "custom"
-	}
-	if !hasCustom {
-		model.imageOptions = append(model.imageOptions, app.SetupImageOption{
-			ID: "custom", Name: "Custom OCI image", Description: "Advanced digest-pinned reference", Available: true,
-		})
+		model.form.WithTheme(huh.ThemeFunc(huh.ThemeBase))
 	}
 }
 
@@ -381,17 +283,8 @@ func NewPortUpdateReviewModel(ctx context.Context, application Application, root
 	return model
 }
 
-func (model *SetupModel) validateImageChoice(choice string) error {
-	for _, option := range model.imageOptions {
-		if option.ID != choice {
-			continue
-		}
-		if !option.Available {
-			return errors.New("This image option is unavailable in the current DSX build")
-		}
-		return nil
-	}
-	return errors.New("Choose a workspace image")
+func (model *SetupModel) validateImageChoice(string) error {
+	return nil
 }
 
 func NewExistingApprovalModel(ctx context.Context, application Application, root string, initial app.SetupPreview, accessible bool) *SetupModel {
@@ -446,7 +339,7 @@ func (model *SetupModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				model.stage = setupForm
 				model.reviewPage = 0
-				model.buildSetupForms()
+				model.buildSetupForm()
 				updated, _ := model.form.Update(tea.WindowSizeMsg{Width: model.width, Height: model.height})
 				if form, ok := updated.(*huh.Form); ok {
 					model.form = form
@@ -502,10 +395,6 @@ func (model *SetupModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case huh.StateAborted:
 			return model, tea.Quit
 		case huh.StateCompleted:
-			if model.imageChoice == "custom" && model.form != model.customForm {
-				model.form = model.customForm
-				return model, tea.Batch(command, model.form.Init())
-			}
 			model.applyForm()
 			model.stage = setupSaving
 			return model, tea.Batch(command, model.previewCommand())
@@ -582,19 +471,18 @@ func (model *SetupModel) applyForm() {
 	if model.document.SchemaVersion == 0 {
 		model.document = model.preview.Config
 	}
-	if model.imageChoice == "custom" {
-		image := strings.TrimSpace(model.image)
-		if image == terminal.SanitizeLine(model.initialImage) {
-			image = model.initialImage
+	for _, option := range model.preview.ImageOptions {
+		if option.ID == "standard" && option.Available {
+			model.document.Image = option.Image
+			break
 		}
-		model.document.Image = config.ImageConfig{Ref: image}
-	} else {
-		for _, option := range model.imageOptions {
-			if option.ID == model.imageChoice {
-				model.document.Image = option.Image
-				break
-			}
-		}
+	}
+	if model.setupChoice == "ubuntu-default" {
+		model.agent = string(harness.Codex)
+		model.internet = true
+		model.cpus = app.DefaultWorkspaceCPUs
+		model.memory = app.DefaultWorkspaceMemory
+		model.portInput = ""
 	}
 	agent := strings.TrimSpace(model.agent)
 	if agent == terminal.SanitizeLine(model.initialAgent) {
@@ -732,48 +620,81 @@ func (builder *setupReviewBuilder) bullet(value string) {
 
 func buildCompleteReview(preview app.SetupPreview) (string, error) {
 	builder := newSetupReviewBuilder()
-	buildWorkspaceReview(builder, preview)
-	buildDetectedProjectReview(builder, preview)
-	buildAccessReview(builder, preview)
-	buildAutomationReview(builder, preview)
-	buildStorageReview(builder, preview)
-	buildApprovalReview(builder, preview)
+	buildConciseReview(builder, preview)
 	if !builder.output.Complete() {
 		return "", errSetupReviewTooLarge
 	}
 	return builder.output.String(), nil
 }
 
-func buildWorkspaceReview(builder *setupReviewBuilder, preview app.SetupPreview) {
+func buildConciseReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 	execution := preview.Plan
-	builder.section("Workspace", "Where DSX will run and which environment it will start.")
-	builder.item("Project", preview.Facts.CanonicalRoot)
-	builder.item("Mode", string(execution.Mode))
-	builder.item("Sandbox", string(execution.Sandbox.Name))
+	builder.section("Ubuntu workspace", "Review the settings and any additional access DSX will approve.")
 	builder.item("Environment", reviewImageSummary(preview))
-	if execution.Image.Context != "" {
-		builder.bullet("Build context " + execution.Image.Context)
+	builder.item("Resources", fmt.Sprintf("%d CPUs • %s", execution.Limits.CPUs, reviewBytes(execution.Limits.MemoryBytes)))
+	builder.item("Network", reviewInternetSummary(preview.Config))
+	builder.item("Browser", "Disabled")
+	builder.item("Agent", execution.Agents.Default)
+	if len(execution.Ports) == 0 {
+		builder.item("Ports", "None")
+	} else {
+		for _, port := range execution.Ports {
+			hostPort := "dynamic"
+			if port.HostPort != nil {
+				hostPort = strconv.Itoa(int(*port.HostPort))
+			}
+			builder.bullet(fmt.Sprintf("Port %s • %s %d → %s:%s", port.Name, port.Protocol, port.GuestPort, port.HostIP, hostPort))
+		}
 	}
-	if execution.Image.File != "" {
-		builder.bullet("Build file " + execution.Image.File)
+	additional := len(execution.Setup) + len(execution.Processes) + len(execution.Mounts) + len(execution.Auth.Imports) + nonInternetBridgeCount(execution.Bridges) + len(execution.Volumes)
+	if additional == 0 {
+		builder.item("Additional access or commands", "None")
+	} else {
+		for _, command := range execution.Setup {
+			builder.bullet("Setup command: " + reviewCommand(command))
+			buildCommandEnvironment(builder, command.Env)
+		}
+		for _, process := range execution.Processes {
+			builder.bullet("Service " + process.Name + ": " + reviewCommand(process.Command))
+			buildCommandEnvironment(builder, process.Command.Env)
+		}
+		for _, mount := range execution.Mounts {
+			access := "read/write"
+			if mount.ReadOnly {
+				access = "read-only"
+			}
+			builder.bullet("Mount " + mount.Source + " → " + mount.Target + " • " + access)
+		}
+		for _, harness := range execution.Auth.Imports {
+			builder.bullet("Authentication import: " + harness)
+		}
+		for _, bridge := range execution.Bridges {
+			if bridge.Kind == "internet" {
+				continue
+			}
+			target := bridge.Destination
+			if bridge.Port != 0 {
+				target += ":" + strconv.Itoa(int(bridge.Port))
+			}
+			builder.bullet("Host grant " + bridge.Name + " → " + target)
+		}
+		for _, volume := range execution.Volumes {
+			builder.bullet("Volume " + volume.Name + " → " + volume.Target)
+		}
 	}
-	if execution.Image.Target != "" {
-		builder.bullet("Build target " + execution.Image.Target)
-	}
-	for _, argument := range execution.Image.BuildArgs {
-		builder.bullet("Build argument " + argument.Key + "=" + argument.Value)
-	}
-	if execution.Image.InputDigest != "" && !strings.Contains(reviewImageSummary(preview), execution.Image.InputDigest) {
-		builder.bullet("Image input digest " + execution.Image.InputDigest)
-	}
-	builder.item("Coding assistant", execution.Agent)
-	builder.item("Internet", reviewInternetSummary(preview.Config))
-	builder.item("Browser", reviewBrowserSummary(execution))
-	builder.item("Resources", fmt.Sprintf("%d CPU • %s • %d concurrent clone(s)", execution.Limits.CPUs, reviewBytes(execution.Limits.MemoryBytes), execution.Limits.MaxConcurrentClones))
+	builder.item("Approval", preview.Hash)
 }
 
+func nonInternetBridgeCount(bridges []plan.BridgeGrant) int {
+	count := 0
+	for _, bridge := range bridges {
+		if bridge.Kind != "internet" {
+			count++
+		}
+	}
+	return count
+}
 func buildDetectedProjectReview(builder *setupReviewBuilder, preview app.SetupPreview) {
-	builder.section("Detected project", "Used to suggest defaults only. Detection never runs project code.")
 	if preview.Facts.ConfigExists {
 		builder.item("Existing DSX config", preview.Facts.ConfigPath)
 	} else {
@@ -825,8 +746,8 @@ func buildAccessReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 		}
 		builder.bullet("Mount " + source + " → " + mount.Target + " • " + access)
 	}
-	for _, grant := range execution.Auth {
-		builder.bullet("Credentials " + grant.Harness + "/" + grant.Profile + " • " + grant.Persistence)
+	for _, harness := range execution.Auth.Imports {
+		builder.bullet("Approved authentication import " + harness)
 	}
 	for _, bridge := range execution.Bridges {
 		access := "read/write"
@@ -854,7 +775,7 @@ func buildAccessReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 		}
 		builder.bullet(fmt.Sprintf("Port %s • %s %d → %s:%s%s", port.Name, port.Protocol, port.GuestPort, port.HostIP, hostPort, grant))
 	}
-	if len(execution.Mounts) == 0 && len(execution.Auth) == 0 && len(execution.Bridges) == 0 && len(execution.Ports) == 0 {
+	if len(execution.Mounts) == 0 && len(execution.Auth.Imports) == 0 && len(execution.Bridges) == 0 && len(execution.Ports) == 0 {
 		builder.bullet("No additional mounts, credentials, host grants, or published ports")
 	}
 }
@@ -939,12 +860,6 @@ func buildStorageReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 	builder.item("Repositories", strconv.Itoa(len(execution.Repositories)))
 	for _, repository := range execution.Repositories {
 		detail := repository.Name + " • " + repository.HostPath + " → " + repository.GuestPath
-		if repository.SourceRef != "" {
-			detail += " • ref " + repository.SourceRef
-		}
-		if repository.SourceCommit != "" {
-			detail += " • commit " + repository.SourceCommit
-		}
 		if repository.TrackedDigest != "" {
 			detail += " • tracked " + repository.TrackedDigest
 		}
@@ -965,11 +880,6 @@ func buildApprovalReview(builder *setupReviewBuilder, preview app.SetupPreview) 
 	builder.section("Approval", "Identity and hashes bind this review to the exact configuration and executable plan.")
 	builder.item("Plan contract", execution.ContractVersion)
 	builder.item("Project ID", string(execution.Project.ID))
-	builder.item("Run ID", string(execution.Sandbox.RunID))
-	builder.item("Owned resource", execution.Ownership.ResourceName)
-	for _, label := range execution.Ownership.Labels {
-		builder.bullet("Ownership label " + label.Key + " = " + label.Value)
-	}
 	keys := make([]string, 0, len(execution.Provenance))
 	for key := range execution.Provenance {
 		keys = append(keys, key)
@@ -1005,20 +915,6 @@ func reviewInternetSummary(document config.ConfigDocument) string {
 	return "Allowed"
 }
 
-func reviewBrowserSummary(execution plan.ExecutionPlan) string {
-	if execution.Browser == nil || !execution.Browser.Enabled {
-		return "Disabled"
-	}
-	parts := []string{"Enabled • isolated browser"}
-	if execution.Browser.ImageReference != "" {
-		parts = append(parts, execution.Browser.ImageReference)
-	}
-	if execution.Browser.ImageDigest != "" {
-		parts = append(parts, execution.Browser.ImageDigest)
-	}
-	return strings.Join(parts, " • ")
-}
-
 func reviewBytes(bytes int64) string {
 	const (
 		kib = int64(1 << 10)
@@ -1039,7 +935,7 @@ func reviewBytes(bytes int64) string {
 
 func reviewImageSummary(preview app.SetupPreview) string {
 	if preview.Plan.Image.Standard {
-		return "DSX Standard — Ubuntu (local build, input sha256:" + preview.Plan.Image.InputDigest + ")"
+		return "Ubuntu (DSX Standard)"
 	}
 	if preview.Plan.Image.Reference != "" {
 		return preview.Plan.Image.Reference
@@ -1047,7 +943,7 @@ func reviewImageSummary(preview app.SetupPreview) string {
 	if preview.Plan.Image.File != "" {
 		return "project build " + preview.Plan.Image.File
 	}
-	return "not resolved"
+	return "Ubuntu"
 }
 
 type setupReviewPage struct {
@@ -1196,413 +1092,4 @@ func reviewPages(review string, width, height int) []string {
 		return []string{""}
 	}
 	return pages
-}
-
-type ActionModel struct {
-	state        app.BareState
-	intent       *Intent
-	width        int
-	accessible   bool
-	manage       bool
-	confirmClean bool
-	sandboxes    []app.SandboxSummary
-	selected     int
-	notice       string
-}
-
-func NewLauncherModel(state app.BareState, sandboxes ...app.SandboxSummary) *ActionModel {
-	return newActionModel(state, sandboxes)
-}
-
-func NewDashboardModel(state app.BareState, sandboxes ...app.SandboxSummary) *ActionModel {
-	return newActionModel(state, sandboxes)
-}
-
-func newActionModel(state app.BareState, sandboxes []app.SandboxSummary) *ActionModel {
-	available := make([]app.SandboxSummary, 0, len(sandboxes))
-	for _, sandbox := range sandboxes {
-		if _, err := modelpkg.ParseSandboxName(string(sandbox.Sandbox)); err == nil && sandbox.State != modelpkg.StateDeleted {
-			available = append(available, sandbox)
-		}
-	}
-	slices.SortStableFunc(available, func(left, right app.SandboxSummary) int {
-		if left.Sandbox == "main" && right.Sandbox != "main" {
-			return -1
-		}
-		if left.Sandbox != "main" && right.Sandbox == "main" {
-			return 1
-		}
-		return strings.Compare(string(left.Sandbox), string(right.Sandbox))
-	})
-	return &ActionModel{state: state, width: 80, sandboxes: available}
-}
-
-func (model *ActionModel) Init() tea.Cmd { return nil }
-
-func (model *ActionModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
-	if size, ok := message.(tea.WindowSizeMsg); ok {
-		if size.Width > 0 {
-			model.width = size.Width
-		}
-		return model, nil
-	}
-	key, ok := message.(tea.KeyPressMsg)
-	if !ok {
-		return model, nil
-	}
-	pressed := strings.ToLower(key.String())
-	if model.confirmClean {
-		switch pressed {
-		case "ctrl+c", "q":
-			return model, tea.Quit
-		case "y", "enter":
-			model.intent = &Intent{Action: "clean", Project: model.state.Facts.CanonicalRoot}
-			return model, tea.Quit
-		case "n", "esc":
-			model.confirmClean = false
-		}
-		return model, nil
-	}
-	if !model.manage {
-		switch pressed {
-		case "ctrl+c", "q", "esc":
-			return model, tea.Quit
-		case "m":
-			model.manage = true
-			model.notice = ""
-			return model, nil
-		case "enter":
-			action, _ := model.primaryAction()
-			if action == "" {
-				return model, nil
-			}
-			model.intent = &Intent{Action: action, Project: model.state.Facts.CanonicalRoot}
-			return model, tea.Quit
-		default:
-			return model, nil
-		}
-	}
-
-	switch pressed {
-	case "ctrl+c", "q":
-		return model, tea.Quit
-	case "esc", "m":
-		model.manage = false
-		model.notice = ""
-		return model, nil
-	case "up", "k":
-		if len(model.sandboxes) != 0 {
-			model.selected = (model.selected - 1 + len(model.sandboxes)) % len(model.sandboxes)
-			model.notice = ""
-		}
-		return model, nil
-	case "down", "j":
-		if len(model.sandboxes) != 0 {
-			model.selected = (model.selected + 1) % len(model.sandboxes)
-			model.notice = ""
-		}
-		return model, nil
-	case "n":
-		if model.runtimeReady() && model.state.ConfigExists {
-			model.intent = &Intent{Action: "new-clone", Project: model.state.Facts.CanonicalRoot}
-			return model, tea.Quit
-		}
-	case "p":
-		if model.state.ConfigExists {
-			model.intent = &Intent{Action: "configure-ports", Project: model.state.Facts.CanonicalRoot}
-			return model, tea.Quit
-		}
-	case "x":
-		if selected := model.selectedSandbox(); selected != nil && selected.State == modelpkg.StateRunning {
-			model.intent = &Intent{
-				Action: "stop", Project: model.state.Facts.CanonicalRoot, Sandbox: string(selected.Sandbox),
-			}
-			return model, tea.Quit
-		}
-	case "d":
-		if model.workspaceExists() {
-			model.confirmClean = true
-			return model, nil
-		}
-	case "g":
-		return model.selectGitAction("status")
-	case "v":
-		return model.selectGitAction("diff")
-	case "f":
-		return model.selectGitAction("fetch")
-	}
-	return model, nil
-}
-
-func (model *ActionModel) runtimeReady() bool {
-	return model.state.ContainerSystem.State == runtime.SystemStateRunning
-}
-
-func (model *ActionModel) workspaceExists() bool {
-	return model.state.OwnedResources > 0 || len(model.sandboxes) > 0
-}
-
-func (model *ActionModel) mainSandbox() *app.SandboxSummary {
-	for index := range model.sandboxes {
-		if model.sandboxes[index].Sandbox == "main" {
-			return &model.sandboxes[index]
-		}
-	}
-	return nil
-}
-
-func (model *ActionModel) selectedSandbox() *app.SandboxSummary {
-	if model.selected < 0 || model.selected >= len(model.sandboxes) {
-		return nil
-	}
-	return &model.sandboxes[model.selected]
-}
-
-func (model *ActionModel) primaryAction() (string, string) {
-	switch model.state.ContainerSystem.State {
-	case runtime.SystemStateStopped:
-		return "start-container-system", "Start container system"
-	case runtime.SystemStateNotInstalled, runtime.SystemStateUnavailable, runtime.SystemStateUnknown:
-		return "", ""
-	case runtime.SystemStateRunning:
-	}
-	main := model.mainSandbox()
-	if main == nil {
-		if model.state.OwnedResources > 0 && len(model.sandboxes) == 0 {
-			return "", ""
-		}
-		return "create", "Create & open"
-	}
-	switch main.State {
-	case modelpkg.StateRunning:
-		return "attach", "Attach"
-	case modelpkg.StateStopped:
-		return "start", "Start & open"
-	default:
-		return "", ""
-	}
-}
-
-func (model *ActionModel) selectGitAction(operation string) (tea.Model, tea.Cmd) {
-	selected := model.selectedSandbox()
-	if !model.manage || selected == nil || selected.Mode != modelpkg.ModeClone {
-		model.notice = fmt.Sprintf("Git %s is available only for a selected isolated clone.", operation)
-		return model, nil
-	}
-	model.intent = &Intent{
-		Action:  "git-" + operation,
-		Project: model.state.Facts.CanonicalRoot,
-		Sandbox: string(selected.Sandbox),
-	}
-	return model, tea.Quit
-}
-
-func (model *ActionModel) View() tea.View {
-	theme := newVisualTheme(terminal.ColorEnabled() && !model.accessible)
-	header := theme.header("Project", friendlyProjectName(model.state.Facts.CanonicalRoot), model.width)
-	if model.confirmClean {
-		body := theme.danger.Render("This removes DSX-owned workspace resources.") +
-			"\n\nYour project files and global agent sign-ins are preserved." +
-			"\n\nProject\n" + terminal.SanitizeLine(model.state.Facts.CanonicalRoot) +
-			"\n\n" + theme.help("[y] confirm cleanup", "[n] cancel")
-		return model.actionView(header + "\n\n" + theme.panel("Confirm cleanup", body, model.width, true))
-	}
-
-	projectWidth := max(8, tuiContentWidth(model.width)-10)
-	overview := theme.title.Render(terminal.Truncate(friendlyProjectName(model.state.Facts.CanonicalRoot), projectWidth)) +
-		"\n" + theme.muted.Render(terminal.Truncate(terminal.SanitizeLine(model.state.Facts.CanonicalRoot), projectWidth)) +
-		"\n\n" + model.renderStatus(theme)
-	content := header + "\n\n" + theme.panel("Status", overview, model.width, false)
-
-	if model.manage {
-		content += "\n\n" + theme.panel("Workspaces", model.renderSandboxList(theme), model.width, len(model.sandboxes) != 0)
-		content += "\n\n" + theme.panel("More options", model.renderManageActions(theme), model.width, false)
-	} else {
-		content += "\n\n" + theme.panel("Next", model.nextStep(theme), model.width, false)
-	}
-	if model.notice != "" {
-		content += "\n\n" + theme.panel("Heads up", terminal.SanitizeLine(model.notice), model.width, true)
-	}
-	return model.actionView(content)
-}
-
-func (model *ActionModel) actionView(content string) tea.View {
-	theme := newVisualTheme(terminal.ColorEnabled() && !model.accessible)
-	rendered := terminal.Wrap(content, tuiContentWidth(model.width))
-	if !model.accessible {
-		rendered = theme.layout(rendered, model.width)
-	}
-	view := tea.NewView(rendered)
-	view.AltScreen = !model.accessible
-	return view
-}
-
-func (model *ActionModel) renderStatus(theme visualTheme) string {
-	setup := "Not configured"
-	if model.state.ConfigExists {
-		setup = "Complete"
-	}
-	return strings.Join([]string{
-		statusRow(theme, "Container system", containerSystemLabel(model.state.ContainerSystem.State)),
-		statusRow(theme, "Project setup", setup),
-		statusRow(theme, "Workspace", model.workspaceLabel()),
-		statusRow(theme, "Published ports", configuredPortLabel(model.state.ConfiguredPorts)),
-	}, "\n")
-}
-
-func statusRow(theme visualTheme, label, value string) string {
-	style := theme.value
-	lower := strings.ToLower(value)
-	switch {
-	case strings.Contains(lower, "running"), lower == "complete":
-		style = theme.success
-	case strings.Contains(lower, "not created"), strings.Contains(lower, "stopped"):
-		style = theme.warning
-	case strings.Contains(lower, "not installed"), strings.Contains(lower, "unavailable"):
-		style = theme.danger
-	}
-	return theme.label.Render(label) + "    " + style.Render(value)
-}
-
-func configuredPortLabel(ports []config.PortConfig) string {
-	if len(ports) == 0 {
-		return "None"
-	}
-	return formatGuestPorts(ports) + " → dynamic loopback"
-}
-
-func containerSystemLabel(state runtime.SystemState) string {
-	switch state {
-	case runtime.SystemStateRunning:
-		return "Running"
-	case runtime.SystemStateStopped:
-		return "Stopped"
-	case runtime.SystemStateNotInstalled:
-		return "Not installed"
-	default:
-		return "Unavailable"
-	}
-}
-
-func (model *ActionModel) workspaceLabel() string {
-	if main := model.mainSandbox(); main != nil {
-		state := string(main.State)
-		if state == "" {
-			state = "unknown"
-		} else {
-			state = strings.ToUpper(state[:1]) + state[1:]
-		}
-		return "main — " + state
-	}
-	named := 0
-	for _, sandbox := range model.sandboxes {
-		if sandbox.Mode == modelpkg.ModeClone {
-			named++
-		}
-	}
-	if named > 0 {
-		return fmt.Sprintf("Not created • %d isolated", named)
-	}
-	if model.state.OwnedResources > 0 {
-		return "State unavailable"
-	}
-	return "Not created"
-}
-
-func (model *ActionModel) nextStep(theme visualTheme) string {
-	var message string
-	switch model.state.ContainerSystem.State {
-	case runtime.SystemStateStopped:
-		message = "DSX needs Apple Container running before it can use a workspace."
-	case runtime.SystemStateNotInstalled:
-		message = "DSX requires Apple Container 1.2.2.\n\n" + model.state.ContainerSystem.Remediation
-	case runtime.SystemStateUnavailable, runtime.SystemStateUnknown:
-		message = "DSX could not determine the Apple Container status.\n\n" + model.state.ContainerSystem.Remediation
-	case runtime.SystemStateRunning:
-		switch main := model.mainSandbox(); {
-		case main == nil && model.state.OwnedResources == 0:
-			message = "No workspace exists for this project yet."
-		case main == nil:
-			message = "DSX found project resources but could not verify a live workspace."
-		case main.State == modelpkg.StateRunning:
-			message = "Your project workspace is ready."
-		case main.State == modelpkg.StateStopped:
-			message = "Your project workspace is stopped."
-		default:
-			message = "Your project workspace needs attention before it can be used."
-		}
-	}
-	_, label := model.primaryAction()
-	actions := []string{}
-	if label != "" {
-		actions = append(actions, theme.help("[Enter] "+label))
-	}
-	if model.runtimeReady() {
-		actions = append(actions, theme.help("[m] More options"))
-	}
-	actions = append(actions, theme.help("[q] Quit"))
-	return message + "\n\n" + strings.Join(actions, "\n")
-}
-
-func (model *ActionModel) renderManageActions(theme visualTheme) string {
-	actions := make([]string, 0, 7)
-	if model.runtimeReady() && model.state.ConfigExists {
-		actions = append(actions, theme.help("[n] Create isolated clone"))
-	}
-	if model.state.ConfigExists {
-		actions = append(actions, theme.help("[p] Configure published ports"))
-	}
-	selected := model.selectedSandbox()
-	if selected != nil && selected.State == modelpkg.StateRunning {
-		actions = append(actions, theme.help("[x] Stop selected workspace"))
-	}
-	if selected != nil && selected.Mode == modelpkg.ModeClone {
-		actions = append(actions, theme.help("[g] Git status", "[v] Git diff", "[f] Git fetch"))
-	}
-	if model.workspaceExists() {
-		actions = append(actions, theme.help("[d] Clean DSX resources"))
-	}
-	actions = append(actions, theme.help("[m/Esc] Back", "[q] Quit"))
-	return strings.Join(actions, "\n")
-}
-
-func (model *ActionModel) renderSandboxList(theme visualTheme) string {
-	if len(model.sandboxes) == 0 {
-		return theme.muted.Render("No workspace exists for this project.")
-	}
-	var entries strings.Builder
-	entries.WriteString(theme.muted.Render("Use j/k or ↑/↓ to select a workspace.") + "\n\n")
-	for index, sandbox := range model.sandboxes {
-		marker := "  "
-		nameStyle := theme.title
-		if index == model.selected {
-			marker = "› "
-			nameStyle = theme.accent
-		}
-		state := terminal.SanitizeLine(string(sandbox.State))
-		tone := "warning"
-		if state == "running" {
-			tone = "success"
-		} else if state == "failed" {
-			tone = "danger"
-		}
-		fmt.Fprintf(
-			&entries,
-			"%s%s  %s\n",
-			marker,
-			nameStyle.Render(terminal.SanitizeLine(string(sandbox.Sandbox))),
-			theme.badge(state, tone),
-		)
-		for _, publishedURL := range sandbox.URLs {
-			fmt.Fprintf(&entries, "    %s\n", theme.value.Render(terminal.SanitizeLine(publishedURL)))
-		}
-	}
-	return strings.TrimRight(entries.String(), "\n")
-}
-
-func (model *ActionModel) Intent() (Intent, bool) {
-	if model.intent == nil {
-		return Intent{}, false
-	}
-	return *model.intent, true
 }

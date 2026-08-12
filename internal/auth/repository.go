@@ -377,7 +377,7 @@ func (repository *Repository) PurgeSandbox(ctx context.Context, projectID model.
 	if _, err := model.ParseProjectID(string(projectID)); err != nil {
 		return err
 	}
-	if _, err := model.ParseSandboxName(sandbox); err != nil {
+	if _, err := model.ParseWorkspaceName(sandbox); err != nil {
 		return err
 	}
 	return repository.withSandboxLock(ctx, projectID, sandbox, func() error {
@@ -403,7 +403,7 @@ func (repository *Repository) PurgeCleanedSandbox(ctx context.Context, projectID
 	if _, err := model.ParseProjectID(string(projectID)); err != nil {
 		return err
 	}
-	if _, err := model.ParseSandboxName(sandbox); err != nil {
+	if _, err := model.ParseWorkspaceName(sandbox); err != nil {
 		return err
 	}
 	return repository.withSandboxLock(ctx, projectID, sandbox, func() error {
@@ -431,7 +431,7 @@ func validateProfile(profile Profile) error {
 	if _, err := harness.ParseName(string(profile.Harness)); err != nil {
 		return err
 	}
-	if _, err := model.ParseSandboxName(profile.Name); err != nil {
+	if _, err := model.ParseWorkspaceName(profile.Name); err != nil {
 		return fmt.Errorf("invalid profile: %w", err)
 	}
 	if profile.ProjectID == "" && profile.Sandbox == "" {
@@ -443,7 +443,7 @@ func validateProfile(profile Profile) error {
 	if _, err := model.ParseProjectID(string(profile.ProjectID)); err != nil {
 		return err
 	}
-	if _, err := model.ParseSandboxName(profile.Sandbox); err != nil {
+	if _, err := model.ParseWorkspaceName(profile.Sandbox); err != nil {
 		return err
 	}
 	return nil
@@ -453,7 +453,7 @@ func validateSandboxScope(projectID model.ProjectID, sandbox string) error {
 	if _, err := model.ParseProjectID(string(projectID)); err != nil {
 		return err
 	}
-	if _, err := model.ParseSandboxName(sandbox); err != nil {
+	if _, err := model.ParseWorkspaceName(sandbox); err != nil {
 		return err
 	}
 	return nil

@@ -33,9 +33,10 @@ func validateSemantics(document ConfigDocument, sourcePath string, locations map
 	validator.validateProcesses(document.Processes)
 	validator.validateVolumes(document.Volumes)
 	validator.validateMounts(document.Mounts, document.Volumes)
-	validator.validateAgents(document.Agents, document.AuthProfiles)
+	validator.validateAgents(document.Agents)
+	validator.validateAuth(document.Auth)
 	validator.validateAWS(document.AWS)
-	validator.validateNetwork(document.Network, document.Browser)
+	validator.validateNetwork(document.Network)
 	validator.validatePorts(document.Ports)
 	validator.validateResources(document.Resources)
 	sort.SliceStable(validator.diagnostics, func(i, j int) bool {
@@ -285,8 +286,8 @@ func (v *semanticValidator) validateVolumes(volumes map[string]VolumeSpec) {
 		if guestPathsOverlap(volume.Target, reservedGuestHelperDirectory) {
 			v.add(pointer+"/target", "volume target overlaps the reserved DSX guest helper directory")
 		}
-		if volume.Scope != "sandbox" && volume.Scope != "project" {
-			v.add(pointer+"/scope", "volume scope must be sandbox or project")
+		if volume.Scope != "workspace" && volume.Scope != "project" {
+			v.add(pointer+"/scope", "volume scope must be workspace or project")
 		}
 	}
 }
@@ -390,7 +391,7 @@ func hostPathsOverlap(left, right string) bool {
 	return left == right || strings.HasPrefix(left, right+"/") || strings.HasPrefix(right, left+"/")
 }
 
-func (v *semanticValidator) validateAgents(agents AgentConfig, profiles map[string]AuthProfileConfig) {
+func (v *semanticValidator) validateAgents(agents AgentConfig) {
 	allowed := make(map[string]struct{}, len(agents.Allowed))
 	for index, harness := range agents.Allowed {
 		if _, ok := supportedHarnesses[harness]; !ok {
@@ -401,26 +402,27 @@ func (v *semanticValidator) validateAgents(agents AgentConfig, profiles map[stri
 		}
 		allowed[harness] = struct{}{}
 	}
-	if agents.Default != "" {
-		if _, ok := supportedHarnesses[agents.Default]; !ok {
-			v.add("/agents/default", fmt.Sprintf("unsupported harness %q", agents.Default))
-		}
-		if len(allowed) != 0 {
-			if _, ok := allowed[agents.Default]; !ok {
-				v.add("/agents/default", "default harness must be included in agents.allowed")
-			}
-		}
+	if _, ok := supportedHarnesses[agents.Default]; !ok {
+		v.add("/agents/default", fmt.Sprintf("unsupported harness %q", agents.Default))
 	}
-	for _, name := range sortedKeys(profiles) {
-		profile := profiles[name]
-		pointer := "/authProfiles/" + escapePointer(name)
-		v.validName(pointer, name)
-		if _, ok := supportedHarnesses[profile.Harness]; !ok {
-			v.add(pointer+"/harness", fmt.Sprintf("unsupported harness %q", profile.Harness))
+	if _, ok := allowed[agents.Default]; !ok {
+		v.add("/agents/default", "default harness must be included in agents.allowed")
+	}
+}
+
+func (v *semanticValidator) validateAuth(auth AuthConfig) {
+	allowed := make(map[string]struct{}, len(auth.Imports))
+	for index, harness := range auth.Imports {
+		pointer := fmt.Sprintf("/auth/imports/%d", index)
+		if harness == "claude" {
+			v.add(pointer, "Claude host authentication is not portable; use dsx auth login")
+		} else if _, ok := supportedHarnesses[harness]; !ok {
+			v.add(pointer, fmt.Sprintf("unsupported authentication import %q", harness))
 		}
-		if profile.Persistence != "sandbox" && profile.Persistence != "global" {
-			v.add(pointer+"/persistence", "auth profile persistence must be sandbox or global")
+		if _, exists := allowed[harness]; exists {
+			v.add(pointer, fmt.Sprintf("duplicate authentication import %q", harness))
 		}
+		allowed[harness] = struct{}{}
 	}
 }
 
@@ -442,10 +444,7 @@ func (v *semanticValidator) validateAWS(aws AWSConfig) {
 	}
 }
 
-func (v *semanticValidator) validateNetwork(network NetworkConfig, browser BrowserConfig) {
-	if browser.Enabled && network.Internet != nil && !*network.Internet {
-		v.add("/browser/enabled", "browser requires network.internet to be enabled")
-	}
+func (v *semanticValidator) validateNetwork(network NetworkConfig) {
 	names := make(map[string]int)
 	for index, grant := range network.HostGrants {
 		pointer := fmt.Sprintf("/network/hostGrants/%d", index)
@@ -552,8 +551,8 @@ func (v *semanticValidator) validateResources(resources ResourceLimits) {
 			}
 		}
 	}
-	if resources.MaxConcurrentClones < 0 || resources.MaxConcurrentClones > 32 {
-		v.add("/resources/maxConcurrentClones", "maxConcurrentClones must be from 1 to 32 when specified")
+	if resources.MaxConcurrentWorkspaces < 0 || resources.MaxConcurrentWorkspaces > 32 {
+		v.add("/resources/maxConcurrentWorkspaces", "maxConcurrentWorkspaces must be from 1 to 32 when specified")
 	}
 }
 

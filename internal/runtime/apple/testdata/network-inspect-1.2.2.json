@@ -1,15 +1,15 @@
 [
   {
-    "id": "dsx-abcdefghijklmnopqrst-main-network",
+    "id": "dsx-tracking-chrome-feature-a-network-1abbf9",
     "configuration": {
-      "name": "dsx-abcdefghijklmnopqrst-main-network",
+      "name": "dsx-tracking-chrome-feature-a-network-1abbf9",
       "creationDate": "2026-08-10T00:00:00Z",
       "mode": "nat",
       "labels": {
         "dev.dsx.managed": "true",
-        "dev.dsx.contract": "dsx.ownership/v1",
-        "dev.dsx.project": "abcdefghijklmnopqrst",
-        "dev.dsx.sandbox": "main",
+        "dev.dsx.contract": "dsx.ownership/v2",
+        "dev.dsx.project": "dk57swfmuu5gpt6knms5",
+        "dev.dsx.workspace": "feature-a",
         "dev.dsx.run": "01890f5c-7b00-7000-8000-000000000001",
         "dev.dsx.kind": "network",
         "dev.dsx.role": "network"

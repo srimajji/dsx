@@ -22,48 +22,44 @@ import (
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
 	"github.com/srimajji/dsx/internal/runtime"
+	"github.com/srimajji/dsx/internal/state"
 	"github.com/srimajji/dsx/internal/terminal"
 )
 
 const maxHarnessVersionOutput = 64 << 10
 
-type HarnessRunRequest struct {
+type AgentRunRequest struct {
 	Root           string
-	ApproveConfig  string
+	Workspace      string
 	Agent          string
-	Profile        string
+	Browser        bool
 	Prompt         string
-	Interactive    bool
-	MCPServers     []harness.MCPServer
-	Environment    map[string]string
 	Stdin          io.Reader
 	Stdout         io.Writer
 	Stderr         io.Writer
 	RunInteractive InteractiveChildRunner
-	BeforeExec     func(HarnessRunResult) error
+	BeforeExec     func(AgentRunResult) error
 }
 
-type PurgeAuthRequest struct {
-	Agent   string
-	Profile string
-}
-type HarnessRunResult struct {
+type AgentRunResult struct {
 	Agent         harness.Name
 	Version       string
 	Exit          runtime.Exit
 	AuthPromotion auth.Promotion
 }
 
-type HarnessService struct {
-	lifecycle           *LifecycleService
-	auth                *auth.Repository
+type AgentService struct {
+	workspaces          *WorkspaceService
+	auth                *AuthService
 	adapters            map[harness.Name]harness.Adapter
 	agentImageReference string
+	now                 func() time.Time
+	newRunID            func(time.Time) (model.RunID, error)
 }
 
-func NewHarnessService(lifecycle *LifecycleService, repository *auth.Repository, adapters ...harness.Adapter) (*HarnessService, error) {
-	if lifecycle == nil || repository == nil {
-		return nil, errors.New("lifecycle and authentication repositories are required")
+func NewAgentService(workspaces *WorkspaceService, authentication *AuthService, adapters ...harness.Adapter) (*AgentService, error) {
+	if workspaces == nil || authentication == nil {
+		return nil, errors.New("workspace and authentication services are required")
 	}
 	catalog := make(map[harness.Name]harness.Adapter, len(adapters))
 	for _, adapter := range adapters {
@@ -79,81 +75,59 @@ func NewHarnessService(lifecycle *LifecycleService, repository *auth.Repository,
 		}
 		catalog[name] = adapter
 	}
-	return &HarnessService{lifecycle: lifecycle, auth: repository, adapters: catalog, agentImageReference: buildinfo.AgentImage}, nil
+	return &AgentService{
+		workspaces: workspaces, auth: authentication, adapters: catalog,
+		agentImageReference: buildinfo.AgentImage, now: time.Now, newRunID: model.NewRunID,
+	}, nil
 }
 
-func (service *HarnessService) PurgeAuth(ctx context.Context, request PurgeAuthRequest) error {
-	if service == nil || service.auth == nil {
-		return model.NewError(model.CodeUnavailable, "authentication service is unavailable", nil)
+func (service *AgentService) Run(ctx context.Context, request AgentRunRequest) (result AgentRunResult, returnErr error) {
+	if ctx == nil {
+		return result, model.NewError(model.CodeInvalidInput, "agent context is nil", nil)
 	}
-	name, err := harness.ParseName(request.Agent)
-	if err != nil {
-		return model.NewError(model.CodeInvalidInput, err.Error(), nil)
+	if service == nil || service.workspaces == nil || service.auth == nil {
+		return result, model.NewError(model.CodeUnavailable, "agent service is unavailable", nil)
 	}
-	profile := request.Profile
-	if profile == "" {
-		profile = "default"
-	}
-	if err := service.auth.Purge(ctx, auth.Profile{Harness: name, Name: profile}); err != nil {
-		if errors.Is(err, auth.ErrActiveCopies) {
-			return model.Wrap(model.CodeConflict, "purge authentication profile", err)
-		}
-		return model.Wrap(model.CodeUnavailable, "purge authentication profile", err)
-	}
-	return nil
-}
-
-func (service *HarnessService) Run(ctx context.Context, request HarnessRunRequest) (result HarnessRunResult, returnErr error) {
-	if service == nil || service.lifecycle == nil || service.auth == nil {
-		return result, model.NewError(model.CodeUnavailable, "harness service is unavailable", nil)
-	}
-	name, err := harness.ParseName(request.Agent)
+	workspaceName, err := model.ParseWorkspaceName(request.Workspace)
 	if err != nil {
 		return result, model.NewError(model.CodeInvalidInput, err.Error(), nil)
+	}
+	access, unlock, err := service.workspaces.workspaceAccess(ctx, request.Root, workspaceName, true)
+	if err != nil {
+		return result, err
+	}
+	locked := true
+	releaseAccess := func() error {
+		if !locked {
+			return nil
+		}
+		locked = false
+		return unlock()
+	}
+	defer func() { returnErr = errors.Join(returnErr, releaseAccess()) }()
+	if access.Manifest.State != model.StateRunning {
+		return result, model.NewError(model.CodeConflict, "agent requires a running workspace", nil)
+	}
+	if access.Manifest.ActiveSession != nil {
+		return result, model.NewError(model.CodeConflict, "workspace has an active session", nil)
+	}
+
+	name, err := resolveAgent(request.Agent, access.Manifest.DefaultAgent, access.Plan.Agents.Default, access.Plan.Agents.Allowed)
+	if err != nil {
+		return result, err
 	}
 	adapter := service.adapters[name]
 	if adapter == nil {
 		return result, model.NewError(model.CodeUnavailable, fmt.Sprintf("harness %q is not installed", name), nil)
 	}
-	profileName := request.Profile
-	if profileName == "" {
-		profileName = "default"
+	if request.Browser && access.Plan.Browser == nil {
+		return result, model.NewError(model.CodeUnapproved, "browser is not approved for this project", nil)
 	}
-	profile := auth.Profile{Harness: name, Name: profileName}
-	startRequest := StartRequest{Root: request.Root, ApproveConfig: request.ApproveConfig, Agent: string(name)}
-	approved, err := service.lifecycle.inspectApproved(ctx, startRequest)
+	invocationID, err := service.newRunID(service.now().UTC())
 	if err != nil {
-		return result, err
-	}
-	if _, err := authorizeHarnessGrant(approved.Plan, name, profileName); err != nil {
-		return result, err
-	}
-	started, err := service.lifecycle.Start(ctx, startRequest)
-	if err != nil {
-		return result, err
-	}
-	defer func() { returnErr = errors.Join(returnErr, started.hostBridges.Close()) }()
-	invocationID, err := service.lifecycle.newRunID(service.lifecycle.now().UTC())
-	if err != nil {
-		return result, model.Wrap(model.CodeInternal, "generate harness invocation ID", err)
+		return result, model.Wrap(model.CodeInternal, "generate agent session ID", err)
 	}
 	roots := harnessRoots(invocationID)
-	snapshot, current, err := service.workspace(ctx, request.Root, started.ProjectID, string(name))
-	if err != nil {
-		return result, err
-	}
-	if err := service.verifyHarnessBuildAttestation(ctx, snapshot, current, adapter, func(stdout, stderr io.Writer) (runtime.Exit, error) {
-		return service.shell(ctx, request.Root, string(name), []string{"/bin/cat", "--", harness.BuildAttestationPath}, nil, false, nil, stdout, stderr, nil)
-	}); err != nil {
-		return result, err
-	}
-	persistence, err := authorizeHarnessGrant(current, name, profileName)
-	if err != nil {
-		return result, err
-	}
-	if persistence == "sandbox" {
-		profile = auth.SandboxProfile(profile, started.ProjectID, string(current.Sandbox.Name))
-	}
 	if diagnostics, err := adapter.Preflight(ctx, roots); err != nil {
 		return result, err
 	} else {
@@ -163,82 +137,119 @@ func (service *HarnessService) Run(ctx context.Context, request HarnessRunReques
 			}
 		}
 	}
-	layout := adapter.AuthLayout()
-	var copy auth.Copy
-	if persistence == "global" {
-		if _, err := service.auth.Ensure(ctx, profile, adapter); err != nil {
-			return result, model.Wrap(model.CodeUnavailable, "ensure authentication profile", err)
-		}
-		copy, err = service.auth.PrepareGlobalSandbox(ctx, profile, invocationID, started.ProjectID, string(current.Sandbox.Name), adapter)
-	} else {
-		copy, err = service.auth.PrepareSandbox(ctx, profile, invocationID, adapter)
-	}
+	workspaceAuth, err := service.auth.AcquireWorkspace(ctx, WorkspaceAuthRequest{
+		ProjectID: access.Manifest.ProjectID, Workspace: workspaceName, Agent: name, SessionID: invocationID,
+	})
 	if err != nil {
-		return result, model.Wrap(model.CodeUnavailable, "prepare authentication profile copy", err)
+		return result, err
 	}
 	cleanupBase := context.WithoutCancel(ctx)
-	defer func() {
-		cleanupCtx, cancelCleanup := context.WithTimeout(cleanupBase, 30*time.Second)
-		defer cancelCleanup()
-		returnErr = errors.Join(returnErr, service.auth.RemoveRun(cleanupCtx, copy))
-	}()
-	if err := service.prepareGuestRoots(ctx, snapshot, roots); err != nil {
+	authHeld := true
+	releaseAuth := func() error {
+		if !authHeld {
+			return nil
+		}
+		authHeld = false
+		cleanupCtx, cancel := context.WithTimeout(cleanupBase, 30*time.Second)
+		defer cancel()
+		return service.auth.ReleaseWorkspace(cleanupCtx, workspaceAuth)
+	}
+	defer func() { returnErr = errors.Join(returnErr, releaseAuth()) }()
+
+	if err := service.prepareGuestRoots(ctx, access.Workspace, roots); err != nil {
 		return result, err
 	}
 	defer func() {
-		cleanupCtx, cancelCleanup := context.WithTimeout(cleanupBase, 30*time.Second)
-		defer cancelCleanup()
-		_, cleanupErr := service.shell(cleanupCtx, request.Root, string(name), []string{"/bin/rm", "-rf", "--", path.Dir(roots.Home)}, nil, false, nil, nil, nil, nil)
+		cleanupCtx, cancel := context.WithTimeout(cleanupBase, 30*time.Second)
+		defer cancel()
+		_, cleanupErr := service.shell(cleanupCtx, access.Workspace, []string{"/bin/rm", "-rf", "--", path.Dir(roots.Home)}, nil, false, nil, nil, nil, nil)
 		returnErr = errors.Join(returnErr, cleanupErr)
 	}()
-	if err := service.copyAuthToGuest(ctx, snapshot, copy.Root, roots.Auth, layout); err != nil {
+	if err := service.copyAuthToGuest(ctx, access.Workspace, workspaceAuth.Copy.Root, roots.Auth, workspaceAuth.Layout); err != nil {
 		return result, err
 	}
-	readOnlyConfig, err := service.copyReadOnlyConfigToGuest(ctx, snapshot, copy.ReadOnlyRoot, roots.ReadOnlyConfig, layout)
+	readOnlyConfig, err := service.copyReadOnlyConfigToGuest(ctx, access.Workspace, workspaceAuth.Copy.ReadOnlyRoot, roots.ReadOnlyConfig, workspaceAuth.Layout)
 	if err != nil {
 		return result, err
 	}
 	if len(readOnlyConfig) != 0 {
 		defer func() {
-			cleanupCtx, cancelCleanup := context.WithTimeout(cleanupBase, 30*time.Second)
-			defer cancelCleanup()
-			returnErr = errors.Join(returnErr, service.removeReadOnlyGuestRoot(cleanupCtx, snapshot, roots.ReadOnlyConfig))
+			cleanupCtx, cancel := context.WithTimeout(cleanupBase, 30*time.Second)
+			defer cancel()
+			returnErr = errors.Join(returnErr, service.removeReadOnlyGuestRoot(cleanupCtx, access.Workspace, roots.ReadOnlyConfig))
 		}()
+	}
+	if err := service.verifyHarnessBuildAttestation(ctx, access.Workspace, access.Plan, adapter, func(stdout, stderr io.Writer) (runtime.Exit, error) {
+		return service.shell(ctx, access.Workspace, []string{"/bin/cat", "--", harness.BuildAttestationPath}, nil, false, nil, stdout, stderr, nil)
+	}); err != nil {
+		return result, err
 	}
 	artifact := adapter.Version()
 	var versionStdout, versionStderr cappedBuffer
 	versionStdout.limit = maxHarnessVersionOutput
 	versionStderr.limit = maxHarnessVersionOutput
-	versionExit, err := service.shell(ctx, request.Root, string(name), []string{artifact.Executable, "--version"}, rootEnvironment(roots, layout), false, nil, &versionStdout, &versionStderr, nil)
+	versionExit, err := service.shell(ctx, access.Workspace, []string{artifact.Executable, "--version"}, rootEnvironment(roots, workspaceAuth.Layout), false, nil, &versionStdout, &versionStderr, nil)
 	if err != nil {
 		return result, err
 	}
-	if versionExit.Code == nil || *versionExit.Code != 0 {
+	if versionExit.Code == nil || *versionExit.Code != 0 || versionExit.Signal != "" {
 		return result, model.NewError(model.CodeUnavailable, fmt.Sprintf("%s version command failed", name), nil)
 	}
 	if err := adapter.ValidateVersion(versionStdout.String(), versionStderr.String()); err != nil {
 		return result, model.Wrap(model.CodeUnavailable, "validate pinned harness version", err)
 	}
-	mcpRequest := harness.MCPRequest{Roots: roots, Servers: append([]harness.MCPServer(nil), request.MCPServers...)}
+
+	var browser *browserSession
+	var servers []harness.MCPServer
+	if request.Browser {
+		browser, err = service.createBrowserSession(ctx, access)
+		if err != nil {
+			return result, err
+		}
+		servers = []harness.MCPServer{browser.Server}
+	}
+	cleanupBrowser := func() error {
+		if browser == nil {
+			return nil
+		}
+		session := browser
+		browser = nil
+		cleanupCtx, cancel := context.WithTimeout(cleanupBase, browserCleanupTimeout)
+		defer cancel()
+		if locked {
+			index, found := manifestResourceIndex(access.Manifest.Resources, runtime.ResourceBrowser)
+			if !found || access.Manifest.Resources[index].Name != session.Record.Name {
+				return model.NewError(model.CodeAmbiguous, "browser cleanup ownership changed before agent execution", nil)
+			}
+			return service.deleteBrowserWithAccess(cleanupCtx, access, index)
+		}
+		return service.deleteBrowserSession(cleanupCtx, session)
+	}
+	defer func() { returnErr = errors.Join(returnErr, cleanupBrowser()) }()
+
+	mcpRequest := harness.MCPRequest{Roots: roots, Servers: servers}
 	injection, err := adapter.EphemeralMCP(mcpRequest)
 	if err != nil {
 		return result, err
 	}
-	if err := service.installGeneratedFiles(ctx, snapshot, copy.Root, roots, injection.Files); err != nil {
+	if err := service.installGeneratedFiles(ctx, access.Workspace, workspaceAuth.Copy.Root, roots, injection.Files); err != nil {
 		return result, err
 	}
-	if err := service.verifyEffectiveMCP(ctx, request.Root, name, adapter, mcpRequest, injection); err != nil {
+	if err := service.verifyEffectiveMCP(ctx, access.Workspace, invocationID, adapter, mcpRequest, injection); err != nil {
 		return result, err
 	}
-	spec, err := adapter.Invocation(harness.InvocationRequest{Roots: roots, Prompt: request.Prompt, Interactive: request.Interactive, Environment: cloneEnvironment(request.Environment), ReadOnlyConfig: readOnlyConfig})
+	interactive := request.Prompt == ""
+	spec, err := adapter.Invocation(harness.InvocationRequest{
+		Roots: roots, Prompt: request.Prompt, Interactive: interactive, ReadOnlyConfig: readOnlyConfig,
+	})
 	if err != nil {
 		return result, err
 	}
 	if err := harness.ValidateExecSpec(spec); err != nil {
 		return result, model.Wrap(model.CodeInvalidInput, "validate harness invocation", err)
 	}
-	if spec.Cwd != roots.Workspace {
-		return result, model.NewError(model.CodeInvalidInput, "harness working directory must be the workspace root", nil)
+	if spec.Cwd != roots.Workspace || spec.Terminal != interactive {
+		return result, model.NewError(model.CodeInvalidInput, "harness invocation does not match the agent session mode", nil)
 	}
 	spec.Argv = insertHarnessArgs(spec.Argv, injection.Args)
 	for key, value := range injection.Env {
@@ -247,33 +258,77 @@ func (service *HarnessService) Run(ctx context.Context, request HarnessRunReques
 		}
 		spec.Env[key] = value
 	}
-	spec.Env, err = mergeHostBridgeEnvironment(spec.Env, started.hostBridges.Environment())
-	if err != nil {
-		return result, err
-	}
-	result = HarnessRunResult{Agent: name, Version: artifact.Version}
+	result = AgentRunResult{Agent: name, Version: artifact.Version}
 	if request.BeforeExec != nil {
 		if err := request.BeforeExec(result); err != nil {
-			return result, model.Wrap(model.CodeInternal, "render harness status", err)
+			return result, model.Wrap(model.CodeInternal, "render agent status", err)
 		}
 	}
-	exit, invocationErr := service.shellWithSecretEnvironment(ctx, request.Root, string(name), spec.Argv, spec.Env, adapter.RedactionRules().EnvironmentKeys, request.Interactive, request.Stdin, request.Stdout, request.Stderr, request.RunInteractive)
+	browserResource := ""
+	if browser != nil {
+		browserResource = browser.Record.ExpectedID
+	}
+	workspaceRunID := access.Manifest.RunID
+	access.Manifest.ActiveSession = &state.SessionRecord{
+		SessionID: invocationID, Kind: "agent", Agent: string(name),
+		BrowserResource: browserResource, StartedAt: service.now().UTC(),
+	}
+	if err := service.workspaces.replaceManifest(ctx, access.Manifest); err != nil {
+		return result, err
+	}
+	if err := releaseAccess(); err != nil {
+		return result, err
+	}
+	sessionMarked := true
+	defer func() {
+		if !sessionMarked {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(cleanupBase, browserCleanupTimeout)
+		defer cancel()
+		returnErr = errors.Join(returnErr, service.workspaces.clearMatchingSession(
+			cleanupCtx, request.Root, workspaceName, workspaceRunID, invocationID,
+		))
+	}()
+	exit, invocationErr := service.shellWithSecretEnvironment(
+		ctx, access.Workspace, invocationID, spec.Argv, spec.Env, adapter.RedactionRules().EnvironmentKeys,
+		interactive, request.Stdin, request.Stdout, request.Stderr, request.RunInteractive,
+	)
+	postAccess, postUnlock, postErr := service.workspaces.workspaceAccess(cleanupBase, request.Root, workspaceName, false)
+	if postErr != nil {
+		browserErr := cleanupBrowser()
+		result.Exit = exit
+		return result, errors.Join(invocationErr, browserErr, postErr)
+	}
+	if postAccess.Manifest.RunID != workspaceRunID || postAccess.Manifest.ActiveSession == nil || postAccess.Manifest.ActiveSession.SessionID != invocationID {
+		unlockErr := postUnlock()
+		browserErr := cleanupBrowser()
+		result.Exit = exit
+		return result, errors.Join(invocationErr, browserErr, unlockErr, model.NewError(model.CodeConflict, "agent session was ended by workspace lifecycle", nil))
+	}
+	access, unlock, locked = postAccess, postUnlock, true
+	browserErr := cleanupBrowser()
 	syncCtx, cancelSync := context.WithTimeout(cleanupBase, 30*time.Second)
 	defer cancelSync()
-	pullErr := service.copyAuthFromGuest(syncCtx, snapshot, copy, roots.Auth, adapter)
+	var pullErr error
 	var promotion auth.Promotion
 	var promotionErr error
-	if pullErr == nil {
-		promotion, promotionErr = service.auth.Promote(syncCtx, copy, adapter)
+	if browserErr == nil {
+		pullErr = service.copyAuthFromGuest(syncCtx, access.Workspace, workspaceAuth.Copy, roots.Auth, adapter)
+		if pullErr == nil {
+			promotion, promotionErr = service.auth.PromoteWorkspace(syncCtx, workspaceAuth)
+		}
+		access.Manifest.ActiveSession = nil
+		promotionErr = errors.Join(promotionErr, service.workspaces.replaceManifest(syncCtx, access.Manifest))
+		sessionMarked = false
+	} else {
+		sessionMarked = false // retain the durable marker so Stop can retry ambiguous browser cleanup.
 	}
 	result.Exit = exit
 	result.AuthPromotion = promotion
-	if promotion.Conflict {
-		promotionErr = errors.Join(promotionErr, model.NewError(model.CodeConflict, "authentication refresh conflicted; candidate preserved", nil))
-	}
-	return result, errors.Join(invocationErr, pullErr, promotionErr)
+	return result, errors.Join(invocationErr, browserErr, pullErr, promotionErr)
 }
-func (service *HarnessService) verifyEffectiveMCP(ctx context.Context, root string, name harness.Name, adapter harness.Adapter, request harness.MCPRequest, injection harness.ConfigInjection) error {
+func (service *AgentService) verifyEffectiveMCP(ctx context.Context, snapshot runtime.ResourceSnapshot, sessionID model.RunID, adapter harness.Adapter, request harness.MCPRequest, injection harness.ConfigInjection) error {
 	verifier, required := adapter.(harness.MCPVerifier)
 	if !required {
 		return nil
@@ -291,7 +346,7 @@ func (service *HarnessService) verifyEffectiveMCP(ctx context.Context, root stri
 	var stdout, stderr cappedBuffer
 	stdout.limit = maxHarnessVersionOutput
 	stderr.limit = maxHarnessVersionOutput
-	exit, err := service.shellWithSecretEnvironment(ctx, root, string(name), spec.Argv, spec.Env, adapter.RedactionRules().EnvironmentKeys, false, nil, &stdout, &stderr, nil)
+	exit, err := service.shellWithSecretEnvironment(ctx, snapshot, sessionID, spec.Argv, spec.Env, adapter.RedactionRules().EnvironmentKeys, false, nil, &stdout, &stderr, nil)
 	if err != nil {
 		return model.Wrap(model.CodeUnavailable, "inspect effective MCP registry", err)
 	}
@@ -304,26 +359,29 @@ func (service *HarnessService) verifyEffectiveMCP(ctx context.Context, root stri
 	return nil
 }
 
-func authorizeHarnessGrant(execution plan.ExecutionPlan, name harness.Name, profile string) (string, error) {
-	if execution.Agent != string(name) {
-		return "", model.NewError(model.CodeUnapproved, "selected harness is not authorized by the revalidated plan", nil)
+func resolveAgent(explicit, workspaceDefault, projectDefault string, allowed []string) (harness.Name, error) {
+	selected := explicit
+	if selected == "" {
+		selected = workspaceDefault
 	}
-	persistence := ""
-	for _, grant := range execution.Auth {
-		if grant.Harness != string(name) || grant.Profile != profile {
-			continue
+	if selected == "" {
+		selected = projectDefault
+	}
+	name, err := harness.ParseName(selected)
+	if err != nil {
+		return "", model.NewError(model.CodeInvalidInput, "resolve agent: "+err.Error(), nil)
+	}
+	approved := false
+	for _, candidate := range allowed {
+		if candidate == string(name) {
+			approved = true
+			break
 		}
-		if persistence != "" {
-			return "", model.NewError(model.CodeUnapproved, "revalidated plan contains duplicate authentication grants", nil)
-		}
-		persistence = grant.Persistence
 	}
-	switch persistence {
-	case "global", "sandbox":
-		return persistence, nil
-	default:
-		return "", model.NewError(model.CodeUnapproved, fmt.Sprintf("authentication profile %q is not granted for harness %q", profile, name), nil)
+	if !approved {
+		return "", model.NewError(model.CodeUnapproved, fmt.Sprintf("agent %q is not in agents.allowed", name), nil)
 	}
+	return name, nil
 }
 
 func harnessRoots(runID model.RunID) harness.RunRoots {
@@ -340,7 +398,7 @@ func harnessRoots(runID model.RunID) harness.RunRoots {
 	}
 }
 
-func (service *HarnessService) prepareGuestRoots(ctx context.Context, snapshot runtime.ResourceSnapshot, roots harness.RunRoots) error {
+func (service *AgentService) prepareGuestRoots(ctx context.Context, snapshot runtime.ResourceSnapshot, roots harness.RunRoots) error {
 	if err := harness.ValidateRoots(roots); err != nil {
 		return err
 	}
@@ -352,20 +410,7 @@ func (service *HarnessService) prepareGuestRoots(ctx context.Context, snapshot r
 	return nil
 }
 
-func (service *HarnessService) workspace(ctx context.Context, root string, projectID model.ProjectID, agent string) (runtime.ResourceSnapshot, plan.ExecutionPlan, error) {
-	manifest, err := service.lifecycle.oneLiveManifest(ctx, projectID)
-	if err != nil {
-		return runtime.ResourceSnapshot{}, plan.ExecutionPlan{}, err
-	}
-	current, err := service.lifecycle.revalidateApprovedPlan(ctx, StartRequest{Root: root, ApproveConfig: manifest.PlanHash, Agent: agent}, manifest.PlanHash)
-	if err != nil {
-		return runtime.ResourceSnapshot{}, plan.ExecutionPlan{}, err
-	}
-	snapshot, _, err := service.lifecycle.inspectVerifiedWorkspace(ctx, manifest, current)
-	return snapshot, current, err
-}
-
-func (service *HarnessService) verifyHarnessBuildAttestation(
+func (service *AgentService) verifyHarnessBuildAttestation(
 	ctx context.Context,
 	snapshot runtime.ResourceSnapshot,
 	execution plan.ExecutionPlan,
@@ -432,17 +477,95 @@ func pinnedImageDigest(reference string) (string, bool) {
 	return digest, true
 }
 
-func (service *HarnessService) shell(ctx context.Context, root, agent string, argv []string, environment map[string]string, terminalMode bool, stdin io.Reader, stdout, stderr io.Writer, runInteractive InteractiveChildRunner) (runtime.Exit, error) {
-	result, err := service.lifecycle.Shell(ctx, ShellRequest{Root: root, Agent: agent, Argv: append([]string(nil), argv...), Env: cloneEnvironment(environment), Terminal: terminalMode, Stdin: stdin, Stdout: stdout, Stderr: stderr, RunInteractive: runInteractive})
-	return result.Exit, err
+func (service *AgentService) shell(ctx context.Context, snapshot runtime.ResourceSnapshot, argv []string, environment map[string]string, terminalMode bool, stdin io.Reader, stdout, stderr io.Writer, runInteractive InteractiveChildRunner) (runtime.Exit, error) {
+	return service.shellWithSecretEnvironment(ctx, snapshot, "", argv, environment, nil, terminalMode, stdin, stdout, stderr, runInteractive)
 }
 
-func (service *HarnessService) shellWithSecretEnvironment(ctx context.Context, root, agent string, argv []string, environment map[string]string, secretEnvironmentKeys []string, terminalMode bool, stdin io.Reader, stdout, stderr io.Writer, runInteractive InteractiveChildRunner) (runtime.Exit, error) {
-	result, err := service.lifecycle.Shell(ctx, ShellRequest{Root: root, Agent: agent, Argv: append([]string(nil), argv...), Env: cloneEnvironment(environment), SecretEnvironmentKeys: append([]string(nil), secretEnvironmentKeys...), Terminal: terminalMode, Stdin: stdin, Stdout: stdout, Stderr: stderr, RunInteractive: runInteractive})
-	return result.Exit, err
+func (service *AgentService) shellWithSecretEnvironment(ctx context.Context, snapshot runtime.ResourceSnapshot, sessionID model.RunID, argv []string, environment map[string]string, secretEnvironmentKeys []string, terminalMode bool, stdin io.Reader, stdout, stderr io.Writer, runInteractive InteractiveChildRunner) (exit runtime.Exit, returnErr error) {
+	ordinary, secret, err := partitionExecEnvironment(environment, secretEnvironmentKeys)
+	if err != nil {
+		return exit, model.Wrap(model.CodeInvalidInput, "validate agent environment", err)
+	}
+	var secretPath runtime.GuestPath
+	if len(secret) != 0 {
+		if _, err := model.ParseRunID(string(sessionID)); err != nil {
+			return exit, model.Wrap(model.CodeInvalidInput, "validate agent session ID", err)
+		}
+		contents, err := encodeSecretEnvironment(secret)
+		if err != nil {
+			return exit, model.Wrap(model.CodeInvalidInput, "encode agent secret environment", err)
+		}
+		secretPath, err = secretEnvironmentGuestPath(sessionID)
+		if err != nil {
+			return exit, model.Wrap(model.CodeInternal, "allocate agent secret environment path", err)
+		}
+		stage := runtime.ExecSpec{
+			Argv:       []string{DefaultGuestHelperPath, "stage-env", "--path", string(secretPath)},
+			WorkingDir: workspaceGuestRoot,
+			User:       service.workspaces.user(),
+		}
+		stageExit, stageErr := service.workspaces.execWorkspace(ctx, snapshot, stage, runtime.ExecIO{Stdin: bytes.NewReader(contents)})
+		if stageErr != nil || !successfulGuestCommand(stageExit) {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), secretEnvironmentCleanupTimeout)
+			defer cancel()
+			cleanupErr := service.cleanupAgentSecretEnvironment(cleanupCtx, snapshot, secretPath)
+			if stageErr == nil {
+				stageErr = model.NewError(model.CodeUnavailable, "stage guest secret environment failed", nil)
+			}
+			return exit, errors.Join(stageErr, cleanupErr)
+		}
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), secretEnvironmentCleanupTimeout)
+			defer cancel()
+			returnErr = errors.Join(returnErr, service.cleanupAgentSecretEnvironment(cleanupCtx, snapshot, secretPath))
+		}()
+	}
+	arguments := append([]string{DefaultGuestHelperPath, "exec"}, func() []string {
+		if secretPath == "" {
+			return []string{"--"}
+		}
+		return []string{"--env-file", string(secretPath), "--"}
+	}()...)
+	arguments = append(arguments, argv...)
+	spec := runtime.ExecSpec{
+		Argv: arguments, Env: harnessEnvironment(ordinary), WorkingDir: workspaceGuestRoot,
+		User: service.workspaces.user(), Terminal: terminalMode,
+	}
+	if !terminalMode {
+		return service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stdin: stdin, Stdout: stdout, Stderr: stderr})
+	}
+	if runInteractive == nil {
+		return exit, model.NewError(model.CodeInvalidInput, "interactive agent runner is not configured", nil)
+	}
+	process, err := service.workspaces.prepareWorkspaceExec(ctx, snapshot, spec)
+	if err != nil {
+		return exit, err
+	}
+	return runInteractive(ctx, InteractiveChild{
+		Argv: append([]string{process.Executable}, process.Args...), Env: append([]string(nil), process.Env...),
+		Dir: process.Dir, Stdin: stdin, Stdout: stdout, Stderr: stderr,
+	})
 }
 
-func (service *HarnessService) copyAuthToGuest(ctx context.Context, snapshot runtime.ResourceSnapshot, sourceRoot, guestRoot string, layout harness.AuthLayout) error {
+func (service *AgentService) cleanupAgentSecretEnvironment(ctx context.Context, snapshot runtime.ResourceSnapshot, name runtime.GuestPath) error {
+	if name == "" {
+		return nil
+	}
+	spec := runtime.ExecSpec{
+		Argv:       []string{DefaultGuestHelperPath, "exec", "--", "/bin/rm", "-rf", "--", string(name)},
+		WorkingDir: workspaceGuestRoot, User: service.workspaces.user(),
+	}
+	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{})
+	if err != nil {
+		return err
+	}
+	if !successfulGuestCommand(exit) {
+		return model.NewError(model.CodeUnavailable, "remove guest secret environment failed", nil)
+	}
+	return nil
+}
+
+func (service *AgentService) copyAuthToGuest(ctx context.Context, snapshot runtime.ResourceSnapshot, sourceRoot, guestRoot string, layout harness.AuthLayout) error {
 	for _, artifact := range layout.CredentialArtifacts {
 		source := filepath.Join(sourceRoot, filepath.FromSlash(artifact))
 		sourceInfo, err := os.Lstat(source)
@@ -479,7 +602,7 @@ func (service *HarnessService) copyAuthToGuest(ctx context.Context, snapshot run
 	return nil
 }
 
-func (service *HarnessService) copyReadOnlyConfigToGuest(ctx context.Context, snapshot runtime.ResourceSnapshot, sourceRoot, guestRoot string, layout harness.AuthLayout) (result []string, returnErr error) {
+func (service *AgentService) copyReadOnlyConfigToGuest(ctx context.Context, snapshot runtime.ResourceSnapshot, sourceRoot, guestRoot string, layout harness.AuthLayout) (result []string, returnErr error) {
 	staged := make([]string, 0, len(layout.ReadOnlyConfig))
 	rootMayExist := false
 	defer func() {
@@ -526,7 +649,7 @@ func (service *HarnessService) copyReadOnlyConfigToGuest(ctx context.Context, sn
 	return staged, nil
 }
 
-func (service *HarnessService) copyAuthFromGuest(ctx context.Context, snapshot runtime.ResourceSnapshot, copy auth.Copy, guestRoot string, adapter harness.Adapter) error {
+func (service *AgentService) copyAuthFromGuest(ctx context.Context, snapshot runtime.ResourceSnapshot, copy auth.WorkspaceCopy, guestRoot string, adapter harness.Adapter) error {
 	layout := adapter.AuthLayout()
 	staging, err := os.MkdirTemp(filepath.Dir(copy.Root), ".guest-auth-pull-")
 	if err != nil {
@@ -542,23 +665,22 @@ func (service *HarnessService) copyAuthFromGuest(ctx context.Context, snapshot r
 		if err := os.MkdirAll(filepath.Dir(staged), 0o700); err != nil {
 			return err
 		}
-		present, err := service.exportGuestFile(ctx, snapshot, guestPath, staged, "auth", layout.MaxArtifactBytes)
-		if err != nil {
-			return model.Wrap(model.CodeUnavailable, "export authentication from sandbox", err)
-		}
-		if !present {
-			continue
+		if _, err := service.exportGuestFile(ctx, snapshot, guestPath, staged, "auth", layout.MaxArtifactBytes); err != nil {
+			return model.Wrap(model.CodeUnavailable, "export workspace authentication", err)
 		}
 	}
-	if err := service.auth.Refresh(ctx, copy, staging, adapter); err != nil {
-		return model.Wrap(model.CodeUnavailable, "validate authentication refresh", err)
+	if err := adapter.Seed(ctx, harness.SeedRequest{
+		SourceRoot: staging, DestinationRoot: copy.Root,
+		Artifacts: append([]string(nil), layout.CredentialArtifacts...), MaxArtifactBytes: layout.MaxArtifactBytes,
+	}); err != nil {
+		return model.Wrap(model.CodeUnavailable, "validate workspace authentication refresh", err)
 	}
 	return nil
 }
 
 var errGuestExportMissing = errors.New("guest export file is absent")
 
-func (service *HarnessService) exportGuestFile(ctx context.Context, snapshot runtime.ResourceSnapshot, guestPath, hostPath, kind string, maximumBytes int64) (bool, error) {
+func (service *AgentService) exportGuestFile(ctx context.Context, snapshot runtime.ResourceSnapshot, guestPath, hostPath, kind string, maximumBytes int64) (bool, error) {
 	if maximumBytes < 1 {
 		return false, errors.New("guest export size limit is invalid")
 	}
@@ -570,9 +692,9 @@ func (service *HarnessService) exportGuestFile(ctx context.Context, snapshot run
 				"--max-bytes", strconv.FormatInt(maximumBytes, 10), "--path", guestPath,
 			},
 			WorkingDir: "/workspace",
-			User:       service.lifecycle.user(),
+			User:       service.workspaces.user(),
 		}
-		exit, err := service.lifecycle.runtime.Exec(ctx, snapshot, spec, runtime.ExecIO{Stdout: output, Stderr: io.Discard})
+		exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stdout: output, Stderr: io.Discard})
 		if err != nil {
 			return err
 		}
@@ -593,7 +715,7 @@ func (service *HarnessService) exportGuestFile(ctx context.Context, snapshot run
 	return true, nil
 }
 
-func (service *HarnessService) produceGuestFile(ctx context.Context, snapshot runtime.ResourceSnapshot, guestPath, workingDirectory string, maximumBytes int64, command guestproto.CommandSpec) error {
+func (service *AgentService) produceGuestFile(ctx context.Context, snapshot runtime.ResourceSnapshot, guestPath, workingDirectory string, maximumBytes int64, command guestproto.CommandSpec) error {
 	if maximumBytes < 1 {
 		return errors.New("guest production size limit is invalid")
 	}
@@ -614,9 +736,9 @@ func (service *HarnessService) produceGuestFile(ctx context.Context, snapshot ru
 		Argv:       arguments,
 		Env:        append([]string(nil), command.Env...),
 		WorkingDir: "/workspace",
-		User:       service.lifecycle.user(),
+		User:       service.workspaces.user(),
 	}
-	exit, err := service.lifecycle.runtime.Exec(ctx, snapshot, spec, runtime.ExecIO{Stderr: &stderr})
+	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stderr: &stderr})
 	if err != nil {
 		return err
 	}
@@ -630,13 +752,13 @@ func (service *HarnessService) produceGuestFile(ctx context.Context, snapshot ru
 	return nil
 }
 
-func (service *HarnessService) removeGuestExportFile(ctx context.Context, snapshot runtime.ResourceSnapshot, guestPath string) error {
+func (service *AgentService) removeGuestExportFile(ctx context.Context, snapshot runtime.ResourceSnapshot, guestPath string) error {
 	spec := runtime.ExecSpec{
 		Argv:       []string{DefaultGuestHelperPath, "remove-export-file", "--path", guestPath},
 		WorkingDir: "/workspace",
-		User:       service.lifecycle.user(),
+		User:       service.workspaces.user(),
 	}
-	exit, err := service.lifecycle.runtime.Exec(ctx, snapshot, spec, runtime.ExecIO{Stderr: io.Discard})
+	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stderr: io.Discard})
 	if err != nil {
 		return err
 	}
@@ -646,7 +768,7 @@ func (service *HarnessService) removeGuestExportFile(ctx context.Context, snapsh
 	return nil
 }
 
-func (service *HarnessService) installGeneratedFiles(ctx context.Context, snapshot runtime.ResourceSnapshot, stagingRoot string, roots harness.RunRoots, files []harness.GeneratedFile) error {
+func (service *AgentService) installGeneratedFiles(ctx context.Context, snapshot runtime.ResourceSnapshot, stagingRoot string, roots harness.RunRoots, files []harness.GeneratedFile) error {
 	for _, generated := range files {
 		if generated.Mode != 0o600 || len(generated.Data) > 1<<20 || !allowedGeneratedPath(generated.Path, roots) {
 			return model.NewError(model.CodeInvalidInput, "unsafe generated harness configuration", nil)
@@ -661,16 +783,16 @@ func (service *HarnessService) installGeneratedFiles(ctx context.Context, snapsh
 	return nil
 }
 
-func (service *HarnessService) mkdirGuest(ctx context.Context, snapshot runtime.ResourceSnapshot, directory string) error {
+func (service *AgentService) mkdirGuest(ctx context.Context, snapshot runtime.ResourceSnapshot, directory string) error {
 	if _, err := guestDirectoryChain(directory); err != nil {
 		return err
 	}
 	spec := runtime.ExecSpec{
 		Argv:       []string{DefaultGuestHelperPath, "ensure-dir", "--path", directory},
 		WorkingDir: "/workspace",
-		User:       service.lifecycle.user(),
+		User:       service.workspaces.user(),
 	}
-	exit, err := service.lifecycle.runtime.Exec(ctx, snapshot, spec, runtime.ExecIO{})
+	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{})
 	if err != nil {
 		return err
 	}
@@ -680,16 +802,16 @@ func (service *HarnessService) mkdirGuest(ctx context.Context, snapshot runtime.
 	return nil
 }
 
-func (service *HarnessService) stageGuestFile(ctx context.Context, snapshot runtime.ResourceSnapshot, destination string, maximumBytes int64, input io.Reader) error {
+func (service *AgentService) stageGuestFile(ctx context.Context, snapshot runtime.ResourceSnapshot, destination string, maximumBytes int64, input io.Reader) error {
 	if input == nil || maximumBytes < 1 || !allowedGuestStagingPath(destination) {
 		return model.NewError(model.CodeInvalidInput, "unsafe guest auth/config staging path", nil)
 	}
 	spec := runtime.ExecSpec{
 		Argv:       []string{DefaultGuestHelperPath, "stage-file", "--max-bytes", strconv.FormatInt(maximumBytes, 10), "--path", destination},
 		WorkingDir: "/workspace",
-		User:       service.lifecycle.user(),
+		User:       service.workspaces.user(),
 	}
-	exit, err := service.lifecycle.runtime.Exec(ctx, snapshot, spec, runtime.ExecIO{Stdin: input})
+	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stdin: input})
 	if err != nil {
 		return model.Wrap(model.CodeUnavailable, "stage private auth/config file", err)
 	}
@@ -699,11 +821,11 @@ func (service *HarnessService) stageGuestFile(ctx context.Context, snapshot runt
 	return nil
 }
 
-func (service *HarnessService) stageReadOnlyGuestFile(ctx context.Context, snapshot runtime.ResourceSnapshot, destination string, maximumBytes int64, input io.Reader) error {
+func (service *AgentService) stageReadOnlyGuestFile(ctx context.Context, snapshot runtime.ResourceSnapshot, destination string, maximumBytes int64, input io.Reader) error {
 	if input == nil || maximumBytes < 1 || !allowedReadOnlyGuestStagingPath(destination) {
 		return model.NewError(model.CodeInvalidInput, "unsafe read-only guest config staging path", nil)
 	}
-	uid, gid, found := strings.Cut(service.lifecycle.user(), ":")
+	uid, gid, found := strings.Cut(service.workspaces.user(), ":")
 	numericUID, uidErr := strconv.ParseUint(uid, 10, 32)
 	numericGID, gidErr := strconv.ParseUint(gid, 10, 32)
 	if !found || uidErr != nil || gidErr != nil || numericUID == 0 || numericGID == 0 {
@@ -717,7 +839,7 @@ func (service *HarnessService) stageReadOnlyGuestFile(ctx context.Context, snaps
 		WorkingDir: "/workspace",
 		User:       "0:0",
 	}
-	exit, err := service.lifecycle.runtime.Exec(ctx, snapshot, spec, runtime.ExecIO{Stdin: input})
+	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stdin: input})
 	if err != nil {
 		return model.Wrap(model.CodeUnavailable, "stage root-owned read-only config file", err)
 	}
@@ -727,7 +849,7 @@ func (service *HarnessService) stageReadOnlyGuestFile(ctx context.Context, snaps
 	return nil
 }
 
-func (service *HarnessService) removeReadOnlyGuestRoot(ctx context.Context, snapshot runtime.ResourceSnapshot, root string) error {
+func (service *AgentService) removeReadOnlyGuestRoot(ctx context.Context, snapshot runtime.ResourceSnapshot, root string) error {
 	if !allowedReadOnlyGuestRoot(root) {
 		return model.NewError(model.CodeInvalidInput, "unsafe read-only guest cleanup root", nil)
 	}
@@ -736,7 +858,7 @@ func (service *HarnessService) removeReadOnlyGuestRoot(ctx context.Context, snap
 		WorkingDir: "/workspace",
 		User:       "0:0",
 	}
-	exit, err := service.lifecycle.runtime.Exec(ctx, snapshot, spec, runtime.ExecIO{})
+	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{})
 	if err != nil {
 		return model.Wrap(model.CodeUnavailable, "remove root-owned read-only config", err)
 	}

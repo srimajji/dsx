@@ -109,7 +109,7 @@ func leaseOwnedLifetimeManager(t *testing.T, identity LeaseIdentity) *Production
 	if err != nil {
 		t.Fatal(err)
 	}
-	owned, err := ownership.NewIdentity(identity.ProjectID, identity.Sandbox, identity.RunID, dsxruntime.ResourceWorkspace, "workspace")
+	owned, err := ownership.NewIdentity(identity.ProjectID, identity.CanonicalRoot, identity.Workspace, identity.RunID, dsxruntime.ResourceWorkspace, "workspace")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,9 +154,9 @@ func leaseLifetimeSpecs(t *testing.T, lease time.Duration) []RelaySpec {
 func leaseLifetimePaths(stateRoot string, identity LeaseIdentity) leasePaths {
 	root := filepath.Join(stateRoot, bridgeDirectoryName)
 	project := filepath.Join(root, string(identity.ProjectID))
-	sandbox := filepath.Join(project, string(identity.Sandbox))
-	run := filepath.Join(sandbox, string(identity.RunID))
-	return makeLeasePaths(root, project, sandbox, run)
+	workspace := filepath.Join(project, string(identity.Workspace))
+	run := filepath.Join(workspace, string(identity.RunID))
+	return makeLeasePaths(root, project, workspace, run)
 }
 
 func leaseControlEvidence(t *testing.T, manager *ProductionLeaseManager, identity LeaseIdentity, operation, token, digest string) controlResponse {

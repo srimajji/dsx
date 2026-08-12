@@ -19,10 +19,10 @@ import (
 const maxGitDiffBytes = 512 * 1024
 
 const gitHelp = `Usage:
-  dsx git status NAME [--repo MEMBER] [--root PATH] [--format text|json]
-  dsx git diff NAME [--repo MEMBER] [--root PATH] [--format text|json]
-  dsx git fetch NAME [--repo MEMBER] [--root PATH] [--format text|json]
-  dsx git apply NAME [--repo MEMBER] [--root PATH] [--format text|json]
+  dsx git status WORKSPACE [--repo MEMBER] [--root PATH] [--format text|json]
+  dsx git diff WORKSPACE [--repo MEMBER] [--root PATH] [--format text|json]
+  dsx git fetch WORKSPACE [--repo MEMBER] [--root PATH] [--format text|json]
+  dsx git apply WORKSPACE [--repo MEMBER] [--root PATH] [--format text|json]
 `
 
 func runtimeExitCode(exit runtime.Exit, source string) (int, error) {
@@ -30,7 +30,7 @@ func runtimeExitCode(exit runtime.Exit, source string) (int, error) {
 		if exit.Code != nil {
 			return 0, model.NewError(model.CodeInternal, source+" returned both an exit code and a signal", nil)
 		}
-		signal, found := shellSignals[strings.ToUpper(exit.Signal)]
+		signal, found := interactiveSignals[strings.ToUpper(exit.Signal)]
 		if !found {
 			return 0, model.NewError(model.CodeInternal, fmt.Sprintf("%s returned unknown signal %q", source, exit.Signal), nil)
 		}
@@ -62,7 +62,7 @@ func (dispatcher *Dispatcher) executeGit(ctx context.Context, args []string, std
 		return usageError(stderr, "dsx git", fmt.Sprintf("unknown git command %q", operation))
 	}
 	if len(args) == 1 {
-		return usageError(stderr, "dsx git "+operation, operation+" requires a sandbox name")
+		return usageError(stderr, "dsx git "+operation, operation+" requires a workspace name")
 	}
 	if args[1] == "--help" || args[1] == "-h" {
 		if len(args) != 2 {
@@ -73,9 +73,8 @@ func (dispatcher *Dispatcher) executeGit(ctx context.Context, args []string, std
 		}
 		return 0
 	}
-
-	name := args[1]
-	if _, err := model.ParseSandboxName(name); err != nil {
+	workspace, err := model.ParseWorkspaceName(args[1])
+	if err != nil {
 		return usageError(stderr, "dsx git "+operation, err.Error())
 	}
 	flags := newFlagSet("git " + operation)
@@ -94,13 +93,13 @@ func (dispatcher *Dispatcher) executeGit(ctx context.Context, args []string, std
 	if err := validateFormat(*format); err != nil {
 		return reportError(stderr, "dsx git "+operation, err)
 	}
-	if dispatcher == nil || dispatcher.dependencies.Clones == nil {
-		return reportError(stderr, "dsx git "+operation, model.NewError(model.CodeUnavailable, "clone service is unavailable", nil))
+	if dispatcher == nil || dispatcher.dependencies.Git == nil {
+		return reportError(stderr, "dsx git "+operation, model.NewError(model.CodeUnavailable, "workspace Git service is unavailable", nil))
 	}
 
 	switch operation {
 	case "status":
-		result, err := dispatcher.dependencies.Clones.GitStatus(ctx, app.GitStatusRequest{Root: *root, Sandbox: name, Repository: *repository})
+		result, err := dispatcher.dependencies.Git.GitStatus(ctx, app.GitStatusRequest{Root: *root, Workspace: workspace, Repository: *repository})
 		if err != nil {
 			return reportError(stderr, "dsx git status", err)
 		}
@@ -108,7 +107,7 @@ func (dispatcher *Dispatcher) executeGit(ctx context.Context, args []string, std
 			return reportError(stderr, "dsx git status", err)
 		}
 	case "diff":
-		result, err := dispatcher.dependencies.Clones.GitDiff(ctx, app.GitDiffRequest{Root: *root, Sandbox: name, Repository: *repository, MaxBytes: maxGitDiffBytes})
+		result, err := dispatcher.dependencies.Git.GitDiff(ctx, app.GitDiffRequest{Root: *root, Workspace: workspace, Repository: *repository, MaxBytes: maxGitDiffBytes})
 		if err != nil {
 			return reportError(stderr, "dsx git diff", err)
 		}
@@ -116,7 +115,7 @@ func (dispatcher *Dispatcher) executeGit(ctx context.Context, args []string, std
 			return reportError(stderr, "dsx git diff", err)
 		}
 	case "fetch":
-		result, err := dispatcher.dependencies.Clones.GitFetch(ctx, app.GitFetchRequest{Root: *root, Sandbox: name, Repository: *repository})
+		result, err := dispatcher.dependencies.Git.GitFetch(ctx, app.GitFetchRequest{Root: *root, Workspace: workspace, Repository: *repository})
 		if err != nil {
 			return reportError(stderr, "dsx git fetch", err)
 		}
@@ -124,7 +123,7 @@ func (dispatcher *Dispatcher) executeGit(ctx context.Context, args []string, std
 			return reportError(stderr, "dsx git fetch", err)
 		}
 	case "apply":
-		result, err := dispatcher.dependencies.Clones.GitApply(ctx, app.GitApplyRequest{Root: *root, Sandbox: name, Repository: *repository})
+		result, err := dispatcher.dependencies.Git.GitApply(ctx, app.GitApplyRequest{Root: *root, Workspace: workspace, Repository: *repository})
 		if err != nil {
 			return reportError(stderr, "dsx git apply", err)
 		}
@@ -137,23 +136,15 @@ func (dispatcher *Dispatcher) executeGit(ctx context.Context, args []string, std
 
 func renderGitStatus(writer io.Writer, result app.GitStatusResult, format string) error {
 	result.Repositories = append([]gitx.Status(nil), result.Repositories...)
-	sort.SliceStable(result.Repositories, func(left, right int) bool {
-		return result.Repositories[left].Repository < result.Repositories[right].Repository
-	})
+	sort.SliceStable(result.Repositories, func(i, j int) bool { return result.Repositories[i].Repository < result.Repositories[j].Repository })
 	if format == "json" {
 		return encodeJSON(writer, result)
 	}
-	if _, err := fmt.Fprintf(writer, "Project: %q\nSandbox: %q\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Sandbox))); err != nil {
+	if _, err := fmt.Fprintf(writer, "Project: %q\nWorkspace: %q\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Workspace))); err != nil {
 		return model.Wrap(model.CodeInternal, "write git status output", err)
 	}
 	for _, repository := range result.Repositories {
-		if _, err := fmt.Fprintf(writer, "Repository %q: sandbox=%q source_ref=%q source_commit=%q result_branch=%q result_commit=%q host_commit=%q host_tracked_fingerprint=%q host_tracked_clean=%t untracked=%t ignored=%t fetched=%t fetched_commit=%q\n",
-			terminal.SanitizeLine(repository.Repository), terminal.SanitizeLine(repository.Sandbox),
-			terminal.SanitizeLine(repository.SourceRef), terminal.SanitizeLine(repository.SourceCommit),
-			terminal.SanitizeLine(repository.ResultBranch), terminal.SanitizeLine(repository.ResultCommit),
-			terminal.SanitizeLine(repository.HostCommit), terminal.SanitizeLine(repository.HostTrackedFingerprint),
-			repository.HostTrackedClean, repository.WarnUntracked, repository.WarnIgnored, repository.Fetched,
-			terminal.SanitizeLine(repository.FetchedCommit)); err != nil {
+		if _, err := fmt.Fprintf(writer, "Repository %q: workspace=%q source_branch=%q source_revision=%q workspace_branch=%q result_commit=%q host_commit=%q host_tracked_fingerprint=%q host_tracked_clean=%t untracked=%t ignored=%t fetched=%t fetched_commit=%q\n", terminal.SanitizeLine(repository.Repository), terminal.SanitizeLine(repository.Workspace), terminal.SanitizeLine(repository.SourceBranch), terminal.SanitizeLine(repository.SourceRevision), terminal.SanitizeLine(repository.WorkspaceBranch), terminal.SanitizeLine(repository.ResultCommit), terminal.SanitizeLine(repository.HostCommit), terminal.SanitizeLine(repository.HostTrackedFingerprint), repository.HostTrackedClean, repository.WarnUntracked, repository.WarnIgnored, repository.Fetched, terminal.SanitizeLine(repository.FetchedCommit)); err != nil {
 			return model.Wrap(model.CodeInternal, "write git status output", err)
 		}
 	}
@@ -162,28 +153,27 @@ func renderGitStatus(writer io.Writer, result app.GitStatusResult, format string
 
 func renderGitDiff(writer io.Writer, result app.GitDiffResult, format string) error {
 	result.Diffs = append([]app.RepositoryDiff(nil), result.Diffs...)
-	sort.SliceStable(result.Diffs, func(left, right int) bool {
-		return result.Diffs[left].Repository < result.Diffs[right].Repository
-	})
+	sort.SliceStable(result.Diffs, func(i, j int) bool { return result.Diffs[i].Repository < result.Diffs[j].Repository })
 	if format == "json" {
 		return encodeJSON(writer, result)
 	}
-	if _, err := fmt.Fprintf(writer, "Project: %q\nSandbox: %q\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Sandbox))); err != nil {
+	if _, err := fmt.Fprintf(writer, "Project: %q\nWorkspace: %q\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Workspace))); err != nil {
 		return model.Wrap(model.CodeInternal, "write git diff output", err)
 	}
 	for _, diff := range result.Diffs {
 		if _, err := fmt.Fprintf(writer, "Repository %q:\n", terminal.SanitizeLine(diff.Repository)); err != nil {
 			return model.Wrap(model.CodeInternal, "write git diff output", err)
 		}
-		if len(diff.Patch) == 0 {
+		switch {
+		case len(diff.Patch) == 0:
 			if _, err := io.WriteString(writer, "[no changes]\n"); err != nil {
 				return model.Wrap(model.CodeInternal, "write git diff output", err)
 			}
-		} else if bytes.IndexByte(diff.Patch, 0) >= 0 || !utf8.Valid(diff.Patch) {
+		case bytes.IndexByte(diff.Patch, 0) >= 0 || !utf8.Valid(diff.Patch):
 			if _, err := fmt.Fprintf(writer, "[binary diff omitted: %d bytes]\n", len(diff.Patch)); err != nil {
 				return model.Wrap(model.CodeInternal, "write git diff output", err)
 			}
-		} else {
+		default:
 			builder := terminal.NewSanitizedBuilder(len(diff.Patch)*4 + 1)
 			if !builder.WriteString(string(diff.Patch)) || !builder.Complete() {
 				return model.NewError(model.CodeInternal, "git diff could not be rendered safely", nil)
@@ -209,19 +199,20 @@ func renderGitDiff(writer io.Writer, result app.GitDiffResult, format string) er
 
 func renderGitFetch(writer io.Writer, result app.GitFetchResult, format string) error {
 	result.Repositories = append([]gitx.FetchResult(nil), result.Repositories...)
-	sort.SliceStable(result.Repositories, func(left, right int) bool {
-		if result.Repositories[left].Repository != result.Repositories[right].Repository {
-			return result.Repositories[left].Repository < result.Repositories[right].Repository
+	sort.SliceStable(result.Repositories, func(i, j int) bool {
+		left, right := result.Repositories[i], result.Repositories[j]
+		if left.Repository != right.Repository {
+			return left.Repository < right.Repository
 		}
-		if result.Repositories[left].HostRef != result.Repositories[right].HostRef {
-			return result.Repositories[left].HostRef < result.Repositories[right].HostRef
+		if left.HostRef != right.HostRef {
+			return left.HostRef < right.HostRef
 		}
-		return result.Repositories[left].Commit < result.Repositories[right].Commit
+		return left.Commit < right.Commit
 	})
 	if format == "json" {
 		return encodeJSON(writer, result)
 	}
-	if _, err := fmt.Fprintf(writer, "Project: %q\nSandbox: %q\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Sandbox))); err != nil {
+	if _, err := fmt.Fprintf(writer, "Project: %q\nWorkspace: %q\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Workspace))); err != nil {
 		return model.Wrap(model.CodeInternal, "write git fetch output", err)
 	}
 	for _, repository := range result.Repositories {
@@ -234,23 +225,24 @@ func renderGitFetch(writer io.Writer, result app.GitFetchResult, format string) 
 
 func renderGitApply(writer io.Writer, result app.GitApplyResult, format string) error {
 	result.Repositories = append([]gitx.ApplyResult(nil), result.Repositories...)
-	for index := range result.Repositories {
-		result.Repositories[index].Paths = append([]string(nil), result.Repositories[index].Paths...)
-		sort.Strings(result.Repositories[index].Paths)
+	for i := range result.Repositories {
+		result.Repositories[i].Paths = append([]string(nil), result.Repositories[i].Paths...)
+		sort.Strings(result.Repositories[i].Paths)
 	}
-	sort.SliceStable(result.Repositories, func(left, right int) bool {
-		if result.Repositories[left].Repository != result.Repositories[right].Repository {
-			return result.Repositories[left].Repository < result.Repositories[right].Repository
+	sort.SliceStable(result.Repositories, func(i, j int) bool {
+		left, right := result.Repositories[i], result.Repositories[j]
+		if left.Repository != right.Repository {
+			return left.Repository < right.Repository
 		}
-		if result.Repositories[left].AppliedCommit != result.Repositories[right].AppliedCommit {
-			return result.Repositories[left].AppliedCommit < result.Repositories[right].AppliedCommit
+		if left.AppliedCommit != right.AppliedCommit {
+			return left.AppliedCommit < right.AppliedCommit
 		}
-		return strings.Join(result.Repositories[left].Paths, "\x00") < strings.Join(result.Repositories[right].Paths, "\x00")
+		return strings.Join(left.Paths, "\x00") < strings.Join(right.Paths, "\x00")
 	})
 	if format == "json" {
 		return encodeJSON(writer, result)
 	}
-	if _, err := fmt.Fprintf(writer, "Project: %q\nSandbox: %q\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Sandbox))); err != nil {
+	if _, err := fmt.Fprintf(writer, "Project: %q\nWorkspace: %q\n", terminal.SanitizeLine(string(result.ProjectID)), terminal.SanitizeLine(string(result.Workspace))); err != nil {
 		return model.Wrap(model.CodeInternal, "write git apply output", err)
 	}
 	for _, repository := range result.Repositories {

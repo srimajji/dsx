@@ -12,9 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/srimajji/dsx/internal/bridge"
 	"github.com/srimajji/dsx/internal/config"
-	"github.com/srimajji/dsx/internal/model"
 )
 
 type pureResolver struct{}
@@ -28,7 +26,7 @@ func (pureResolver) Resolve(_ context.Context, input ResolveInput) (ExecutionPla
 	}
 	for _, grant := range resolved.Bridges {
 		if grant.Kind == "aws" {
-			return resolved, []config.Diagnostic{{Severity: "warning", Code: "aws_all_profiles_readable", Path: "/aws", Message: bridge.LeappAllProfilesWarning}}, nil
+			return resolved, []config.Diagnostic{{Severity: "warning", Code: "aws_all_profiles_readable", Path: "/aws", Message: "AWS/Leapp access exposes every profile in the approved directory; AWS_PROFILE selects a default but is not credential isolation"}}, nil
 		}
 	}
 	return resolved, nil, nil
@@ -61,34 +59,22 @@ func ResolvePlan(input ResolveInput) (ExecutionPlan, error) {
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
-	ownership := input.Ownership
-	ownership.Labels = append([]KeyValue(nil), ownership.Labels...)
-	sort.Slice(ownership.Labels, func(i, j int) bool {
-		if ownership.Labels[i].Key != ownership.Labels[j].Key {
-			return ownership.Labels[i].Key < ownership.Labels[j].Key
-		}
-		return ownership.Labels[i].Value < ownership.Labels[j].Value
-	})
-
 	plan := ExecutionPlan{
 		ContractVersion: ContractVersion,
 		Project:         input.Project,
-		Sandbox:         input.Sandbox,
-		Mode:            input.Mode,
 		Repositories:    make([]RepositoryPlan, 0),
 		Setup:           make([]ResolvedCommand, 0),
 		Processes:       make([]ResolvedProcess, 0),
 		Mounts:          make([]ResolvedMount, 0),
 		Volumes:         make([]ResolvedVolume, 0),
-		Auth:            make([]ResolvedAuthGrant, 0),
+		Auth:            AuthPlan{Imports: make([]string, 0)},
 		Ports:           make([]PortRequest, 0),
 		Bridges:         make([]BridgeGrant, 0),
-		Ownership:       ownership,
 		Provenance:      make(config.Provenance),
 	}
 	recordIdentitySources(&plan)
 
-	plan.Agent = resolveAgent(input, imports, plan.Provenance)
+	plan.Agents = resolveAgents(input, imports, plan.Provenance)
 	plan.Image, err = resolveImage(input, imports, plan.Provenance)
 	if err != nil {
 		return ExecutionPlan{}, err
@@ -121,7 +107,6 @@ func ResolvePlan(input ResolveInput) (ExecutionPlan, error) {
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
-	recordOwnershipSources(&plan)
 	if err := SetExecutableHash(&plan); err != nil {
 		return ExecutionPlan{}, fmt.Errorf("hash executable plan: %w", err)
 	}
@@ -132,39 +117,34 @@ func recordIdentitySources(plan *ExecutionPlan) {
 	putSource(plan.Provenance, "/contract_version", standardSource)
 	putSource(plan.Provenance, "/project/id", detectedSource)
 	putSource(plan.Provenance, "/project/canonical_root", detectedSource)
-	putSource(plan.Provenance, "/sandbox/name", detectedSource)
-	putSource(plan.Provenance, "/sandbox/run_id", detectedSource)
-	putSource(plan.Provenance, "/mode", detectedSource)
 }
 
-func recordOwnershipSources(plan *ExecutionPlan) {
-	for index := range plan.Ownership.Labels {
-		prefix := fmt.Sprintf("/ownership/labels/%d", index)
-		putSource(plan.Provenance, prefix+"/key", detectedSource)
-		putSource(plan.Provenance, prefix+"/value", detectedSource)
+func resolveAgents(input ResolveInput, imports importedLayer, provenance config.Provenance) AgentPlan {
+	allowed := append([]string(nil), input.Config.Document.Agents.Allowed...)
+	if len(allowed) == 0 {
+		allowed = []string{"codex"}
 	}
-	putSource(plan.Provenance, "/ownership/resource_name", detectedSource)
-}
-
-func resolveAgent(input ResolveInput, imports importedLayer, provenance config.Provenance) string {
-	var result selected[string]
-	if input.Defaults.Agent != "" {
-		result.choose(input.Defaults.Agent, standardSource, PriorityDefault)
+	sort.Strings(allowed)
+	var selectedDefault selected[string]
+	if input.Defaults.DefaultAgent != "" {
+		selectedDefault.choose(input.Defaults.DefaultAgent, standardSource, PriorityDefault)
 	}
 	if imports.declared["/agents/default"] {
-		result.choose(imports.document.Agents.Default, imports.source("/agents/default"), PriorityImport)
+		selectedDefault.choose(imports.document.Agents.Default, imports.source("/agents/default"), PriorityImport)
 	}
 	if projectDeclares(input.Config, "/agents/default", input.Config.Document.Agents.Default != "") {
-		result.choose(input.Config.Document.Agents.Default, projectSource(input.Config, "/agents/default"), PriorityProject)
+		selectedDefault.choose(input.Config.Document.Agents.Default, projectSource(input.Config, "/agents/default"), PriorityProject)
 	}
-	if input.CLI.Agent != "" {
-		result.choose(input.CLI.Agent, cliSource("--agent"), PriorityCLI)
+	if !selectedDefault.set {
+		selectedDefault.choose(allowed[0], standardSource, PriorityDefault)
 	}
-	if !result.set {
-		result.choose("codex", standardSource, PriorityDefault)
+	for index, agent := range allowed {
+		putSource(provenance, fmt.Sprintf("/agents/allowed/%d", index), projectSource(input.Config, "/agents/allowed"))
+		if agent == selectedDefault.value {
+			putSource(provenance, "/agents/default", selectedDefault.source)
+		}
 	}
-	putSource(provenance, "/agent", result.source)
-	return result.value
+	return AgentPlan{Allowed: allowed, Default: selectedDefault.value}
 }
 
 func resolveImage(input ResolveInput, imports importedLayer, provenance config.Provenance) (ResolvedImage, error) {
@@ -578,19 +558,13 @@ func resolveVolumes(input ResolveInput, provenance config.Provenance) []Resolved
 	return volumes
 }
 
-func resolveAuth(input ResolveInput, provenance config.Provenance) []ResolvedAuthGrant {
-	names := sortedKeys(input.Config.Document.AuthProfiles)
-	grants := make([]ResolvedAuthGrant, 0, len(names))
-	for index, name := range names {
-		spec := input.Config.Document.AuthProfiles[name]
-		inputPrefix := "/authProfiles/" + escapePointerToken(name)
-		outputPrefix := fmt.Sprintf("/auth/%d", index)
-		grants = append(grants, ResolvedAuthGrant{Harness: spec.Harness, Profile: name, Persistence: spec.Persistence})
-		putSource(provenance, outputPrefix+"/harness", projectSource(input.Config, inputPrefix+"/harness"))
-		putSource(provenance, outputPrefix+"/profile", projectSource(input.Config, inputPrefix))
-		putSource(provenance, outputPrefix+"/persistence", projectSource(input.Config, inputPrefix+"/persistence"))
+func resolveAuth(input ResolveInput, provenance config.Provenance) AuthPlan {
+	imports := append([]string(nil), input.Config.Document.Auth.Imports...)
+	sort.Strings(imports)
+	for index := range imports {
+		putSource(provenance, fmt.Sprintf("/auth/imports/%d", index), projectSource(input.Config, "/auth/imports"))
 	}
-	return grants
+	return AuthPlan{Imports: imports}
 }
 
 type portCandidate struct {
@@ -626,7 +600,7 @@ func resolvePorts(input ResolveInput, imports importedLayer, provenance config.P
 			return nil, fmt.Errorf("port %q has invalid bind address %q: %w", name, candidate.bind.value, err)
 		}
 		port := PortRequest{Name: name, GuestPort: candidate.guest.value, Protocol: candidate.protocol.value, HostIP: address, ExplicitNonLoopbackGrant: !address.IsLoopback()}
-		if input.Mode != model.ModeClone && candidate.host.set && !candidate.host.value.Dynamic {
+		if candidate.host.set && !candidate.host.value.Dynamic {
 			host := candidate.host.value.Port
 			port.HostPort = &host
 		}
@@ -662,20 +636,11 @@ func mergePort(ports map[string]*portCandidate, spec config.PortConfig, prefix s
 }
 
 func resolveBrowser(input ResolveInput, provenance config.Provenance) (*BrowserPlan, error) {
-	var enabled selected[bool]
-	enabled.choose(false, standardSource, PriorityDefault)
-	if projectDeclares(input.Config, "/browser/enabled", input.Config.Document.Browser.Enabled) {
-		enabled.choose(input.Config.Document.Browser.Enabled, projectSource(input.Config, "/browser/enabled"), PriorityProject)
+	if input.Authority.BrowserImageReference == "" && input.Authority.BrowserImageDigest == "" {
+		return nil, nil
 	}
-	if input.CLI.Browser != nil {
-		enabled.choose(*input.CLI.Browser, cliSource("--browser"), PriorityCLI)
-	}
-	putSource(provenance, "/browser/enabled", enabled.source)
 	putSource(provenance, "/browser/image_reference", standardSource)
 	putSource(provenance, "/browser/image_digest", standardSource)
-	if !enabled.value {
-		return &BrowserPlan{Enabled: false}, nil
-	}
 	digest, err := pinnedDigest(input.Authority.BrowserImageReference)
 	if err != nil {
 		return nil, fmt.Errorf("browser image authority: %w", err)
@@ -686,7 +651,7 @@ func resolveBrowser(input ResolveInput, provenance config.Provenance) (*BrowserP
 	if digest != strings.ToLower(input.Authority.BrowserImageDigest) {
 		return nil, fmt.Errorf("browser image reference digest does not match authority digest")
 	}
-	return &BrowserPlan{Enabled: true, ImageReference: input.Authority.BrowserImageReference, ImageDigest: digest}, nil
+	return &BrowserPlan{ImageReference: input.Authority.BrowserImageReference, ImageDigest: digest}, nil
 }
 
 func resolveBridges(input ResolveInput, imports importedLayer, provenance config.Provenance) ([]BridgeGrant, error) {
@@ -755,10 +720,10 @@ func resolveBridges(input ResolveInput, imports importedLayer, provenance config
 func resolveLimits(input ResolveInput, imports importedLayer, provenance config.Provenance) (ResourceLimits, error) {
 	var cpus selected[int]
 	var memory selected[int64]
-	var clones selected[int]
+	var workspaces selected[int]
 	cpus.choose(input.Defaults.CPUs, standardSource, PriorityDefault)
 	memory.choose(input.Defaults.MemoryBytes, standardSource, PriorityDefault)
-	clones.choose(input.Defaults.MaxConcurrentClones, standardSource, PriorityDefault)
+	workspaces.choose(input.Defaults.MaxConcurrentWorkspaces, standardSource, PriorityDefault)
 	if imports.declared["/resources/cpus"] {
 		cpus.choose(imports.document.Resources.CPUs, imports.source("/resources/cpus"), PriorityImport)
 	}
@@ -769,8 +734,8 @@ func resolveLimits(input ResolveInput, imports importedLayer, provenance config.
 		}
 		memory.choose(bytes, imports.source("/resources/memory"), PriorityImport)
 	}
-	if imports.declared["/resources/maxConcurrentClones"] {
-		clones.choose(imports.document.Resources.MaxConcurrentClones, imports.source("/resources/maxConcurrentClones"), PriorityImport)
+	if imports.declared["/resources/maxConcurrentWorkspaces"] {
+		workspaces.choose(imports.document.Resources.MaxConcurrentWorkspaces, imports.source("/resources/maxConcurrentWorkspaces"), PriorityImport)
 	}
 	resources := input.Config.Document.Resources
 	if projectDeclares(input.Config, "/resources/cpus", resources.CPUs != 0) {
@@ -783,8 +748,8 @@ func resolveLimits(input ResolveInput, imports importedLayer, provenance config.
 		}
 		memory.choose(bytes, projectSource(input.Config, "/resources/memory"), PriorityProject)
 	}
-	if projectDeclares(input.Config, "/resources/maxConcurrentClones", resources.MaxConcurrentClones != 0) {
-		clones.choose(resources.MaxConcurrentClones, projectSource(input.Config, "/resources/maxConcurrentClones"), PriorityProject)
+	if projectDeclares(input.Config, "/resources/maxConcurrentWorkspaces", resources.MaxConcurrentWorkspaces != 0) {
+		workspaces.choose(resources.MaxConcurrentWorkspaces, projectSource(input.Config, "/resources/maxConcurrentWorkspaces"), PriorityProject)
 	}
 	if input.CLI.CPUs != nil {
 		cpus.choose(*input.CLI.CPUs, cliSource("--cpus"), PriorityCLI)
@@ -798,8 +763,8 @@ func resolveLimits(input ResolveInput, imports importedLayer, provenance config.
 	}
 	putSource(provenance, "/limits/cpus", cpus.source)
 	putSource(provenance, "/limits/memory_bytes", memory.source)
-	putSource(provenance, "/limits/max_concurrent_clones", clones.source)
-	return ResourceLimits{CPUs: cpus.value, MemoryBytes: memory.value, MaxConcurrentClones: clones.value}, nil
+	putSource(provenance, "/limits/max_concurrent_workspaces", workspaces.source)
+	return ResourceLimits{CPUs: cpus.value, MemoryBytes: memory.value, MaxConcurrentWorkspaces: workspaces.value}, nil
 }
 
 func parseMemoryBytes(value string) (int64, error) {
@@ -1022,12 +987,12 @@ func (layer *importedLayer) apply(pointer string, parts []string, value any) err
 				return typeError("string")
 			}
 			layer.document.Resources.Memory = candidate
-		case "maxConcurrentClones":
+		case "maxConcurrentWorkspaces":
 			candidate, ok := value.(int)
 			if !ok {
 				return typeError("int")
 			}
-			layer.document.Resources.MaxConcurrentClones = candidate
+			layer.document.Resources.MaxConcurrentWorkspaces = candidate
 		default:
 			return fmt.Errorf("unsupported imported pointer %q", pointer)
 		}

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dsx.dev/schema/config-v1.json",
   "title": "DSX project configuration v1",
-  "description": "Strict, reviewable project configuration for one DSX Linux ARM64 workspace. CLI flags override project values; defaults have lower precedence.",
+  "description": "Strict, reviewable project defaults reused by named private-clone workspaces. CLI flags override the one active project configuration; standard defaults have lower precedence.",
   "examples": [
     {
       "$schema": "https://dsx.dev/schema/config-v1.json",
@@ -10,11 +10,12 @@
       "workspace": { "root": "." },
       "image": { "ref": "ghcr.io/example/project@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
       "agents": { "default": "codex", "allowed": ["codex"] },
+      "auth": { "imports": ["omp", "codex", "opencode"] },
       "ports": [{ "name": "web", "guest": 3000, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" }]
     }
   ],
   "additionalProperties": false,
-  "required": ["schemaVersion", "workspace", "image"],
+  "required": ["schemaVersion", "workspace", "image", "agents"],
   "properties": {
     "$schema": {
       "description": "Editor schema URI for DSX configuration v1.",
@@ -25,7 +26,7 @@
       "const": 1
     },
     "workspace": {
-      "description": "Workspace root and optional composite repository members.",
+      "description": "Local Git checkout root and optional composite repository members transferred into every private-clone workspace.",
       "$ref": "#/$defs/workspace"
     },
     "image": {
@@ -62,16 +63,9 @@
       "description": "Default and allowed harness selection.",
       "$ref": "#/$defs/agents"
     },
-    "authProfiles": {
-      "description": "Named harness authentication profiles and their persistence scope.",
-      "type": "object",
-      "maxProperties": 32,
-      "propertyNames": { "$ref": "#/$defs/name" },
-      "additionalProperties": { "$ref": "#/$defs/authProfile" }
-    },
-    "browser": {
-      "description": "Opt-in isolated browser request; release support remains evidence-gated.",
-      "$ref": "#/$defs/browser"
+    "auth": {
+      "description": "Portable host credential kinds that onboarding may offer for explicit reviewed import.",
+      "$ref": "#/$defs/auth"
     },
     "aws": {
       "description": "Opt-in standard AWS/Leapp directory grant; never contains credential values.",
@@ -88,13 +82,13 @@
       "items": { "$ref": "#/$defs/port" }
     },
     "resources": {
-      "description": "Workspace CPU, memory, and clone-concurrency limits.",
+      "description": "Per-workspace CPU and memory plus project workspace-concurrency limits.",
       "$ref": "#/$defs/resources"
     }
   },
   "$defs": {
     "name": {
-      "description": "Lowercase user-visible identifier used for processes, profiles, members, ports, grants, or volumes.",
+      "description": "Lowercase user-visible identifier used for processes, members, ports, grants, or volumes.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$",
       "maxLength": 63,
@@ -115,18 +109,18 @@
       "examples": ["/workspace", "/var/lib/mysql"]
     },
     "workspace": {
-      "description": "Canonical project-relative workspace root and optional repository member layout.",
+      "description": "Canonical project-relative checkout root and optional repository member layout.",
       "type": "object",
       "additionalProperties": false,
       "required": ["root"],
       "properties": {
         "root": {
-          "description": "Workspace root relative to the project root; normally a single dot.",
+          "description": "Local checkout root relative to the canonical project root; normally a single dot.",
           "$ref": "#/$defs/projectPath",
           "examples": ["."]
         },
         "members": {
-          "description": "Repositories reproduced at the declared relative paths in composite clone mode.",
+          "description": "Repositories reproduced as independent private clones at the declared relative paths.",
           "type": "array",
           "maxItems": 64,
           "items": { "$ref": "#/$defs/member" }
@@ -311,7 +305,7 @@
           "items": { "$ref": "#/$defs/name" }
         },
         "required": {
-          "description": "Whether failure makes the sandbox failed.",
+          "description": "Whether failure makes the requested workspace action fail.",
           "type": "boolean"
         },
         "terminal": {
@@ -319,7 +313,7 @@
           "type": "boolean"
         },
         "health": {
-          "description": "Optional readiness check used by dependencies and agent/browser launch.",
+          "description": "Optional readiness check used by dependencies and explicitly requested agent or browser-session launch.",
           "$ref": "#/$defs/health"
         }
       },
@@ -402,8 +396,8 @@
           "$ref": "#/$defs/guestPath"
         },
         "scope": {
-          "description": "Whether clone sandboxes receive independent state or share project-scoped state.",
-          "enum": ["sandbox", "project"]
+          "description": "Whether each workspace receives independent state or all project workspaces share project-scoped state.",
+          "enum": ["workspace", "project"]
         },
         "persistent": {
           "description": "Whether stop/recreation preserves the volume; clean still removes owned project resources.",
@@ -412,7 +406,7 @@
       }
     },
     "mountSource": {
-      "description": "Exactly one workspace path, named DSX volume, or canonical absolute host path.",
+      "description": "Exactly one private-workspace path, named DSX volume, or reviewed canonical absolute host path. Host source and host-home paths are rejected.",
       "type": "object",
       "additionalProperties": false,
       "required": ["type"],
@@ -422,7 +416,7 @@
           "enum": ["workspace", "volume", "host"]
         },
         "path": {
-          "description": "Project-relative path for workspace sources or canonical absolute path for host sources.",
+          "description": "Project-relative private-clone path for workspace sources or canonical absolute path for reviewed host sources.",
           "type": "string",
           "minLength": 1,
           "maxLength": 1024
@@ -439,7 +433,7 @@
       ]
     },
     "mount": {
-      "description": "Explicit source-to-guest-target mount. Host-directory mounts must be read-only.",
+      "description": "Explicit source-to-guest-target mount. Workspace sources resolve inside the private clone; host-directory mounts must be read-only and cannot expose host source or home.",
       "type": "object",
       "additionalProperties": false,
       "required": ["source", "target"],
@@ -459,48 +453,56 @@
       }
     },
     "agents": {
-      "description": "Harness selection policy for this project.",
+      "description": "The only project authority for harness selection.",
       "type": "object",
       "additionalProperties": false,
+      "required": ["default", "allowed"],
       "properties": {
         "default": {
-          "description": "Harness selected when no CLI override is provided.",
+          "description": "Project fallback when neither an invocation override nor workspace default is set; it must appear in allowed.",
           "enum": ["omp", "codex", "claude", "opencode"]
         },
         "allowed": {
-          "description": "Harnesses permitted for this project; the default must be included.",
+          "description": "Harnesses permitted for this project and for workspace defaults.",
           "type": "array",
           "uniqueItems": true,
+          "minItems": 1,
           "maxItems": 4,
           "items": { "enum": ["omp", "codex", "claude", "opencode"] },
           "examples": [["codex", "claude"]]
         }
-      }
-    },
-    "authProfile": {
-      "description": "Harness-bound credential profile with project/sandbox or global persistence.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["harness", "persistence"],
-      "properties": {
-        "harness": {
-          "description": "Only this harness may use the profile.",
-          "enum": ["omp", "codex", "claude", "opencode"]
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "default": { "const": "omp" } } },
+          "then": { "properties": { "allowed": { "contains": { "const": "omp" } } } }
         },
-        "persistence": {
-          "description": "sandbox scopes state to a sandbox; global survives ordinary project cleanup.",
-          "enum": ["sandbox", "global"]
+        {
+          "if": { "properties": { "default": { "const": "codex" } } },
+          "then": { "properties": { "allowed": { "contains": { "const": "codex" } } } }
+        },
+        {
+          "if": { "properties": { "default": { "const": "claude" } } },
+          "then": { "properties": { "allowed": { "contains": { "const": "claude" } } } }
+        },
+        {
+          "if": { "properties": { "default": { "const": "opencode" } } },
+          "then": { "properties": { "allowed": { "contains": { "const": "opencode" } } } }
         }
-      }
+      ]
     },
-    "browser": {
-      "description": "Isolated disposable Playwright browser request.",
+    "auth": {
+      "description": "Allowlisted portable host credential kinds that setup may detect and offer for a separate explicit import approval.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "description": "Request a separate zero-mount browser VM on the owning private network; the CLI flag may enable but not disable this approved value.",
-          "type": "boolean"
+        "imports": {
+          "description": "Portable harness credentials eligible for reviewed import. Claude is intentionally excluded and requires DSX login.",
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 3,
+          "items": { "enum": ["omp", "codex", "opencode"] },
+          "examples": [["omp", "codex", "opencode"]]
         }
       }
     },
@@ -535,7 +537,7 @@
       "additionalProperties": false,
       "properties": {
         "internet": {
-          "description": "Permit public internet access; enabling the isolated browser requires it.",
+          "description": "Permit public internet access for approved workspace actions.",
           "type": "boolean"
         },
         "hostGrants": {
@@ -607,7 +609,7 @@
       }
     },
     "resources": {
-      "description": "Per-workspace resource and project clone-concurrency limits.",
+      "description": "Per-workspace resources and project workspace-concurrency limit.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -624,8 +626,8 @@
           "pattern": "^[1-9][0-9]*(?:MiB|GiB)$",
           "examples": ["8GiB"]
         },
-        "maxConcurrentClones": {
-          "description": "Maximum running named clone sandboxes for this project; DSX fails rather than queues beyond it.",
+        "maxConcurrentWorkspaces": {
+          "description": "Maximum concurrently running named workspaces for this project; DSX fails rather than queues beyond it.",
           "type": "integer",
           "minimum": 1,
           "maximum": 32,

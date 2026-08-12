@@ -1,13 +1,13 @@
 [
   {
-    "id": "dsx-abcdefghijklmnopqrst-main-browser",
+    "id": "dsx-tracking-chrome-feature-a-browser-1abbf9",
     "configuration": {
-      "id": "dsx-abcdefghijklmnopqrst-main-browser",
+      "id": "dsx-tracking-chrome-feature-a-browser-1abbf9",
       "labels": {
         "dev.dsx.managed": "true",
-        "dev.dsx.contract": "dsx.ownership/v1",
-        "dev.dsx.project": "abcdefghijklmnopqrst",
-        "dev.dsx.sandbox": "main",
+        "dev.dsx.contract": "dsx.ownership/v2",
+        "dev.dsx.project": "dk57swfmuu5gpt6knms5",
+        "dev.dsx.workspace": "feature-a",
         "dev.dsx.run": "01890f5c-7b00-7000-8000-000000000001",
         "dev.dsx.kind": "browser",
         "dev.dsx.role": "browser"
@@ -19,7 +19,7 @@
         "reference": "browser:test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       "mounts": [],
-      "networks": [{"network":"dsx-abcdefghijklmnopqrst-main-network","options":{"hostname":"browser"}}],
+      "networks": [{"network":"dsx-tracking-chrome-feature-a-network-1abbf9","options":{"hostname":"browser"}}],
       "publishedPorts": []
     },
     "status": {
@@ -30,7 +30,7 @@
         "ipv4Gateway":"192.168.64.1",
         "ipv6Address":"fdb1:370c:1cb4:c412::5/64",
         "macAddress":"f2:9c:cd:b7:61:1d",
-        "network":"dsx-abcdefghijklmnopqrst-main-network",
+        "network":"dsx-tracking-chrome-feature-a-network-1abbf9",
         "variant":"reserved"
       }]
     }

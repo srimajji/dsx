@@ -247,7 +247,7 @@ func TestLeappMirrorStopRecoversProvenDeadHelperArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := LeaseIdentity{ProjectID: model.ProjectID("aaaaaaaaaaaaaaaaaaaa"), Sandbox: model.SandboxName("main"), RunID: model.RunID("01890f5c-7b00-7000-8000-000000000071")}
+	identity := leaseTestIdentity(t, "leapp-permissions", "01890f5c-7b00-7000-8000-000000000071")
 	paths, err := manager.ensurePaths(identity)
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +309,7 @@ func TestLeappMirrorStopRecoversProvenDeadHelperArtifacts(t *testing.T) {
 }
 
 func TestLeappMirrorExactReattachAndCrossIdentityControl(t *testing.T) {
-	identity := LeaseIdentity{ProjectID: model.ProjectID("aaaaaaaaaaaaaaaaaaaa"), Sandbox: model.SandboxName("main"), RunID: model.RunID("01890f5c-7b00-7000-8000-000000000041")}
+	identity := leaseTestIdentity(t, "leapp-reattach", "01890f5c-7b00-7000-8000-000000000041")
 	other := identity
 	other.RunID = model.RunID("01890f5c-7b00-7000-8000-000000000042")
 	spec := leappMirrorSpec{CanonicalPath: "/private/source", Source: LeappSourceIdentity{Device: 1, Inode: 2, UID: uint32(os.Geteuid())}}
@@ -377,7 +377,7 @@ func TestLeappDescriptorSnapshotRetriesPairedRotationWithoutMixedGeneration(t *t
 }
 
 func TestLeappMirrorAcceptedReadinessValidationFailureStopsExactHelper(t *testing.T) {
-	identity := LeaseIdentity{ProjectID: model.ProjectID("aaaaaaaaaaaaaaaaaaaa"), Sandbox: model.SandboxName("main"), RunID: model.RunID("01890f5c-7b00-7000-8000-000000000061")}
+	identity := leaseTestIdentity(t, "leapp-readiness", "01890f5c-7b00-7000-8000-000000000061")
 	spec := leappMirrorSpec{CanonicalPath: "/private/source", Source: LeappSourceIdentity{Device: 1, Inode: 2, UID: uint32(os.Geteuid())}}
 	executable := executableIdentity{Path: "/private/dsx", Device: 3, Inode: 4, Size: 5, UID: uint32(os.Geteuid())}
 	digest := strings.Repeat("a", 64)

@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/srimajji/dsx/internal/config"
-	"github.com/srimajji/dsx/internal/model"
 )
 
 type Resolver interface {
@@ -14,9 +13,6 @@ type Resolver interface {
 type ResolveInput struct {
 	Config    config.ValidatedConfig
 	Project   ProjectIdentity
-	Sandbox   SandboxIdentity
-	Mode      model.WorkspaceMode
-	Ownership OwnershipPlan
 	CLI       CLIOverrides
 	Imported  []ImportedValue
 	Defaults  DefaultValues
@@ -24,10 +20,8 @@ type ResolveInput struct {
 }
 
 type CLIOverrides struct {
-	Agent   string
-	Browser *bool
-	CPUs    *int
-	Memory  string
+	CPUs   *int
+	Memory string
 }
 
 type ImportedValue struct {
@@ -37,12 +31,12 @@ type ImportedValue struct {
 }
 
 type DefaultValues struct {
-	ImageRef            string
-	Agent               string
-	Internet            bool
-	CPUs                int
-	MemoryBytes         int64
-	MaxConcurrentClones int
+	ImageRef                string
+	DefaultAgent            string
+	Internet                bool
+	CPUs                    int
+	MemoryBytes             int64
+	MaxConcurrentWorkspaces int
 }
 
 type AuthorityInputs struct {

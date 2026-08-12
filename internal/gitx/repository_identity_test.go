@@ -115,9 +115,7 @@ func TestPrepareSourceRejectsCompositeSiblingEscapeWithoutMutation(t *testing.T)
 	}
 	fixture := newRepositoryAt(t, sibling)
 	before := gitTest(t, fixture.path, "for-each-ref", "--format=%(refname)%00%(objectname)")
-	_, err = fixture.service.PrepareSource(context.Background(), SourceRequest{
-		Repository: fixture.repository(), ApprovedRoot: approved, Sandbox: "sibling", TempRoot: t.TempDir(),
-	})
+	_, err = fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: approved, Workspace: "sibling", TempRoot: t.TempDir()})
 	if err == nil {
 		t.Fatal("PrepareSource accepted a sibling repository outside the approved root")
 	}
@@ -136,7 +134,7 @@ func TestPrepareSourceUsesExactPrivateRefAndExcludesOtherObjects(t *testing.T) {
 	artifact := prepareSourceTest(t, &fixture, "exact")
 	defer fixture.service.RemoveArtifact(artifact.BundlePath)
 	heads := strings.Fields(gitTest(t, fixture.path, "bundle", "list-heads", artifact.BundlePath))
-	if len(heads) != 2 || heads[0] != artifact.SourceCommit || heads[1] != artifact.BundleRef || !strings.HasPrefix(heads[1], "refs/dsx/private/source/") {
+	if len(heads) != 2 || heads[0] != artifact.SourceRevision || heads[1] != artifact.BundleRef || !strings.HasPrefix(heads[1], "refs/dsx/private/source/") {
 		t.Fatalf("source bundle advertised heads = %#v", heads)
 	}
 	assertNoPrivateSourceRefs(t, fixture.path)
@@ -175,9 +173,7 @@ func TestPrepareSourceRejectsConcurrentSnapshotMutationAndCleansArtifacts(t *tes
 			}
 			fixture.service = service
 			tempRoot := t.TempDir()
-			_, err = service.PrepareSource(context.Background(), SourceRequest{
-				Repository: fixture.repository(), ApprovedRoot: fixture.path, Sandbox: "race", TempRoot: tempRoot,
-			})
+			_, err = service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "race", TempRoot: tempRoot})
 			if err == nil {
 				t.Fatal("PrepareSource accepted a repository mutation during bundle creation")
 			}
@@ -233,9 +229,7 @@ func newRepositoryAt(t *testing.T, repositoryPath string) repositoryFixture {
 
 func prepareSourceAt(t *testing.T, fixture *repositoryFixture, approvedRoot string) SourceArtifact {
 	t.Helper()
-	artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
-		Repository: fixture.repository(), ApprovedRoot: approvedRoot, Sandbox: "identity", TempRoot: t.TempDir(),
-	})
+	artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: approvedRoot, Workspace: "identity", TempRoot: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

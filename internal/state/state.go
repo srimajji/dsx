@@ -33,8 +33,8 @@ type ProjectLock interface {
 }
 
 // LockRepository provides bounded, context-cancelable process leases.
-// Sandbox leases are scoped to the exact project and sandbox pair.
+// Workspace leases are scoped to the exact project and workspace pair.
 type LockRepository interface {
 	LockProject(context.Context, model.ProjectID) (ProjectLock, error)
-	LockSandbox(context.Context, model.ProjectID, model.SandboxName) (ProjectLock, error)
+	LockWorkspace(context.Context, model.ProjectID, model.WorkspaceName) (ProjectLock, error)
 }

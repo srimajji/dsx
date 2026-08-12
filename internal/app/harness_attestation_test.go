@@ -2,34 +2,33 @@ package app
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 
-	"github.com/srimajji/dsx/internal/harness"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
 	"github.com/srimajji/dsx/internal/runtime"
 )
 
-func TestCloneHarnessRejectsWrongRuntimeImageBeforeInvocationState(t *testing.T) {
-	harnessService := &HarnessService{
-		adapters:            map[harness.Name]harness.Adapter{harness.Codex: fakeHarnessAdapter{}},
-		agentImageReference: fixtureAgentImageReference,
-	}
-	service := &CloneService{harness: harnessService}
+func TestAgentRejectsWrongRuntimeImageBeforeReadingAttestation(t *testing.T) {
+	service := &AgentService{agentImageReference: fixtureAgentImageReference}
 	execution := plan.ExecutionPlan{
-		Agent: "codex",
-		Image: plan.ResolvedImage{Reference: fixtureAgentImageReference, InputDigest: strings.Repeat("a", 64)},
-		Auth:  []plan.ResolvedAuthGrant{{Harness: "codex", Profile: "default", Persistence: "global"}},
+		Agents: plan.AgentPlan{Allowed: []string{"codex"}, Default: "codex"},
+		Image:  plan.ResolvedImage{Reference: fixtureAgentImageReference, InputDigest: strings.Repeat("a", 64)},
 	}
-	_, err := service.runHarness(
+	read := false
+	err := service.verifyHarnessBuildAttestation(
 		context.Background(),
 		runtime.ResourceSnapshot{ImageDigest: "sha256:" + strings.Repeat("b", 64)},
 		execution,
-		CloneRunRequest{Agent: "codex"},
-		nil,
+		fakeHarnessAdapter{},
+		func(io.Writer, io.Writer) (runtime.Exit, error) {
+			read = true
+			return runtime.Exit{}, nil
+		},
 	)
-	if model.ErrorCodeOf(err) != model.CodeUnavailable {
-		t.Fatalf("runHarness() error = %v (code %q), want unavailable image", err, model.ErrorCodeOf(err))
+	if model.ErrorCodeOf(err) != model.CodeUnavailable || read {
+		t.Fatalf("verifyHarnessBuildAttestation() error = %v, read=%t; want unavailable before read", err, read)
 	}
 }

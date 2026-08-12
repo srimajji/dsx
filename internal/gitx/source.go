@@ -21,11 +21,11 @@ type repositoryState struct {
 	untracked     []string
 }
 
-func (service *Service) PrepareSource(ctx context.Context, request SourceRequest) (artifact SourceArtifact, returnErr error) {
+func (service *Service) PrepareSource(ctx context.Context, request SourceRequest) (SourceArtifact, error) {
 	if err := validateRepositoryDescriptor(request.Repository); err != nil {
 		return SourceArtifact{}, err
 	}
-	if err := validateSandbox(request.Sandbox); err != nil {
+	if err := validateWorkspace(request.Workspace); err != nil {
 		return SourceArtifact{}, err
 	}
 	if err := validateTempRoot(request.TempRoot); err != nil {
@@ -37,6 +37,41 @@ func (service *Service) PrepareSource(ctx context.Context, request SourceRequest
 	}
 	repository := request.Repository
 	repository.Identity = identity
+	return service.prepareSourceArtifact(ctx, repository, request.Workspace, request.TempRoot, "", "")
+}
+
+func (service *Service) PrepareUpdateSource(ctx context.Context, request UpdateSourceRequest) (SourceArtifact, error) {
+	if err := validateRepositoryDescriptor(request.Repository); err != nil {
+		return SourceArtifact{}, err
+	}
+	if err := validateWorkspace(request.Workspace); err != nil {
+		return SourceArtifact{}, err
+	}
+	if err := validateTempRoot(request.TempRoot); err != nil {
+		return SourceArtifact{}, err
+	}
+	if err := validateSourceBranch(request.SourceBranch); err != nil {
+		return SourceArtifact{}, err
+	}
+	if err := validateFullOID(request.SourceRevision, "recorded source revision"); err != nil {
+		return SourceArtifact{}, err
+	}
+	if err := service.validateRepositoryIdentity(ctx, request.Repository); err != nil {
+		return SourceArtifact{}, err
+	}
+	return service.prepareSourceArtifact(
+		ctx, request.Repository, request.Workspace, request.TempRoot, request.SourceBranch, request.SourceRevision,
+	)
+}
+
+func (service *Service) prepareSourceArtifact(
+	ctx context.Context,
+	repository Repository,
+	workspace string,
+	tempRoot string,
+	expectedBranch string,
+	previousRevision string,
+) (artifact SourceArtifact, returnErr error) {
 	if err := service.validateRepositoryIdentity(ctx, repository); err != nil {
 		return SourceArtifact{}, err
 	}
@@ -44,20 +79,24 @@ func (service *Service) PrepareSource(ctx context.Context, request SourceRequest
 		return SourceArtifact{}, err
 	}
 
-	sourceRefBytes, err := service.gitOutput(ctx, repository.HostPath, "symbolic-ref", "--quiet", "HEAD")
+	sourceBranchBytes, err := service.gitOutput(ctx, repository.HostPath, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
-		return SourceArtifact{}, fmt.Errorf("resolve symbolic source ref: %w", err)
+		return SourceArtifact{}, fmt.Errorf("resolve symbolic source branch: %w", err)
 	}
-	sourceRef := strings.TrimSuffix(string(sourceRefBytes), "\n")
-	if sourceRef == "" || strings.ContainsAny(sourceRef, "\r\n\x00") || !strings.HasPrefix(sourceRef, "refs/heads/") {
-		return SourceArtifact{}, fmt.Errorf("resolved source ref %q is not a local branch", sourceRef)
+	sourceBranch := strings.TrimSuffix(string(sourceBranchBytes), "\n")
+	if err := validateSourceBranch(sourceBranch); err != nil {
+		return SourceArtifact{}, err
 	}
+	if expectedBranch != "" && sourceBranch != expectedBranch {
+		return SourceArtifact{}, fmt.Errorf("local checkout branch %q does not match recorded source branch %q", sourceBranch, expectedBranch)
+	}
+	sourceRef := "refs/heads/" + sourceBranch
 	if err := service.runGit(ctx, repository.HostPath, nil, "check-ref-format", sourceRef); err != nil {
-		return SourceArtifact{}, fmt.Errorf("validate source ref: %w", err)
+		return SourceArtifact{}, fmt.Errorf("validate source branch: %w", err)
 	}
-	sourceCommit, err := service.resolveCommit(ctx, repository.HostPath, sourceRef)
+	sourceRevision, err := service.resolveCommit(ctx, repository.HostPath, sourceRef)
 	if err != nil {
-		return SourceArtifact{}, fmt.Errorf("resolve source commit: %w", err)
+		return SourceArtifact{}, fmt.Errorf("resolve source revision: %w", err)
 	}
 	state, err := service.inspectRepositoryState(ctx, repository.HostPath)
 	if err != nil {
@@ -70,6 +109,14 @@ func (service *Service) PrepareSource(ctx context.Context, request SourceRequest
 	if err != nil {
 		return SourceArtifact{}, err
 	}
+	if previousRevision != "" {
+		if sourceRevision == previousRevision {
+			return SourceArtifact{}, errors.New("local source branch has no newer committed revision")
+		}
+		if err := service.runGit(ctx, repository.HostPath, nil, "merge-base", "--is-ancestor", previousRevision, sourceRevision); err != nil {
+			return SourceArtifact{}, fmt.Errorf("local source revision does not descend from recorded source revision: %w", err)
+		}
+	}
 
 	privateRef, err := sourceSnapshotRef()
 	if err != nil {
@@ -78,7 +125,7 @@ func (service *Service) PrepareSource(ctx context.Context, request SourceRequest
 	if err := service.validateRepositoryIdentity(ctx, repository); err != nil {
 		return SourceArtifact{}, err
 	}
-	if err := service.runGit(ctx, repository.HostPath, nil, "update-ref", privateRef, sourceCommit, strings.Repeat("0", len(sourceCommit))); err != nil {
+	if err := service.runGit(ctx, repository.HostPath, nil, "update-ref", privateRef, sourceRevision, strings.Repeat("0", len(sourceRevision))); err != nil {
 		return SourceArtifact{}, fmt.Errorf("create private source snapshot ref: %w", err)
 	}
 	refOwned := true
@@ -91,7 +138,7 @@ func (service *Service) PrepareSource(ctx context.Context, request SourceRequest
 	if err := service.validateRepositoryIdentity(ctx, repository); err != nil {
 		return SourceArtifact{}, fmt.Errorf("revalidate repository before source bundle: %w", err)
 	}
-	bundlePath, err := service.produceSourceBundle(ctx, repository.HostPath, request.TempRoot, privateRef, MaxSourceBundleBytes)
+	bundlePath, err := service.produceSourceBundle(ctx, repository.HostPath, tempRoot, privateRef, MaxSourceBundleBytes)
 	if err != nil {
 		return SourceArtifact{}, fmt.Errorf("create source bundle: %w", err)
 	}
@@ -108,35 +155,29 @@ func (service *Service) PrepareSource(ctx context.Context, request SourceRequest
 	if err := service.verifyBundleInRepository(ctx, bundlePath, digest, repository.HostPath); err != nil {
 		return SourceArtifact{}, fmt.Errorf("verify source bundle: %w", err)
 	}
-	bundleCommit, err := service.singleBundleHead(ctx, repository.HostPath, bundlePath, privateRef)
+	bundleRevision, err := service.singleBundleHead(ctx, repository.HostPath, bundlePath, privateRef)
 	if err != nil {
 		return SourceArtifact{}, fmt.Errorf("verify private source snapshot ref: %w", err)
 	}
-	if bundleCommit != sourceCommit {
-		return SourceArtifact{}, fmt.Errorf("source bundle commit %s does not match approved commit %s", bundleCommit, sourceCommit)
+	if bundleRevision != sourceRevision {
+		return SourceArtifact{}, fmt.Errorf("source bundle revision %s does not match approved revision %s", bundleRevision, sourceRevision)
 	}
 	if err := service.removeSourceSnapshotRef(ctx, repository, privateRef); err != nil {
 		return SourceArtifact{}, err
 	}
 	refOwned = false
 
-	if err := service.validateSourceSnapshot(ctx, repository, sourceRef, sourceCommit, fingerprint); err != nil {
+	if err := service.validateSourceSnapshot(ctx, repository, sourceRef, sourceRevision, fingerprint); err != nil {
 		return SourceArtifact{}, err
 	}
-	if err := service.registerArtifact(bundlePath, request.TempRoot); err != nil {
+	if err := service.registerArtifact(bundlePath, tempRoot); err != nil {
 		return SourceArtifact{}, fmt.Errorf("register source bundle: %w", err)
 	}
 	owned = true
 	return SourceArtifact{
-		Repository:         repository,
-		SourceRef:          sourceRef,
-		SourceCommit:       sourceCommit,
-		TrackedFingerprint: fingerprint,
-		WarnUntracked:      state.warnUntracked,
-		WarnIgnored:        state.warnIgnored,
-		BundlePath:         bundlePath,
-		BundleDigest:       digest,
-		BundleRef:          privateRef,
+		Repository: repository, SourceBranch: sourceBranch, SourceRevision: sourceRevision,
+		TrackedFingerprint: fingerprint, WarnUntracked: state.warnUntracked, WarnIgnored: state.warnIgnored,
+		BundlePath: bundlePath, BundleDigest: digest, BundleRef: privateRef,
 	}, nil
 }
 

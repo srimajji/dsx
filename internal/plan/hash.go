@@ -9,19 +9,18 @@ import (
 
 const executableHashDomain = ContractVersion + "\n"
 
-// ExecutablePlanV1 is the canonical, secret-free projection authorized by an
-// executable configuration approval. Its slices contain no maps and are
-// normalized by ExecutableProjection before marshaling.
-type ExecutablePlanV1 struct {
-	Mode         string                 `json:"mode"`
-	Agent        string                 `json:"agent"`
+// ExecutablePlanV2 is the canonical, secret-free projection authorized by an
+// executable configuration approval. Workspace identity and source revisions
+// are supplied separately at creation time and therefore never affect this hash.
+type ExecutablePlanV2 struct {
+	Agents       AgentPlan              `json:"agents"`
 	Image        executableImage        `json:"image"`
 	Repositories []executableRepository `json:"repositories"`
 	Setup        []executableCommand    `json:"setup"`
 	Processes    []executableProcess    `json:"processes"`
 	Mounts       []ResolvedMount        `json:"mounts"`
 	Volumes      []ResolvedVolume       `json:"volumes"`
-	Auth         []ResolvedAuthGrant    `json:"auth"`
+	Auth         AuthPlan               `json:"auth"`
 	Ports        []executablePort       `json:"ports"`
 	Browser      *BrowserPlan           `json:"browser"`
 	Bridges      []BridgeGrant          `json:"bridges"`
@@ -41,8 +40,6 @@ type executableRepository struct {
 	Name          string `json:"name"`
 	HostPath      string `json:"host_path"`
 	GuestPath     string `json:"guest_path"`
-	SourceRef     string `json:"source_ref"`
-	SourceCommit  string `json:"source_commit"`
 	TrackedDigest string `json:"tracked_digest"`
 }
 
@@ -91,16 +88,15 @@ type executablePort struct {
 // ExecutableProjection returns a normalized copy of the authority-bearing
 // fields in plan. It deliberately omits identities, ownership-derived names,
 // provenance, display-only data, run IDs, and secret values.
-func ExecutableProjection(plan ExecutionPlan) ExecutablePlanV1 {
-	projection := ExecutablePlanV1{
-		Mode:      string(plan.Mode),
-		Agent:     plan.Agent,
+func ExecutableProjection(plan ExecutionPlan) ExecutablePlanV2 {
+	projection := ExecutablePlanV2{
+		Agents:    AgentPlan{Allowed: append([]string(nil), plan.Agents.Allowed...), Default: plan.Agents.Default},
 		Image:     projectImage(plan.Image),
 		Setup:     projectCommands(plan.Setup),
 		Processes: projectProcesses(plan.Processes),
 		Mounts:    append([]ResolvedMount(nil), plan.Mounts...),
 		Volumes:   append([]ResolvedVolume(nil), plan.Volumes...),
-		Auth:      append([]ResolvedAuthGrant(nil), plan.Auth...),
+		Auth:      AuthPlan{Imports: append([]string(nil), plan.Auth.Imports...)},
 		Ports:     projectPorts(plan.Ports),
 		Bridges:   append([]BridgeGrant(nil), plan.Bridges...),
 		Limits:    plan.Limits,
@@ -114,10 +110,11 @@ func ExecutableProjection(plan ExecutionPlan) ExecutablePlanV1 {
 	sort.Slice(projection.Repositories, func(i, j int) bool {
 		left, right := projection.Repositories[i], projection.Repositories[j]
 		return lessStrings(
-			[]string{left.GuestPath, left.HostPath, left.Name, left.SourceRef, left.SourceCommit, left.TrackedDigest},
-			[]string{right.GuestPath, right.HostPath, right.Name, right.SourceRef, right.SourceCommit, right.TrackedDigest},
+			[]string{left.GuestPath, left.HostPath, left.Name, left.TrackedDigest},
+			[]string{right.GuestPath, right.HostPath, right.Name, right.TrackedDigest},
 		)
 	})
+	sort.Strings(projection.Agents.Allowed)
 	sort.Slice(projection.Mounts, func(i, j int) bool {
 		left, right := projection.Mounts[i], projection.Mounts[j]
 		return lessStrings(
@@ -132,13 +129,7 @@ func ExecutableProjection(plan ExecutionPlan) ExecutablePlanV1 {
 			[]string{right.Target, right.Name, right.Scope, boolString(right.Persistent)},
 		)
 	})
-	sort.Slice(projection.Auth, func(i, j int) bool {
-		left, right := projection.Auth[i], projection.Auth[j]
-		return lessStrings(
-			[]string{left.Harness, left.Profile, left.Persistence},
-			[]string{right.Harness, right.Profile, right.Persistence},
-		)
-	})
+	sort.Strings(projection.Auth.Imports)
 	sort.Slice(projection.Ports, func(i, j int) bool {
 		left, right := projection.Ports[i], projection.Ports[j]
 		return lessStrings(portSortKey(left), portSortKey(right))

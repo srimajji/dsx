@@ -7,28 +7,25 @@ import (
 	"github.com/srimajji/dsx/internal/model"
 )
 
-const ContractVersion = "dsx.execution-plan/v1"
+const ContractVersion = "dsx.execution-plan/v2"
 
 type ExecutionPlan struct {
-	ContractVersion string              `json:"contract_version"`
-	Project         ProjectIdentity     `json:"project"`
-	Sandbox         SandboxIdentity     `json:"sandbox"`
-	Mode            model.WorkspaceMode `json:"mode"`
-	Agent           string              `json:"agent"`
-	Image           ResolvedImage       `json:"image"`
-	Repositories    []RepositoryPlan    `json:"repositories"`
-	Setup           []ResolvedCommand   `json:"setup"`
-	Processes       []ResolvedProcess   `json:"processes"`
-	Mounts          []ResolvedMount     `json:"mounts"`
-	Volumes         []ResolvedVolume    `json:"volumes"`
-	Auth            []ResolvedAuthGrant `json:"auth"`
-	Ports           []PortRequest       `json:"ports"`
-	Browser         *BrowserPlan        `json:"browser,omitempty"`
-	Bridges         []BridgeGrant       `json:"bridges"`
-	Limits          ResourceLimits      `json:"limits"`
-	Ownership       OwnershipPlan       `json:"ownership"`
-	Provenance      config.Provenance   `json:"provenance"`
-	ExecutableHash  string              `json:"executable_hash"`
+	ContractVersion string            `json:"contract_version"`
+	Project         ProjectIdentity   `json:"project"`
+	Agents          AgentPlan         `json:"agents"`
+	Image           ResolvedImage     `json:"image"`
+	Repositories    []RepositoryPlan  `json:"repositories"`
+	Setup           []ResolvedCommand `json:"setup"`
+	Processes       []ResolvedProcess `json:"processes"`
+	Mounts          []ResolvedMount   `json:"mounts"`
+	Volumes         []ResolvedVolume  `json:"volumes"`
+	Auth            AuthPlan          `json:"auth"`
+	Ports           []PortRequest     `json:"ports"`
+	Browser         *BrowserPlan      `json:"browser,omitempty"`
+	Bridges         []BridgeGrant     `json:"bridges"`
+	Limits          ResourceLimits    `json:"limits"`
+	Provenance      config.Provenance `json:"provenance"`
+	ExecutableHash  string            `json:"executable_hash"`
 }
 
 type ProjectIdentity struct {
@@ -36,9 +33,9 @@ type ProjectIdentity struct {
 	CanonicalRoot string          `json:"canonical_root"`
 }
 
-type SandboxIdentity struct {
-	Name  model.SandboxName `json:"name"`
-	RunID model.RunID       `json:"run_id"`
+type AgentPlan struct {
+	Allowed []string `json:"allowed"`
+	Default string   `json:"default"`
 }
 
 type ResolvedImage struct {
@@ -55,8 +52,6 @@ type RepositoryPlan struct {
 	Name          string `json:"name"`
 	HostPath      string `json:"host_path"`
 	GuestPath     string `json:"guest_path"`
-	SourceRef     string `json:"source_ref,omitempty"`
-	SourceCommit  string `json:"source_commit,omitempty"`
 	TrackedDigest string `json:"tracked_digest,omitempty"`
 }
 
@@ -107,11 +102,8 @@ type ResolvedVolume struct {
 	Scope      string `json:"scope"`
 	Persistent bool   `json:"persistent"`
 }
-
-type ResolvedAuthGrant struct {
-	Harness     string `json:"harness"`
-	Profile     string `json:"profile"`
-	Persistence string `json:"persistence"`
+type AuthPlan struct {
+	Imports []string `json:"imports"`
 }
 
 type PortRequest struct {
@@ -124,9 +116,8 @@ type PortRequest struct {
 }
 
 type BrowserPlan struct {
-	Enabled        bool   `json:"enabled"`
-	ImageReference string `json:"image_reference,omitempty"`
-	ImageDigest    string `json:"image_digest,omitempty"`
+	ImageReference string `json:"image_reference"`
+	ImageDigest    string `json:"image_digest"`
 }
 
 type BridgeGrant struct {
@@ -139,14 +130,9 @@ type BridgeGrant struct {
 }
 
 type ResourceLimits struct {
-	CPUs                int   `json:"cpus"`
-	MemoryBytes         int64 `json:"memory_bytes"`
-	MaxConcurrentClones int   `json:"max_concurrent_clones"`
-}
-
-type OwnershipPlan struct {
-	Labels       []KeyValue `json:"labels"`
-	ResourceName string     `json:"resource_name"`
+	CPUs                    int   `json:"cpus"`
+	MemoryBytes             int64 `json:"memory_bytes"`
+	MaxConcurrentWorkspaces int   `json:"max_concurrent_workspaces"`
 }
 
 type KeyValue struct {

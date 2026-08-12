@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	DefaultWorkspaceCPUs        = 4
+	DefaultWorkspaceCPUs        = 6
 	DefaultWorkspaceMemoryBytes = int64(6 << 30)
 	DefaultWorkspaceMemory      = "6GiB"
 )
@@ -159,10 +159,8 @@ func (service *SetupService) BareState(ctx context.Context, request BareStateReq
 		}
 	}
 	screen := BareSetup
-	if owned > 0 {
+	if configExists || owned > 0 {
 		screen = BareDashboard
-	} else if configExists {
-		screen = BareLauncher
 	}
 	return BareState{
 		Screen: screen, ConfigExists: configExists, OwnedResources: owned, Facts: mapped,
@@ -268,13 +266,13 @@ func (service *SetupService) PreviewSetup(ctx context.Context, request SetupPrev
 	resolved, resolveDiagnostics, err := service.inspection.resolver.Resolve(ctx, plan.ResolveInput{
 		Config:  validated,
 		Project: plan.ProjectIdentity{ID: projectID, CanonicalRoot: facts.WorkspaceRoot},
-		Sandbox: plan.SandboxIdentity{Name: model.SandboxName("main")},
-		Mode:    model.ModeLive,
-		Ownership: plan.OwnershipPlan{
-			Labels:       []plan.KeyValue{{Key: "dsx.project", Value: string(projectID)}, {Key: "dsx.sandbox", Value: "main"}},
-			ResourceName: "dsx-" + string(projectID) + "-main",
+		Defaults: plan.DefaultValues{
+			DefaultAgent:            "codex",
+			Internet:                true,
+			CPUs:                    DefaultWorkspaceCPUs,
+			MemoryBytes:             DefaultWorkspaceMemoryBytes,
+			MaxConcurrentWorkspaces: 1,
 		},
-		Defaults:  plan.DefaultValues{Agent: "codex", Internet: true, CPUs: DefaultWorkspaceCPUs, MemoryBytes: DefaultWorkspaceMemoryBytes, MaxConcurrentClones: 1},
 		Authority: authority,
 	})
 	preview.Diagnostics = append(preview.Diagnostics, resolveDiagnostics...)
@@ -301,9 +299,7 @@ func (service *SetupService) PreviewExisting(ctx context.Context, request BareSt
 	if service == nil || service.inspection == nil {
 		return SetupPreview{}, model.NewError(model.CodeInternal, "existing configuration preview service is not configured", nil)
 	}
-	inspected, err := service.inspection.Inspect(ctx, InspectRequest{
-		Root: request.Root, Mode: string(model.ModeLive), SandboxName: string(liveSandboxName),
-	})
+	inspected, err := service.inspection.Inspect(ctx, InspectRequest{Root: request.Root})
 	if err != nil {
 		return SetupPreview{}, err
 	}
@@ -345,37 +341,6 @@ func (service *SetupService) PreviewExisting(ctx context.Context, request BareSt
 	}
 	preview.Facts = inspected.Facts
 	return preview, nil
-}
-
-// PreviewClone builds the exact named-clone projection while retaining the
-// current configuration and project-state evidence used by the review UI.
-func (service *SetupService) PreviewClone(ctx context.Context, request ClonePreviewRequest) (SetupPreview, error) {
-	base, err := service.PreviewExisting(ctx, BareStateRequest{Root: request.Root})
-	if err != nil {
-		return SetupPreview{}, err
-	}
-	if service == nil || service.inspection == nil {
-		return SetupPreview{}, model.NewError(model.CodeInternal, "clone preview service is not configured", nil)
-	}
-	var browser *bool
-	if request.Browser {
-		enabled := true
-		browser = &enabled
-	}
-	inspected, err := service.inspection.Inspect(ctx, InspectRequest{
-		Root: request.Root, Mode: string(model.ModeClone), SandboxName: request.Sandbox,
-		CLIOverrides: CLIOverrides{Agent: request.Agent, Browser: browser},
-	})
-	if err != nil {
-		return SetupPreview{}, err
-	}
-	base.Facts = inspected.Facts
-	base.Diagnostics = inspected.Diagnostics
-	base.Plan = inspected.Plan
-	base.Hash = inspected.Plan.ExecutableHash
-	base.SelectedCapabilities = selectedCapabilities(inspected.Plan)
-	sortDiagnostics(base.Diagnostics)
-	return base, nil
 }
 
 func (service *SetupService) Initialize(ctx context.Context, request InitializeRequest) (InitializeResult, error) {
@@ -736,7 +701,7 @@ func selectedCapabilities(resolved plan.ExecutionPlan) []string {
 	if len(resolved.Mounts) > 0 || len(resolved.Volumes) > 0 {
 		capabilities = append(capabilities, "storage")
 	}
-	if len(resolved.Auth) > 0 {
+	if len(resolved.Auth.Imports) > 0 {
 		capabilities = append(capabilities, "credentials")
 	}
 	if resolved.Browser != nil {

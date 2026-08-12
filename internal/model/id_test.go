@@ -28,9 +28,9 @@ func TestIDRejectsInvalidValues(t *testing.T) {
 			t.Errorf("NewProjectID(%q) succeeded", root)
 		}
 	}
-	for _, name := range []string{"", "Upper", "-bad", "bad-", "has space", "this-sandbox-name-is-far-too-long"} {
-		if _, err := ParseSandboxName(name); err == nil {
-			t.Errorf("ParseSandboxName(%q) succeeded", name)
+	for _, name := range []string{"", "Upper", "-bad", "bad-", "has space", "this-workspace-name-is-far-too-long"} {
+		if _, err := ParseWorkspaceName(name); err == nil {
+			t.Errorf("ParseWorkspaceName(%q) succeeded", name)
 		}
 	}
 }

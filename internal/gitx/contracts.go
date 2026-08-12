@@ -40,14 +40,22 @@ type Repository struct {
 type SourceRequest struct {
 	Repository   Repository
 	ApprovedRoot string
-	Sandbox      string
+	Workspace    string
 	TempRoot     string
+}
+
+type UpdateSourceRequest struct {
+	Repository     Repository
+	Workspace      string
+	TempRoot       string
+	SourceBranch   string
+	SourceRevision string
 }
 
 type SourceArtifact struct {
 	Repository         Repository `json:"repository"`
-	SourceRef          string     `json:"source_ref"`
-	SourceCommit       string     `json:"source_commit"`
+	SourceBranch       string     `json:"source_branch"`
+	SourceRevision     string     `json:"source_revision"`
 	TrackedFingerprint string     `json:"tracked_fingerprint"`
 	WarnUntracked      bool       `json:"warn_untracked"`
 	WarnIgnored        bool       `json:"warn_ignored"`
@@ -57,16 +65,16 @@ type SourceArtifact struct {
 }
 
 type ResultArtifact struct {
-	Repository   Repository `json:"repository"`
-	ResultBranch string     `json:"result_branch"`
-	ResultCommit string     `json:"result_commit"`
-	BundlePath   string     `json:"bundle_path"`
-	BundleDigest string     `json:"bundle_digest"`
+	Repository      Repository `json:"repository"`
+	WorkspaceBranch string     `json:"workspace_branch"`
+	ResultCommit    string     `json:"result_commit"`
+	BundlePath      string     `json:"bundle_path"`
+	BundleDigest    string     `json:"bundle_digest"`
 }
 
 type FetchRequest struct {
 	Repository     Repository
-	Sandbox        string
+	Workspace      string
 	BundlePath     string
 	Digest         string
 	ExpectedCommit string
@@ -80,10 +88,10 @@ type FetchResult struct {
 
 type StatusRequest struct {
 	Repository         Repository
-	Sandbox            string
-	SourceRef          string
-	SourceCommit       string
-	ResultBranch       string
+	Workspace          string
+	SourceBranch       string
+	SourceRevision     string
+	WorkspaceBranch    string
 	ResultCommit       string
 	TrackedFingerprint string
 	FetchedCommit      string
@@ -91,14 +99,17 @@ type StatusRequest struct {
 
 type Status struct {
 	Repository             string `json:"repository"`
-	Sandbox                string `json:"sandbox"`
-	SourceRef              string `json:"source_ref"`
-	SourceCommit           string `json:"source_commit"`
-	ResultBranch           string `json:"result_branch"`
+	Workspace              string `json:"workspace"`
+	SourceBranch           string `json:"source_branch"`
+	SourceRevision         string `json:"source_revision"`
+	WorkspaceBranch        string `json:"workspace_branch"`
 	ResultCommit           string `json:"result_commit,omitempty"`
 	HostCommit             string `json:"host_commit"`
 	HostTrackedFingerprint string `json:"host_tracked_fingerprint"`
 	HostTrackedClean       bool   `json:"host_tracked_clean"`
+	WorkspaceTrackedClean  bool   `json:"workspace_tracked_clean"`
+	WorkspaceUntracked     bool   `json:"workspace_untracked"`
+	RebaseInProgress       bool   `json:"rebase_in_progress"`
 	WarnUntracked          bool   `json:"warn_untracked"`
 	WarnIgnored            bool   `json:"warn_ignored"`
 	Fetched                bool   `json:"fetched"`
@@ -126,7 +137,7 @@ type DiffResult struct {
 
 type ApplyRequest struct {
 	Repository         Repository
-	SourceCommit       string
+	SourceRevision     string
 	TrackedFingerprint string
 	FetchedRef         string
 	ExpectedCommit     string
@@ -152,6 +163,7 @@ type ApplyTransaction interface {
 type HostService interface {
 	ValidateRepository(context.Context, Repository) error
 	PrepareSource(context.Context, SourceRequest) (SourceArtifact, error)
+	PrepareUpdateSource(context.Context, UpdateSourceRequest) (SourceArtifact, error)
 	VerifyBundle(context.Context, string, string) error
 	FetchResult(context.Context, FetchRequest) (FetchResult, error)
 	Status(context.Context, StatusRequest) (Status, error)

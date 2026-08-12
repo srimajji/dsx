@@ -285,14 +285,14 @@ func verifiedHelperPaths(stateRoot string, identity LeaseIdentity) (leasePaths, 
 	}
 	root := filepath.Join(stateRoot, bridgeDirectoryName)
 	project := filepath.Join(root, string(identity.ProjectID))
-	sandbox := filepath.Join(project, string(identity.Sandbox))
-	run := filepath.Join(sandbox, string(identity.RunID))
-	for _, path := range []string{stateRoot, root, project, sandbox, run} {
+	workspace := filepath.Join(project, string(identity.Workspace))
+	run := filepath.Join(workspace, string(identity.RunID))
+	for _, path := range []string{stateRoot, root, project, workspace, run} {
 		if err := verifyPrivateDirectory(path); err != nil {
 			return leasePaths{}, err
 		}
 	}
-	paths := makeLeasePaths(root, project, sandbox, run)
+	paths := makeLeasePaths(root, project, workspace, run)
 	return paths, nil
 }
 

@@ -1,52 +1,53 @@
 # Getting started with DSX
 
-DSX creates isolated Linux development sandboxes on an Apple-silicon Mac. It uses Apple's `container` runtime to keep project source, agent credentials, services, and browser automation separate from the rest of the host.
+DSX creates named, isolated Linux workspaces on an Apple-silicon Mac. Every workspace is a peer backed by a guest-owned private Git clone. The local checkout is the source and integration point; it is not itself a DSX workspace.
 
-Use DSX when you want to:
+Use DSX to:
 
-- open a disposable Linux shell for a project;
-- run Codex, Claude Code, OpenCode, or OMP in an isolated named clone;
-- start project processes and publish selected ports to `127.0.0.1`;
-- test an application through a separate Playwright browser sandbox; or
-- remove every resource DSX owns for a project without pruning unrelated Apple resources.
+- run several independent workspaces for one Git project;
+- open OMP, Codex, Claude Code, or OpenCode in an existing workspace;
+- transfer committed revisions without sharing host Git objects;
+- publish selected application ports to loopback;
+- opt into a disposable browser for one agent session; and
+- remove only resources DSX can prove it owns.
 
 ```mermaid
 flowchart LR
-    A[macOS project] --> B[DSX host CLI]
-    B --> C[Live workspace]
-    B --> D[Named clone]
-    D --> E[Agent harness]
-    C --> F[Project services]
-    D --> G[Isolated browser]
+    L[Local Git checkout] -->|verified committed bundle| A[feature-a]
+    L -->|verified committed bundle| B[feature-b]
+    A -->|verified result bundle| L
+    B -->|verified result bundle| L
+    P[Canonical project credentials] -->|isolated writable copy| A
+    P -->|isolated writable copy| B
 ```
 
 ## Requirements
 
-- An Apple-silicon Mac running macOS 26 or newer.
-- Apple `container` CLI and API server version 1.2.2.
-- Go 1.26.5 when building DSX from source.
-- A Linux ARM64 project image pinned by SHA-256 digest.
+- Apple silicon and macOS 26 or newer.
+- Apple `container` CLI and API server in DSX's tested compatibility range.
+- Git, with a branch checked out in the project.
+- Go 1.26.5 only when building DSX from source.
 
-DSX rejects untested Apple runtime versions before creating resources. Install Apple `container` from its [official releases](https://github.com/apple/container/releases), then start its system service:
+Install and start Apple `container` from its [official releases](https://github.com/apple/container/releases):
 
 ```console
 $ container system start
 ```
 
-## Install DSX
+DSX is daemonless. Apple's own system services remain prerequisites; DSX never exposes their control socket inside a workspace.
 
-DSX does not yet have a signed public installer. Build both required binaries from a source checkout:
+## Install and verify DSX
+
+Until a signed public installer is available, build both binaries from a source checkout:
 
 ```console
 $ make build
 $ sudo install -m 0755 bin/dsx bin/dsx-guest /usr/local/bin/
 ```
 
-Keep `dsx` and `dsx-guest` in the same directory. The macOS CLI verifies and stages the adjacent Linux ARM64 guest helper when it creates a workspace.
+Keep `dsx` and the Linux ARM64 `dsx-guest` beside one another. The host binary verifies the adjacent helper before staging it read-only into a workspace.
 
-## Verify the installation
-
-Run the read-only host checks:
+Run the read-only checks:
 
 ```console
 $ dsx version
@@ -54,249 +55,280 @@ $ dsx doctor
 $ dsx doctor --require-builder
 ```
 
-`doctor` verifies the Mac architecture and OS, Apple CLI and API-server versions, system service, compatibility range, and builder health. It does not create a project sandbox.
+`doctor` checks the host architecture and OS, Apple CLI/API-server compatibility, system service, and—when requested—builder health. It creates no project resource.
 
-A healthy installation reports compatible host and runtime capabilities. If the Apple service or builder is stopped, start it with the Apple-native commands shown by `doctor` and run the check again.
+## Configure a project
 
-## Start your first project
-
-Change to an existing Git project and run DSX without arguments:
+Start from a local Git checkout:
 
 ```console
 $ cd ~/Code/my-project
-$ dsx
-```
-
-For an unconfigured project, DSX opens the setup wizard. Its image selector shows:
-
-- **DSX Standard — Ubuntu**, including the supported coding agents. Release binaries pull the published digest; development binaries build the embedded pinned recipe locally after confirmation;
-- detected Dockerfile or Containerfile builds anywhere in the project; and
-- an advanced custom digest-pinned OCI image option.
-
-The next step presents Codex, Claude Code, OMP, and OpenCode as selectable coding assistants. Internet access is an explicit, form-aligned choice between **Allow** and **Keep offline**.
-
-Enter optional comma-separated guest ports such as `3000, 8080`. DSX assigns dynamic `127.0.0.1` host ports. The resource step then selects CPU and memory; new configurations default to **4 CPUs** and **6 GiB**. From review, press **b** to return without losing the current selections.
-
-The review gives each topic its own color-coded view: workspace, detected project files, access and isolation, commands and services, persistent files, and final approval identity. Section headings, descriptions, labels, values, positive states, and warnings use distinct visual treatments. Every view shows its position, progress, continuation count when needed, and navigation keys. The shared TUI column is centered with consistent outer padding; the stepper and footer controls are centered against the same panel width. Setup commands, mounts, credential and network grants, ports, resource limits, source provenance, and the executable configuration hash remain visible without exposing the plan as raw JSON. Published image digests remain visible; a locally built DSX Standard image instead shows the exact embedded build-input digest.
-
-After final confirmation, DSX first verifies that the Apple `container` CLI is installed and that `container system status` reports `running`. If the service is stopped, run `container system start` and retry; this failed preflight does not write configuration or approval state. Once the check succeeds, setup writes `~/.dsx/projects/<project-name>-<project-id>/config.jsonc`; when DSX Standard requires a local build, setup then builds and verifies its content-addressed image. The project ID prevents collisions between equal folder names. Teams may instead explicitly maintain a shared repository `.dsx/config.jsonc`, but DSX refuses ambiguity when both locations exist.
-
-The setup screen stays open while this work runs. It shows an animated indicator and a bounded checklist for the container-system check, configuration and approval persistence, image preparation, and transition to the project screen—never raw build logs. On success, the project screen appears immediately. Press **Enter** to create and open the first workspace; DSX then shows ordered milestones for plan validation, image preparation, private resources, workspace startup, published ports and services, and readiness before attaching the shell. Run `dsx` again later to return to the same project screen. Choose **More options** and press **p** to change guest ports. If the live workspace exists, DSX asks before replacing only that container, preserves the project network and DSX-owned volumes, then attaches with the new publication.
-
-## Understand the two workspace modes
-
-| Mode | Command | Source location | Best for |
-|---|---|---|---|
-| Live workspace | `dsx shell` | Selected host repositories mounted read/write | Interactive development and immediate host file changes |
-| Named clone | `dsx run --name NAME` | Private guest-owned Git clone | Autonomous agents, concurrent tasks, and controlled result transfer |
-
-A project may have one live workspace or multiple named clone sandboxes. Live and clone modes do not run together for the same project.
-
-### Open a live shell
-
-First inspect the exact live plan:
-
-```console
 $ dsx inspect
+$ dsx init
 ```
 
-Copy the displayed `Executable hash`, then approve that exact plan:
+`inspect` is read-only. It reports detected project facts, effective project defaults, provenance for each effective value, and the executable-configuration hash. `init` opens the setup flow.
 
-```console
-$ dsx shell --approve-config <inspected-hash>
-```
+The setup flow has three steps:
 
-The live workspace can modify or delete the mounted host project. Use it when you want changes to appear on the Mac immediately.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default means Codex, 6 CPUs, 6 GiB, network allowed, no published ports, and no browser. Custom exposes the coding assistant, internet access, ports, CPU, and memory.
+2. Review and approve one concise screen. DSX shows the effective environment and any non-default commands, mounts, credentials, network grants, ports, or volumes. It hides routine implementation digests and discovery noise while retaining the executable hash and every authority-bearing detail.
+3. DSX verifies Apple Container, saves configuration and approval, prepares DSX Standard when needed, and opens the workspace dashboard.
 
-### Run an agent in a named clone
+Alternate OCI and project images remain supported through configuration and CLI workflows, but are intentionally absent from onboarding.
 
-Inspect the same sandbox name and harness you intend to run:
+Guest ports entered in setup receive dynamic `127.0.0.1` host ports. Cancelling before final confirmation writes no configuration, approval, credential, or runtime resource.
 
-```console
-$ dsx inspect --mode clone --sandbox fix-test --agent codex
-```
+Setup writes one of these mutually exclusive files:
 
-Copy that plan's executable hash and launch one non-empty prompt:
+- `~/.dsx/projects/<project-name>-<project-id>/config.jsonc` for the normal project-local contract; or
+- `.dsx/config.jsonc` when maintainers explicitly share the contract in the repository.
 
-```console
-$ dsx run \
-    --name fix-test \
-    --agent codex \
-    --profile default \
-    --approve-config <inspected-hash> \
-    -- "fix the failing test"
-```
+DSX fails if both exist; it never merges them. Effective-value precedence is:
 
-The sandbox receives independent source, Git metadata, dependency state, services, ports, and writable authentication state. Ignored and untracked host files are excluded, and the tracked host working tree must be clean before clone creation.
+1. CLI override.
+2. The one active configuration.
+3. DSX standard default.
 
-The approval hash is specific to the complete projection. Changing the sandbox name, harness, browser flag, image, commands, mounts, credentials, network grants, or ports requires another inspection and approval.
-
-## Review and recover agent changes
-
-A named clone never merges directly into the host checkout.
-
-```console
-$ dsx git status fix-test
-$ dsx git diff fix-test
-$ dsx git fetch fix-test
-```
-
-- `status` reports the source and result commits, tracked-host fingerprint, and fetch state.
-- `diff` renders a bounded, terminal-safe patch.
-- `fetch` imports the result into a sandbox-specific host remote-tracking ref without merging it.
-
-To apply the result as a guarded squashed working-tree change instead:
-
-```console
-$ dsx git apply fix-test
-```
-
-DSX checks the host repository fingerprint and ref state before applying. For a composite workspace, add `--repo MEMBER` to select one configured repository; omitting it operates on every member as one guarded operation.
-
-## Authentication profiles
-
-Configure an authentication profile in `.dsx/config.jsonc`, then log in explicitly:
-
-```console
-$ dsx inspect --agent codex
-$ dsx login \
-    --agent codex \
-    --profile default \
-    --root . \
-    --approve-config <inspected-hash>
-```
-
-Supported harness names are `omp`, `codex`, `claude`, and `opencode`.
-
-DSX never mounts the complete host home directory. Each running sandbox receives its own writable authentication copy. A profile with global persistence survives ordinary project cleanup; sandbox persistence remains scoped to that project and sandbox.
-
-Normal `shell` and `run` commands do not start a login flow. Purging persisted authentication is always explicit:
-
-```console
-$ dsx clean --purge-auth --agent codex --profile default --force
-```
-
-## Publish an application port
-
-During setup, enter guest ports such as:
-
-```text
-3000, 8080
-```
-
-DSX records each as a dynamic loopback-only publication and shows the complete mapping in final review. The equivalent configuration is:
+A minimal configuration is:
 
 ```jsonc
 {
-  "ports": [
-    { "name": "port-3000", "guest": 3000, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" }
-  ]
+  "$schema": "https://dsx.dev/schema/config-v1.json",
+  "schemaVersion": 1,
+  "workspace": { "root": "." },
+  "image": { "standard": true },
+  "agents": {
+    "default": "codex",
+    "allowed": ["omp", "codex", "claude", "opencode"]
+  },
+  "auth": {
+    "imports": ["omp", "codex", "opencode"]
+  },
+  "resources": {
+    "cpus": 6,
+    "memory": "6GiB",
+    "maxConcurrentWorkspaces": 3
+  }
 }
 ```
 
-Run bare `dsx` later to see configured ports. Active sandbox entries show final URLs. Under **More options**, press **p** to edit the list. Applying a change to an existing live workspace requires explicit confirmation and recreates only its container; the project network and DSX-owned volumes are preserved.
+The schema is strict and validated offline. Unknown and obsolete fields fail visibly. `agents.default` must be present in `agents.allowed`. `auth.imports` declares only which portable host credential kinds setup may offer; it never imports anything by itself. Claude is intentionally absent because its host login is not portable.
 
-Non-loopback publication remains available only through explicit configuration and becomes part of the reviewed approval hash.
+## Create named workspaces
 
-## Use the isolated browser
-
-Browser access changes the executable plan. Include `--browser` in both inspection and execution:
+The tracked local working tree must be clean. Creation records the checked-out branch and commit, warns that ignored and untracked files are excluded, transfers a restrictive verified bundle, and creates `dsx/<workspace-name>` in guest-owned storage.
 
 ```console
-$ dsx inspect --mode clone --sandbox browser-test --agent codex --browser
-$ dsx run \
-    --name browser-test \
-    --agent codex \
-    --profile default \
-    --browser \
-    --approve-config <inspected-hash> \
-    -- "verify the application in the browser"
+$ dsx workspace create feature-a
+$ dsx workspace create feature-b --default-agent claude
+$ dsx workspace list
 ```
 
-The browser runs as a separate disposable resource on the sandbox's private network. It receives no project source, agent authentication, AWS credentials, host home mount, or host-published port. DSX injects an ephemeral Playwright MCP server into the selected harness configuration.
+Names contain 1–24 lowercase letters, digits, or hyphens, cannot begin or end with a hyphen, and identify peer workspaces. There is no implicit or privileged workspace.
 
-## Inspect running resources
+Creation starts only `dsx-guest`. It does not ask for authentication, a task prompt, browser selection, or a workspace mode. It does not start an agent, browser, application, watcher, database, or background command.
+
+In the TUI, press **c** on the dashboard. The create form contains only:
+
+- workspace name;
+- committed source branch and revision; and
+- an optional workspace default selected from `agents.allowed`.
+
+Choose **Create and open** to keep a bounded creation-progress screen visible until the workspace is ready, then hand the terminal directly to its shell. Choose **Create in background** to show the same progress without attaching a shell. DSX does not expose an idle host prompt between creation and shell attachment.
+
+## Operate a workspace
+
+Every lifecycle action names its target:
 
 ```console
-$ dsx list
-$ dsx status
-$ dsx logs web
+$ dsx workspace open feature-a
+$ dsx workspace stop feature-a
+$ dsx workspace start feature-a
+$ dsx workspace restart feature-a
 ```
 
-- `list` shows DSX-owned sandboxes and their published ports.
-- `status` shows live-workspace process health and URLs.
-- `logs PROCESS` returns the bounded retained log for one configured live-workspace process; it is not a follow stream.
+`open` starts the workspace if needed and opens its interactive shell. `start` starts only the workspace and guest control process. `stop` retains the private clone and persistent state.
 
-## Stop and clean up
+`restart` preserves:
 
-Stop a live workspace or one named clone while retaining its persistent state:
+- commits, uncommitted files, and any in-progress rebase;
+- dependencies and persistent service volumes;
+- isolated authentication working copies; and
+- configuration and ownership state.
+
+It terminates and does not restore agents, development servers, watchers, manually started databases, background commands, application processes, or browsers. Only `dsx-guest` is restored. Restarting one workspace cannot affect its siblings.
+
+With the managed DSX Standard image, `workspace open` enters login interactive Zsh with the image-owned Starship and pinned offline plugins. DSX does not read, copy, mount, or execute host shell dotfiles. Custom images must provide their own shell and toolchain expectations.
+
+## Run an agent in an existing workspace
+
+Agent resolution is:
+
+1. Explicit `--agent` override.
+2. Workspace default.
+3. Project `agents.default`.
+
+Every resolved agent must appear in `agents.allowed`.
 
 ```console
-$ dsx stop
-$ dsx stop --name fix-test
+$ dsx agent feature-a
+$ dsx agent feature-a --agent codex
+$ dsx agent feature-a --agent omp -- "implement the API"
 ```
 
-Before deleting a named clone, preserve useful results with `git fetch` or `git apply`. DSX refuses to delete unfetched work unless you explicitly accept the loss.
+No prompt opens an interactive agent. A prompt runs that task in the same persistent workspace. An invocation override does not change the workspace default, and ending the agent does not remove the workspace. Invoking an agent never creates an implicit workspace.
+
+## Configure authentication
+
+Authentication has its own lifecycle:
 
 ```console
-$ dsx clean --name fix-test
-$ dsx clean
+$ dsx auth status
+$ dsx auth import --agent omp
+$ dsx auth import --agent codex
+$ dsx auth import --agent opencode
+$ dsx auth login --agent claude
+$ dsx auth refresh --agent omp
+$ dsx auth purge --agent omp
 ```
 
-- `clean --name` removes one named clone.
-- `clean` removes all proven DSX-owned resources for the current project.
-- Ordinary cleanup preserves global authentication.
-- Ambiguous or unrelated Apple resources are reported and left untouched.
+Each import presents the exact discovered artifacts for explicit approval. The allowlist is:
 
-Only when data loss is intentional should you use both `--discard-unfetched` and the normal cleanup confirmation or `--force`:
+- OMP: one consistent snapshot taken while `agent.db` is closed, plus its optional WAL;
+- Codex CLI: only the portable `auth.json`;
+- OpenCode: only its approved provider-auth artifact; and
+- Claude Code: no host import and no Keychain copy; use DSX login.
+
+DSX never imports a complete harness directory or host home, never imports silently, and never translates OMP's Codex provider identity into Codex CLI credentials. Imported credentials become the canonical project store for that harness.
+
+On first use of a harness in a workspace, DSX lazily creates an independent writable copy. Concurrent workspaces never share a writable credential store. Promotion back to the project store is serialized. Ordinary workspace removal preserves canonical project credentials; purge is a separate confirmed action and active copies block it.
+
+## Use a browser for one agent session
+
+Browser selection belongs only to agent invocation:
 
 ```console
-$ dsx clean --name fix-test --discard-unfetched --force
+$ dsx agent feature-a --browser
+$ dsx agent feature-a --agent codex --browser -- "verify the UI"
 ```
+
+DSX creates a new disposable browser VM, attaches it only to `feature-a`'s private network, waits for Playwright MCP, and injects that endpoint into only the current agent session. The browser receives no source, harness credentials, AWS state, host home, runtime control, or host-published browser control port.
+
+The browser is deleted on success, error, cancellation, or terminal closure. It is not shared, reused, persisted, created with the workspace, or restored by workspace restart.
+
+## Update from the local checkout
+
+Commit local changes on the same source branch recorded for the workspace, then run:
+
+```console
+$ dsx workspace update feature-a
+```
+
+DSX requires a clean, committed local branch matching the recorded source branch. It transfers a verified bundle, creates a backup ref, and rebases `dsx/feature-a` onto the new local revision. It never stashes work, invents commits, or attempts semantic conflict resolution.
+
+If a conflict occurs, the workspace becomes **Needs resolution** and remains openable:
+
+```console
+$ dsx workspace open feature-a
+$ git status
+$ git rebase --continue
+# or
+$ git rebase --abort
+```
+
+After resolving or aborting, review state again from the dashboard or `dsx git status feature-a`.
+
+## Review and integrate results
+
+```console
+$ dsx git status feature-a
+$ dsx git diff feature-a
+$ dsx git fetch feature-a
+```
+
+`fetch` imports committed workspace history through a verified bundle into `refs/remotes/dsx/feature-a`; it does not merge. Integrate normally:
+
+```console
+$ git merge refs/remotes/dsx/feature-a
+```
+
+Or apply a guarded squashed working-tree change:
+
+```console
+$ dsx git apply feature-a
+```
+
+For composite projects, add `--repo MEMBER` to target one configured repository.
+
+## Remove workspaces safely
+
+Fetch or apply useful work before removal:
+
+```console
+$ dsx git status feature-a
+$ dsx git fetch feature-a
+$ dsx workspace remove feature-a
+```
+
+DSX refuses to remove unfetched commits, uncommitted changes, unresolved rebase state, or uncertain result state unless you explicitly confirm permanent loss. `--force` may confirm that destructive choice, but it never bypasses ownership proof or configuration approval.
+
+Explicit cleanup sets are available:
+
+```console
+$ dsx workspace remove --all
+$ dsx workspace remove --legacy-resources
+$ dsx workspace remove --all-projects
+```
+
+Legacy resources retain their old names and appear as **Legacy — cleanup only**. They can be inspected for ownership-safe cleanup but cannot be opened, started, restarted, updated, adopted, renamed, or used for an agent. The unfetched-work guard still applies.
+
+New runtime names use:
+
+```text
+dsx-<project:16>-<workspace:24>-<role:9>-<path-hash:6>
+```
+
+They are sanitized, deterministic, and at most 62 bytes. Ownership labels and manifests—not readable names alone—authorize cleanup. Ambiguous or unrelated Apple resources are preserved and reported.
+
+## Use the dashboard
+
+Run bare `dsx` in a configured project. The dashboard shows the local checkout branch/commit and a deterministic list of peer workspaces with state, default and available agents, source revision, URLs, mutation status, unfetched warnings, and legacy cleanup-only records.
+
+For the selected workspace:
+
+- **Enter** opens it;
+- **a** opens the agent form, containing only agent and browser-session choices;
+- **u** updates from the local checkout;
+- **s** starts or stops it;
+- **r** restarts it;
+- **g** reviews Git changes;
+- **d** removes it; and
+- **c** creates another workspace.
+
+Actions are state-aware. Update and restart are disabled during another lifecycle mutation. **Needs resolution** remains openable for Git conflict recovery. Without an interactive terminal, bare `dsx` prints help and changes nothing. `DSX_ACCESSIBLE=1` enables accessible form mode, and `NO_COLOR` is respected.
 
 ## Troubleshooting
 
-### The approval hash is rejected
+### Configuration approval changed
 
-Run `inspect` again with the exact mode, sandbox, harness, and browser choice used by the mutating command. Copy the newly displayed hash. `--force` cannot bypass executable-plan approval.
+Run `dsx inspect` again, review provenance and the executable plan, and use the exact displayed hash for non-interactive mutation. `--force` cannot bypass this approval.
 
-### DSX reports an unsupported runtime
+### Creation reports local changes
 
-Run:
+Commit tracked changes before creating or updating. Ignored and untracked files are excluded from source bundles.
 
-```console
-$ dsx doctor --format json
-$ container version --format json
-```
+### Update reports a conflict
 
-Use the exact supported Apple CLI/API-server pair. DSX fails closed rather than guessing about untested runtime behavior.
+Open the named workspace and use Git's normal rebase continuation or abort commands. DSX deliberately leaves the valid rebase state for you.
 
-### Cleanup refuses to remove a clone
+### Removal reports unfetched work
 
-Check and preserve the result first:
+Run `dsx git status WORKSPACE`, then fetch or apply every repository result. Confirm loss only when the work is intentionally disposable.
 
-```console
-$ dsx git status NAME
-$ dsx git fetch NAME
-$ dsx clean --name NAME
-```
+### Runtime is unsupported
 
-Use `--discard-unfetched` only when losing the sandbox result is intentional.
-
-### A process is not ready
-
-Inspect its retained output and current state:
-
-```console
-$ dsx status
-$ dsx logs PROCESS
-```
-
-Required process or health-check failure marks the sandbox failed. DSX does not silently restart failed project processes.
-
-### Docker instructions do not work
-
-DSX uses Apple `container`, not Docker or Podman. It never places a Docker, Podman, or Apple runtime control socket inside an agent workspace.
+Run `dsx doctor` and `container version --format json`. DSX fails closed for an untested or mismatched Apple CLI/API-server pair.
 
 ## Next steps
 
@@ -304,4 +336,3 @@ DSX uses Apple `container`, not Docker or Podman. It never places a Docker, Podm
 - Review the [product requirements](../PRD.md).
 - Review the [implementation architecture](../adr/0001-dsx-implementation-architecture.md).
 - For dedicated physical CI hosts, use the [runner operations guide](../runner-operations.md).
-- See Apple's [`container` documentation](https://github.com/apple/container#readme).

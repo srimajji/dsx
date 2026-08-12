@@ -61,7 +61,7 @@ func dialOwnedWorkspaceLoopback(ctx context.Context, containerExecutable executa
 }
 
 func validateOwnedLeaseWorkspace(ctx context.Context, containerExecutable executableIdentity, lease LeaseIdentity) error {
-	identity, err := ownership.NewIdentity(lease.ProjectID, lease.Sandbox, lease.RunID, runtime.ResourceWorkspace, "workspace")
+	identity, err := ownership.NewIdentity(lease.ProjectID, lease.CanonicalRoot, lease.Workspace, lease.RunID, runtime.ResourceWorkspace, "workspace")
 	if err != nil {
 		return errors.New("derive exact lease workspace identity")
 	}
@@ -73,7 +73,7 @@ func validateOwnedPublicationWorkspace(ctx context.Context, containerExecutable 
 	if err != nil || current != containerExecutable {
 		return errors.New("Apple container executable identity changed")
 	}
-	identity, err := ownership.NewIdentity(lease.ProjectID, lease.Sandbox, lease.RunID, runtime.ResourceWorkspace, "workspace")
+	identity, err := ownership.NewIdentity(lease.ProjectID, lease.CanonicalRoot, lease.Workspace, lease.RunID, runtime.ResourceWorkspace, "workspace")
 	if err != nil || identity.Name() != target.WorkspaceID {
 		return errors.New("publication workspace identity is not the exact owned workspace")
 	}

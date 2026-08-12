@@ -42,10 +42,10 @@ func TestInspectJSONCallsApplicationOnce(t *testing.T) {
 		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project", ConfigExists: true, ConfigPath: ".dsx/config.jsonc"},
 		Plan: plan.ExecutionPlan{
 			ContractVersion: plan.ContractVersion,
-			Agent:           "codex",
+			Agents:          plan.AgentPlan{Default: "codex"},
 			ExecutableHash:  strings.Repeat("a", 64),
 			Provenance: config.Provenance{
-				"/agent": {Kind: "project", Path: ".dsx/config.jsonc", Line: 3, Column: 5, Priority: plan.PriorityProject},
+				"/agents/default": {Kind: "project", Path: ".dsx/config.jsonc", Line: 3, Column: 5, Priority: plan.PriorityProject},
 			},
 		},
 	}}
@@ -61,7 +61,7 @@ func TestInspectJSONCallsApplicationOnce(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("decode inspect JSON: %v", err)
 	}
-	if result.Plan.ExecutableHash != strings.Repeat("a", 64) || result.Plan.Provenance["/agent"].Kind != "project" {
+	if result.Plan.ExecutableHash != strings.Repeat("a", 64) || result.Plan.Provenance["/agents/default"].Kind != "project" {
 		t.Fatalf("incomplete inspect output: %#v", result.Plan)
 	}
 }

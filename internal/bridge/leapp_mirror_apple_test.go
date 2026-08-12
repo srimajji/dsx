@@ -52,7 +52,16 @@ func TestAppleLeappMirrorAtomicRotationReadOnlyMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := LeaseIdentity{ProjectID: model.ProjectID("abcdefghijklmnopqrst"), Sandbox: model.SandboxName("mirror-apple"), RunID: model.RunID("01890f5c-7b00-7000-8000-000000000051")}
+	projectRoot := canonicalTemporaryDirectory(t)
+	projectID, err := model.NewProjectID(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := model.ParseWorkspaceName("mirror-apple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := LeaseIdentity{ProjectID: projectID, CanonicalRoot: projectRoot, Workspace: workspace, RunID: model.RunID("01890f5c-7b00-7000-8000-000000000051")}
 	manager, err := NewProductionLeappMirrorManager(stateRoot, dsxExecutable)
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +71,7 @@ func TestAppleLeappMirrorAtomicRotationReadOnlyMount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	networkOwner, err := ownership.NewIdentity(identity.ProjectID, identity.Sandbox, identity.RunID, runtime.ResourceNetwork, "network")
+	networkOwner, err := ownership.NewIdentity(identity.ProjectID, identity.CanonicalRoot, identity.Workspace, identity.RunID, runtime.ResourceNetwork, "network")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,15 +81,32 @@ func TestAppleLeappMirrorAtomicRotationReadOnlyMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	networkSnapshot := runtime.ResourceSnapshot{Resource: createdNetwork, Labels: networkOwner.Labels()}
-	owner, err := ownership.NewIdentity(identity.ProjectID, identity.Sandbox, identity.RunID, runtime.ResourceWorkspace, "workspace")
+	volumeOwner, err := ownership.NewIdentity(identity.ProjectID, identity.CanonicalRoot, identity.Workspace, identity.RunID, runtime.ResourceVolume, "source")
 	if err != nil {
+		_ = adapter.Delete(context.Background(), networkSnapshot)
+		_ = manager.Stop(context.Background(), identity)
+		t.Fatal(err)
+	}
+	createdVolume, err := adapter.CreateVolume(ctx, runtime.VolumeSpec{Name: volumeOwner.Name(), Labels: volumeOwner.Labels()})
+	if err != nil {
+		_ = adapter.Delete(context.Background(), networkSnapshot)
+		_ = manager.Stop(context.Background(), identity)
+		t.Fatal(err)
+	}
+	volumeSnapshot := runtime.ResourceSnapshot{Resource: createdVolume, Labels: volumeOwner.Labels()}
+	owner, err := ownership.NewIdentity(identity.ProjectID, identity.CanonicalRoot, identity.Workspace, identity.RunID, runtime.ResourceWorkspace, "workspace")
+	if err != nil {
+		_ = adapter.Delete(context.Background(), volumeSnapshot)
 		_ = adapter.Delete(context.Background(), networkSnapshot)
 		_ = manager.Stop(context.Background(), identity)
 		t.Fatal(err)
 	}
 	created, err := adapter.CreateWorkspace(ctx, runtime.WorkspaceSpec{
 		Name: owner.Name(), Image: image, Entrypoint: []string{"/bin/sh", "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"},
-		WorkingDir: "/", User: "501:20", Mounts: []runtime.Mount{{Source: mirror, Target: LeappGuestDirectory, Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityLeappMirror}}, Networks: []string{createdNetwork.Name}, Labels: owner.Labels(),
+		WorkingDir: "/", User: "501:20", Mounts: []runtime.Mount{
+			{Source: createdVolume.Name, Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume},
+			{Source: mirror, Target: LeappGuestDirectory, Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityLeappMirror},
+		}, Networks: []string{createdNetwork.Name}, Labels: owner.Labels(),
 	})
 	if err != nil {
 		if unexpected, inspectErr := adapter.Inspect(context.Background(), runtime.ResourceID(owner.Name())); inspectErr == nil {
@@ -88,6 +114,7 @@ func TestAppleLeappMirrorAtomicRotationReadOnlyMount(t *testing.T) {
 		}
 		_ = manager.Stop(context.Background(), identity)
 		_ = adapter.Delete(context.Background(), networkSnapshot)
+		_ = adapter.Delete(context.Background(), volumeSnapshot)
 		t.Fatal(err)
 	}
 	snapshot, err := adapter.Inspect(ctx, created.ID)
@@ -108,6 +135,7 @@ func TestAppleLeappMirrorAtomicRotationReadOnlyMount(t *testing.T) {
 			_ = adapter.Delete(cleanupCtx, current)
 		}
 		_ = adapter.Delete(cleanupCtx, networkSnapshot)
+		_ = adapter.Delete(cleanupCtx, volumeSnapshot)
 		_ = manager.Stop(cleanupCtx, identity)
 	}()
 	if secondMirror, err := manager.Ensure(ctx, identity, authority); err != nil || secondMirror != mirror {
@@ -153,6 +181,9 @@ func TestAppleLeappMirrorAtomicRotationReadOnlyMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := adapter.Delete(ctx, stopped); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Delete(ctx, volumeSnapshot); err != nil {
 		t.Fatal(err)
 	}
 	if err := adapter.Delete(ctx, networkSnapshot); err != nil {

@@ -342,9 +342,17 @@ func validRepositoryName(value string) bool {
 	return true
 }
 
-func validateSandbox(value string) error {
-	_, err := model.ParseSandboxName(value)
+func validateWorkspace(value string) error {
+	_, err := model.ParseWorkspaceName(value)
 	return err
+}
+
+func validateSourceBranch(value string) error {
+	if value == "" || len(value) > 1024 || strings.HasPrefix(value, "refs/heads/") ||
+		strings.IndexByte(value, 0) >= 0 || strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("invalid source branch %q", value)
+	}
+	return nil
 }
 
 func validateTempRoot(root string) error {

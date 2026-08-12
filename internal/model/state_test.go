@@ -3,11 +3,14 @@ package model
 import "testing"
 
 func TestStateTransitions(t *testing.T) {
-	allowed := [][2]SandboxState{
+	allowed := [][2]WorkspaceState{
 		{StatePlanned, StateCreating},
 		{StatePlanned, StateCleaning},
 		{StateCreating, StateRunning},
 		{StateRunning, StateStopped},
+		{StateRunning, StateNeedsResolution},
+		{StateNeedsResolution, StateStopped},
+		{StateStopped, StateRunning},
 		{StateStopped, StateCleaning},
 		{StateCleaning, StateDeleted},
 	}
@@ -17,7 +20,7 @@ func TestStateTransitions(t *testing.T) {
 		}
 	}
 	if err := StateDeleted.Transition(StateRunning); err == nil {
-		t.Fatal("deleted sandbox returned to running")
+		t.Fatal("deleted workspace returned to running")
 	}
 }
 

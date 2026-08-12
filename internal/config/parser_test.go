@@ -43,7 +43,8 @@ func TestManagedStandardImageConfig(t *testing.T) {
 	validated, diagnostics := ParseBytes("standard.jsonc", []byte(`{
 		"schemaVersion": 1,
 		"workspace": {"root": "."},
-		"image": {"standard": true}
+		"image": {"standard": true},
+		"agents": {"default": "codex", "allowed": ["codex"]}
 	}`))
 	if len(diagnostics) != 0 {
 		t.Fatalf("ParseBytes() diagnostics = %#v", diagnostics)
@@ -57,6 +58,52 @@ func TestSchemaUnknownField(t *testing.T) {
 	t.Parallel()
 	_, diagnostics := ParseBytes("invalid-unknown.jsonc", fixture(t, "invalid-unknown.jsonc"))
 	assertDiagnostic(t, diagnostics, "schema", "/workspace/initializeCommand", true)
+}
+
+func TestWorkspaceConfigCutover(t *testing.T) {
+	t.Parallel()
+	base := `{"schemaVersion":1,"workspace":{"root":"."},"image":{"standard":true},"agents":{"default":"codex","allowed":["codex"]}%s}`
+	tests := []struct {
+		name    string
+		extra   string
+		pointer string
+	}{
+		{name: "auth profiles", extra: `,"authProfiles":{}`, pointer: "/authProfiles"},
+		{name: "creation browser", extra: `,"browser":{"enabled":true}`, pointer: "/browser"},
+		{name: "workspace mode", extra: `,"mode":"clone"`, pointer: "/mode"},
+		{name: "single agent", extra: `,"agent":"codex"`, pointer: "/agent"},
+		{name: "profile", extra: `,"profile":"default"`, pointer: "/profile"},
+		{name: "clone concurrency", extra: `,"resources":{"maxConcurrentClones":2}`, pointer: "/resources/maxConcurrentClones"},
+		{name: "sandbox volume scope", extra: `,"volumes":{"cache":{"target":"/cache","scope":"sandbox"}}`, pointer: "/volumes/cache/scope"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, diagnostics := ParseBytes(test.name+".jsonc", []byte(fmt.Sprintf(base, test.extra)))
+			assertDiagnostic(t, diagnostics, "schema", test.pointer, true)
+		})
+	}
+
+	t.Run("default must be approved", func(t *testing.T) {
+		t.Parallel()
+		document := strings.Replace(fmt.Sprintf(base, ""), `"default":"codex"`, `"default":"claude"`, 1)
+		_, diagnostics := ParseBytes("default.jsonc", []byte(document))
+		assertDiagnostic(t, diagnostics, "schema", "/agents/allowed/0", true)
+	})
+
+	t.Run("unsupported default is rejected", func(t *testing.T) {
+		t.Parallel()
+		document := strings.Replace(fmt.Sprintf(base, ""), `"default":"codex"`, `"default":"other"`, 1)
+		_, diagnostics := ParseBytes("unsupported-default.jsonc", []byte(document))
+		assertDiagnostic(t, diagnostics, "schema", "/agents/default", true)
+	})
+
+	t.Run("Claude host import is forbidden", func(t *testing.T) {
+		t.Parallel()
+		_, diagnostics := ParseBytes("claude-import.jsonc", []byte(fmt.Sprintf(base, `,"auth":{"imports":["claude"]}`)))
+		assertDiagnostic(t, diagnostics, "schema", "/auth/imports/0", true)
+	})
 }
 
 func TestDuplicateLocations(t *testing.T) {
@@ -90,6 +137,7 @@ func TestPortBindExplicitNonLoopbackGrant(t *testing.T) {
   "schemaVersion": 1,
   "workspace": {"root":"."},
   "image": {"ref":"ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "agents": {"default":"codex","allowed":["codex"]},
   "ports": [{"name":"web","guest":3000,"host":"dynamic","bind":"0.0.0.0","protocol":"tcp"}]
 }`
 	validated, diagnostics := ParseBytes("nonloopback.jsonc", []byte(document))
@@ -129,6 +177,7 @@ func TestSemanticMountDenylist(t *testing.T) {
   "schemaVersion": 1,
   "workspace": {"root":"."},
   "image": {"ref":"ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "agents": {"default":"codex","allowed":["codex"]},
   "mounts": [{"source":{"type":"host","path":%q},"target":"/reviewed","readOnly":true}]
 }`, source)
 			_, diagnostics := ParseBytes("deny.jsonc", []byte(document))
@@ -146,13 +195,13 @@ func TestSemanticReservedGuestHelperTargets(t *testing.T) {
 	}{
 		{"mount child", `"mounts":[{"source":{"type":"workspace","path":"."},"target":"/usr/local/libexec/dsx/dsx-guest"}]`, "/mounts/0/target"},
 		{"mount ancestor", `"mounts":[{"source":{"type":"workspace","path":"."},"target":"/usr/local/libexec"}]`, "/mounts/0/target"},
-		{"volume exact", `"volumes":{"tools":{"target":"/usr/local/libexec/dsx","scope":"sandbox"}}`, "/volumes/tools/target"},
+		{"volume exact", `"volumes":{"tools":{"target":"/usr/local/libexec/dsx","scope":"workspace"}}`, "/volumes/tools/target"},
 	}
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			document := `{"schemaVersion":1,"workspace":{"root":"."},"image":{"ref":"ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},` + test.member + `}`
+			document := `{"schemaVersion":1,"workspace":{"root":"."},"image":{"ref":"ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"agents":{"default":"codex","allowed":["codex"]},` + test.member + `}`
 			_, diagnostics := ParseBytes("reserved.jsonc", []byte(document))
 			assertDiagnostic(t, diagnostics, "semantic", test.path, true)
 		})
@@ -187,18 +236,28 @@ func TestJSONCSmokeNoSideEffects(t *testing.T) {
     "db": {"argv":["postgres"]},
     "web": {"argv":["pnpm","dev"],"dependsOn":["db"],"health":{"http":{"url":"http://127.0.0.1:3000/health"},"interval":"1s","timeout":"2s"}}
   },
-  "volumes": {"node_modules":{"target":"/workspace/node_modules","scope":"sandbox"}},
+  "volumes": {"node_modules":{"target":"/workspace/node_modules","scope":"workspace"}},
   "mounts": [],
   "agents": {"default":"codex","allowed":["omp","codex","claude","opencode"]},
-  "authProfiles": {"codex-main":{"harness":"codex","persistence":"global"}},
+  "auth": {"imports":["omp","codex","opencode"]},
   "ports": [{"name":"web","guest":3000,"host":"dynamic","bind":"127.0.0.1","protocol":"tcp"}],
-  "browser": {"enabled":false},
   "aws": {"mode":"none"},
   "network": {"internet":true,"hostGrants":[]},
-  "resources": {"cpus":4,"memory":"8GiB","maxConcurrentClones":2},
+  "resources": {"cpus":4,"memory":"8GiB","maxConcurrentWorkspaces":2},
 }`)
-	if _, diagnostics := ParseBytes("memory.jsonc", realistic); len(diagnostics) != 0 {
+	validated, diagnostics := ParseBytes("memory.jsonc", realistic)
+	if len(diagnostics) != 0 {
 		t.Fatalf("realistic config rejected: %#v", diagnostics)
+	}
+	if validated.Document.Agents.Default != "codex" ||
+		len(validated.Document.Auth.Imports) != 3 ||
+		validated.Document.Resources.MaxConcurrentWorkspaces != 2 {
+		t.Fatalf("workspace configuration was not decoded into synchronized types: %#v", validated.Document)
+	}
+	if validated.SourceLocations["/agents/default"].Line == 0 ||
+		validated.SourceLocations["/auth/imports/0"].Line == 0 ||
+		validated.SourceLocations["/resources/maxConcurrentWorkspaces"].Line == 0 {
+		t.Fatalf("workspace configuration provenance locations are incomplete: %#v", validated.SourceLocations)
 	}
 
 	duplicate := strings.Replace(string(realistic), `"schemaVersion": 1,`, `"schemaVersion": 1, "schemaVersion": 1,`, 1)

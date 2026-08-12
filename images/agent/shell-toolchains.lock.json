@@ -1,0 +1,178 @@
+{
+  "schemaVersion": 1,
+  "platform": "linux/arm64",
+  "base": {
+    "reference": "docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9"
+  },
+  "apt": {
+    "bootstrap": {
+      "repository": "http://ports.ubuntu.com/ubuntu-ports",
+      "package": "ca-certificates",
+      "version": "20260601~24.04.1",
+      "trust": "apt-signed-index"
+    },
+    "snapshot": "https://snapshot.ubuntu.com/ubuntu/20260811T000000Z/",
+    "packages": [
+      { "name": "curl", "version": "8.5.0-2ubuntu10.11" },
+      { "name": "git", "version": "1:2.43.0-1ubuntu7.3" },
+      { "name": "openssh-client", "version": "1:9.6p1-3ubuntu13.18" },
+      { "name": "zsh", "version": "5.9-6ubuntu2" },
+      { "name": "ripgrep", "version": "14.1.0-1" },
+      { "name": "bat", "version": "0.24.0-1build1" },
+      { "name": "jq", "version": "1.7.1-3ubuntu0.24.04.2" },
+      { "name": "less", "version": "590-2ubuntu2.1" },
+      { "name": "tmux", "version": "3.4-1ubuntu0.1" },
+      { "name": "zip", "version": "3.0-13ubuntu0.2" },
+      { "name": "unzip", "version": "6.0-28ubuntu4.1" },
+      { "name": "build-essential", "version": "12.10ubuntu1" },
+      { "name": "python3", "version": "3.12.3-0ubuntu2.1" },
+      { "name": "python3-pip", "version": "24.0+dfsg-1ubuntu1.3" },
+      { "name": "python3-venv", "version": "3.12.3-0ubuntu2.1" }
+    ]
+  },
+  "artifacts": [
+    {
+      "name": "node",
+      "version": "24.19.0",
+      "source": "https://nodejs.org/download/release/v24.19.0/node-v24.19.0-linux-arm64.tar.gz",
+      "sha256": "d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f",
+      "installRoot": "/opt/node"
+    },
+    {
+      "name": "pnpm",
+      "version": "11.21.0",
+      "source": "https://registry.npmjs.org/pnpm/-/pnpm-11.21.0.tgz",
+      "sha256": "87237d37eadb79dc626a0576eb3a52d23d70422c323ae5e00fc05c91f4323780",
+      "installRoot": "/opt/pnpm"
+    },
+    {
+      "name": "go",
+      "version": "1.26.5",
+      "source": "https://go.dev/dl/go1.26.5.linux-arm64.tar.gz",
+      "sha256": "fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49",
+      "installRoot": "/opt/go"
+    },
+    {
+      "name": "temurin-jdk",
+      "version": "25.0.4+7-LTS",
+      "source": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4%2B7/OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.4_7.tar.gz",
+      "sha256": "621f7196f0b682fb557da58bec89bd7dfe5419811fe1c0ba75c9cc8432f084c7",
+      "installRoot": "/opt/java"
+    },
+    {
+      "name": "starship",
+      "version": "1.26.0",
+      "source": "https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "dc30189378d2f2e287384e8a692d3f95ad1df64cf0e8c36aa9201516028aed6b",
+      "installRoot": "/usr/local/bin"
+    },
+    {
+      "name": "fzf",
+      "version": "0.74.2",
+      "source": "https://github.com/junegunn/fzf/releases/download/v0.74.2/fzf-0.74.2-linux_arm64.tar.gz",
+      "sha256": "1373e3f5ed3c468179d4529942ddd96c234bcad1bcacaf238916e26a5234b5b2",
+      "installRoot": "/usr/local/bin"
+    },
+    {
+      "name": "direnv",
+      "version": "2.37.1",
+      "source": "https://github.com/direnv/direnv/releases/download/v2.37.1/direnv.linux-arm64",
+      "sha256": "2a9cef8d73521d6a3ec3f2871c4b747b8c4cc038628c1b57a7efa42b393a2d82",
+      "installRoot": "/usr/local/bin"
+    }
+  ],
+  "plugins": {
+    "manager": {
+      "name": "antidote",
+      "version": "2.3.0",
+      "revision": "9bb69ab99c6f05d6e6ae237f7ce222eeeb5b4a14",
+      "source": "https://codeload.github.com/mattmc3/antidote/tar.gz/9bb69ab99c6f05d6e6ae237f7ce222eeeb5b4a14",
+      "sha256": "affb72ab8a94f7ed488f261b06957b6464d96443ed9bf7c8b10bdc6c55f1556c"
+    },
+    "entries": [
+      {
+        "repository": "zsh-users/zsh-completions",
+        "revision": "e099c4a2287cd829f43d87fbedb1c5a74791a6e2",
+        "source": "https://codeload.github.com/zsh-users/zsh-completions/tar.gz/e099c4a2287cd829f43d87fbedb1c5a74791a6e2",
+        "sha256": "2f5dd87c9ec4fcb893e353f1603a33915cf9748e55379c56708bec3968e3ebe9",
+        "phase": "pre-compinit-fpath",
+        "order": 1
+      },
+      {
+        "repository": "Aloxaf/fzf-tab",
+        "revision": "24105b15714bfec37989ed5c5b6e60f572253019",
+        "source": "https://codeload.github.com/Aloxaf/fzf-tab/tar.gz/24105b15714bfec37989ed5c5b6e60f572253019",
+        "sha256": "67ee2bb60be09b6054b6b149549bb5e341be7d0ecf374f327f2d43e2349b31b1",
+        "phase": "post-compinit",
+        "order": 2
+      },
+      {
+        "repository": "zsh-users/zsh-history-substring-search",
+        "revision": "14c8d2e0ffaee98f2df9850b19944f32546fdea5",
+        "source": "https://codeload.github.com/zsh-users/zsh-history-substring-search/tar.gz/14c8d2e0ffaee98f2df9850b19944f32546fdea5",
+        "sha256": "823ea186446669fb024b839b117122d03ee0b3b20e199c95e09e85695bd30b0f",
+        "phase": "post-compinit",
+        "order": 3
+      },
+      {
+        "repository": "zsh-users/zsh-autosuggestions",
+        "revision": "85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5",
+        "source": "https://codeload.github.com/zsh-users/zsh-autosuggestions/tar.gz/85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5",
+        "sha256": "20665e469e720e674964a66854d5534b9af78cdfd438512746ecd1ade8e819ce",
+        "phase": "post-compinit",
+        "order": 4
+      },
+      {
+        "repository": "zsh-users/zsh-syntax-highlighting",
+        "revision": "c4d95591843d49838b7ad30081e7aba3135a6703",
+        "source": "https://codeload.github.com/zsh-users/zsh-syntax-highlighting/tar.gz/c4d95591843d49838b7ad30081e7aba3135a6703",
+        "sha256": "3d26244d87547bd3755cf4b5739c643c76198559c2ae6267dcfc7825fa789ff5",
+        "phase": "post-compinit-last",
+        "order": 5
+      }
+    ]
+  },
+  "tools": [
+    { "name": "zsh", "version": "5.9-6ubuntu2", "provider": "zsh", "executable": "/bin/zsh" },
+    { "name": "curl", "version": "8.5.0-2ubuntu10.11", "provider": "curl", "executable": "/usr/bin/curl" },
+    { "name": "git", "version": "1:2.43.0-1ubuntu7.3", "provider": "git", "executable": "/usr/bin/git" },
+    { "name": "ssh", "version": "1:9.6p1-3ubuntu13.18", "provider": "openssh-client", "executable": "/usr/bin/ssh" },
+    { "name": "cc", "version": "12.10ubuntu1", "provider": "build-essential", "executable": "/usr/bin/cc" },
+    { "name": "c++", "version": "12.10ubuntu1", "provider": "build-essential", "executable": "/usr/bin/c++" },
+    { "name": "make", "version": "12.10ubuntu1", "provider": "build-essential", "executable": "/usr/bin/make" },
+    { "name": "starship", "version": "1.26.0", "provider": "starship", "executable": "/usr/local/bin/starship" },
+    { "name": "fzf", "version": "0.74.2", "provider": "fzf", "executable": "/usr/local/bin/fzf" },
+    { "name": "direnv", "version": "2.37.1", "provider": "direnv", "executable": "/usr/local/bin/direnv" },
+    { "name": "rg", "version": "14.1.0-1", "provider": "ripgrep", "executable": "/usr/bin/rg" },
+    { "name": "bat", "version": "0.24.0-1build1", "provider": "bat", "executable": "/usr/local/bin/bat" },
+    { "name": "jq", "version": "1.7.1-3ubuntu0.24.04.2", "provider": "jq", "executable": "/usr/bin/jq" },
+    { "name": "less", "version": "590-2ubuntu2.1", "provider": "less", "executable": "/usr/bin/less" },
+    { "name": "tmux", "version": "3.4-1ubuntu0.1", "provider": "tmux", "executable": "/usr/bin/tmux" },
+    { "name": "zip", "version": "3.0-13ubuntu0.2", "provider": "zip", "executable": "/usr/bin/zip" },
+    { "name": "unzip", "version": "6.0-28ubuntu4.1", "provider": "unzip", "executable": "/usr/bin/unzip" },
+    { "name": "python3", "version": "3.12.3", "provider": "python3", "executable": "/usr/bin/python3" },
+    { "name": "python", "version": "3.12.3", "provider": "python3", "executable": "/usr/local/bin/python" },
+    { "name": "pip", "version": "24.0", "provider": "python3-pip", "executable": "/usr/local/bin/pip" },
+    { "name": "node", "version": "24.19.0", "provider": "node", "executable": "/opt/node/bin/node" },
+    { "name": "npm", "version": "11.17.0", "provider": "node", "executable": "/opt/node/bin/npm" },
+    { "name": "pnpm", "version": "11.21.0", "provider": "pnpm", "executable": "/usr/local/bin/pnpm" },
+    { "name": "go", "version": "1.26.5", "provider": "go", "executable": "/opt/go/bin/go" },
+    { "name": "java", "version": "25.0.4+7-LTS", "provider": "temurin-jdk", "executable": "/opt/java/bin/java" },
+    { "name": "javac", "version": "25.0.4+7-LTS", "provider": "temurin-jdk", "executable": "/opt/java/bin/javac" }
+  ],
+  "environment": {
+    "shell": "/bin/zsh",
+    "zdotdir": "/usr/local/share/dsx/shell",
+    "path": "/opt/node/bin:/opt/go/bin:/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "javaHome": "/opt/java",
+    "starshipConfig": "/usr/local/share/dsx/shell/starship.toml"
+  },
+  "generated": {
+    "pluginsPre": "/usr/local/share/dsx/shell/plugins-pre.zsh",
+    "pluginsPost": "/usr/local/share/dsx/shell/plugins-post.zsh",
+    "completionCache": "/usr/local/share/dsx/shell/zcompdump",
+    "fzfInit": "/usr/local/share/dsx/shell/fzf-init.zsh",
+    "direnvInit": "/usr/local/share/dsx/shell/direnv-init.zsh",
+    "starshipInit": "/usr/local/share/dsx/shell/starship-init.zsh"
+  }
+}

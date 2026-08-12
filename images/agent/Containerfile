@@ -5,31 +5,133 @@ ADD --checksum=sha256:f176edf8174db252abe1aa6e84df284e1b83b8dd7ef34ac7faf7884a5e
 ADD --checksum=sha256:89cbf79bd5ae6f9c58da47e8079f311c84219350c9c43c070d42f3e9b2a81401 https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-package-aarch64-unknown-linux-musl.tar.gz /artifacts/codex.tar.gz
 ADD --checksum=sha256:fbbb2610daff70d118c8dda8aeffee92b38f20aa464e758c3d09e3c83ab6ef56 https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.226.tgz /artifacts/claude.tar.gz
 ADD --checksum=sha256:65991c16d1afac6eb9a6af8ea7551ffc98cad9bf3af51211f5a172436335fefa https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.18.15.tgz /artifacts/opencode.tar.gz
+ADD --checksum=sha256:d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f https://nodejs.org/download/release/v24.19.0/node-v24.19.0-linux-arm64.tar.gz /artifacts/node.tar.gz
+ADD --checksum=sha256:87237d37eadb79dc626a0576eb3a52d23d70422c323ae5e00fc05c91f4323780 https://registry.npmjs.org/pnpm/-/pnpm-11.21.0.tgz /artifacts/pnpm.tar.gz
+ADD --checksum=sha256:fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49 https://go.dev/dl/go1.26.5.linux-arm64.tar.gz /artifacts/go.tar.gz
+ADD --checksum=sha256:621f7196f0b682fb557da58bec89bd7dfe5419811fe1c0ba75c9cc8432f084c7 https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4%2B7/OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.4_7.tar.gz /artifacts/java.tar.gz
+ADD --checksum=sha256:dc30189378d2f2e287384e8a692d3f95ad1df64cf0e8c36aa9201516028aed6b https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-unknown-linux-musl.tar.gz /artifacts/starship.tar.gz
+ADD --checksum=sha256:1373e3f5ed3c468179d4529942ddd96c234bcad1bcacaf238916e26a5234b5b2 https://github.com/junegunn/fzf/releases/download/v0.74.2/fzf-0.74.2-linux_arm64.tar.gz /artifacts/fzf.tar.gz
+ADD --checksum=sha256:2a9cef8d73521d6a3ec3f2871c4b747b8c4cc038628c1b57a7efa42b393a2d82 https://github.com/direnv/direnv/releases/download/v2.37.1/direnv.linux-arm64 /artifacts/direnv
+ADD --checksum=sha256:affb72ab8a94f7ed488f261b06957b6464d96443ed9bf7c8b10bdc6c55f1556c https://codeload.github.com/mattmc3/antidote/tar.gz/9bb69ab99c6f05d6e6ae237f7ce222eeeb5b4a14 /artifacts/antidote.tar.gz
+ADD --checksum=sha256:2f5dd87c9ec4fcb893e353f1603a33915cf9748e55379c56708bec3968e3ebe9 https://codeload.github.com/zsh-users/zsh-completions/tar.gz/e099c4a2287cd829f43d87fbedb1c5a74791a6e2 /artifacts/zsh-completions.tar.gz
+ADD --checksum=sha256:67ee2bb60be09b6054b6b149549bb5e341be7d0ecf374f327f2d43e2349b31b1 https://codeload.github.com/Aloxaf/fzf-tab/tar.gz/24105b15714bfec37989ed5c5b6e60f572253019 /artifacts/fzf-tab.tar.gz
+ADD --checksum=sha256:823ea186446669fb024b839b117122d03ee0b3b20e199c95e09e85695bd30b0f https://codeload.github.com/zsh-users/zsh-history-substring-search/tar.gz/14c8d2e0ffaee98f2df9850b19944f32546fdea5 /artifacts/zsh-history-substring-search.tar.gz
+ADD --checksum=sha256:20665e469e720e674964a66854d5534b9af78cdfd438512746ecd1ade8e819ce https://codeload.github.com/zsh-users/zsh-autosuggestions/tar.gz/85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5 /artifacts/zsh-autosuggestions.tar.gz
+ADD --checksum=sha256:3d26244d87547bd3755cf4b5739c643c76198559c2ae6267dcfc7825fa789ff5 https://codeload.github.com/zsh-users/zsh-syntax-highlighting/tar.gz/c4d95591843d49838b7ad30081e7aba3135a6703 /artifacts/zsh-syntax-highlighting.tar.gz
 
-RUN mkdir -p /opt/codex /opt/claude /opt/opencode \
+RUN mkdir -p /opt/codex /opt/claude /opt/opencode /opt/node /opt/pnpm /opt/go /opt/java \
+        /opt/shell-src/antidote /opt/shell-src/plugins/zsh-completions \
+        /opt/shell-src/plugins/fzf-tab /opt/shell-src/plugins/zsh-history-substring-search \
+        /opt/shell-src/plugins/zsh-autosuggestions /opt/shell-src/plugins/zsh-syntax-highlighting \
     && tar -xzf /artifacts/codex.tar.gz -C /opt/codex \
     && tar -xzf /artifacts/claude.tar.gz -C /opt/claude --strip-components=1 \
     && tar -xzf /artifacts/opencode.tar.gz -C /opt/opencode --strip-components=1 \
+    && tar -xzf /artifacts/node.tar.gz -C /opt/node --strip-components=1 \
+    && tar -xzf /artifacts/pnpm.tar.gz -C /opt/pnpm --strip-components=1 \
+    && tar -xzf /artifacts/go.tar.gz -C /opt/go --strip-components=1 \
+    && tar -xzf /artifacts/java.tar.gz -C /opt/java --strip-components=1 \
+    && tar -xzf /artifacts/starship.tar.gz -C /artifacts \
+    && tar -xzf /artifacts/fzf.tar.gz -C /artifacts \
+    && tar -xzf /artifacts/antidote.tar.gz -C /opt/shell-src/antidote --strip-components=1 \
+    && tar -xzf /artifacts/zsh-completions.tar.gz -C /opt/shell-src/plugins/zsh-completions --strip-components=1 \
+    && tar -xzf /artifacts/fzf-tab.tar.gz -C /opt/shell-src/plugins/fzf-tab --strip-components=1 \
+    && tar -xzf /artifacts/zsh-history-substring-search.tar.gz -C /opt/shell-src/plugins/zsh-history-substring-search --strip-components=1 \
+    && tar -xzf /artifacts/zsh-autosuggestions.tar.gz -C /opt/shell-src/plugins/zsh-autosuggestions --strip-components=1 \
+    && tar -xzf /artifacts/zsh-syntax-highlighting.tar.gz -C /opt/shell-src/plugins/zsh-syntax-highlighting --strip-components=1 \
+    && chmod 0755 /opt/pnpm/bin/pnpm.mjs /opt/pnpm/bin/pnpx.mjs \
     && install -m 0755 /artifacts/omp /usr/local/bin/omp \
     && install -m 0755 /opt/claude/claude /usr/local/bin/claude \
     && install -m 0755 /opt/opencode/bin/opencode /usr/local/bin/opencode \
+    && install -m 0755 /artifacts/starship /usr/local/bin/starship \
+    && install -m 0755 /artifacts/fzf /usr/local/bin/fzf \
+    && install -m 0755 /artifacts/direnv /usr/local/bin/direnv \
     && ln -s /opt/codex/bin/codex /usr/local/bin/codex
 
 FROM docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client \
+    && apt-get install -y --no-install-recommends ca-certificates=20260601~24.04.1 \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 501 --gid 20 --create-home --shell /bin/bash dsx
+    && sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|https://snapshot.ubuntu.com/ubuntu/20260811T000000Z/|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl=8.5.0-2ubuntu10.11 \
+        git=1:2.43.0-1ubuntu7.3 \
+        openssh-client=1:9.6p1-3ubuntu13.18 \
+        zsh=5.9-6ubuntu2 \
+        ripgrep=14.1.0-1 \
+        bat=0.24.0-1build1 \
+        jq=1.7.1-3ubuntu0.24.04.2 \
+        less=590-2ubuntu2.1 \
+        tmux=3.4-1ubuntu0.1 \
+        zip=3.0-13ubuntu0.2 \
+        unzip=6.0-28ubuntu4.1 \
+        build-essential=12.10ubuntu1 \
+        python3=3.12.3-0ubuntu2.1 \
+        python3-pip=24.0+dfsg-1ubuntu1.3 \
+        python3-venv=3.12.3-0ubuntu2.1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 501 --gid 20 --create-home --shell /bin/zsh dsx
+
+ENV SHELL=/bin/zsh \
+    ZDOTDIR=/usr/local/share/dsx/shell \
+    JAVA_HOME=/opt/java \
+    STARSHIP_CONFIG=/usr/local/share/dsx/shell/starship.toml \
+    PATH=/opt/node/bin:/opt/go/bin:/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 COPY --from=artifacts /usr/local/bin/omp /usr/local/bin/omp
 COPY --from=artifacts /usr/local/bin/claude /usr/local/bin/claude
 COPY --from=artifacts /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=artifacts /usr/local/bin/codex /usr/local/bin/codex
+COPY --from=artifacts /usr/local/bin/starship /usr/local/bin/starship
+COPY --from=artifacts /usr/local/bin/fzf /usr/local/bin/fzf
+COPY --from=artifacts /usr/local/bin/direnv /usr/local/bin/direnv
 COPY --from=artifacts /opt/codex /opt/codex
-RUN install -d -m 0755 /usr/local/share/dsx
+COPY --from=artifacts /opt/node /opt/node
+COPY --from=artifacts /opt/pnpm /opt/pnpm
+COPY --from=artifacts /opt/go /opt/go
+COPY --from=artifacts /opt/java /opt/java
+COPY --from=artifacts /opt/shell-src/antidote /opt/antidote
+COPY --from=artifacts /opt/shell-src/plugins /usr/local/share/dsx/shell/plugins
+
+RUN install -d -m 0755 /usr/local/share/dsx/shell \
+    && ln -s /opt/pnpm/bin/pnpm.mjs /usr/local/bin/pnpm \
+    && ln -s /opt/pnpm/bin/pnpx.mjs /usr/local/bin/pnpx \
+    && ln -s /usr/bin/python3 /usr/local/bin/python \
+    && ln -s /usr/bin/pip3 /usr/local/bin/pip \
+    && ln -s /usr/bin/batcat /usr/local/bin/bat
 COPY --chmod=0444 harnesses.lock.json /usr/local/share/dsx/harnesses.lock.json
+COPY --chmod=0444 shell-toolchains.lock.json /usr/local/share/dsx/shell-toolchains.lock.json
+COPY --chmod=0555 shell/dsx.zsh /usr/local/share/dsx/shell/dsx.zsh
+COPY --chmod=0444 shell/zsh_plugins.txt shell/starship.toml /usr/local/share/dsx/shell/
+
+RUN printf '%s\n' 'source /usr/local/share/dsx/shell/dsx.zsh' > /usr/local/share/dsx/shell/.zshrc \
+    && chmod 0444 /usr/local/share/dsx/shell/.zshrc
+
+RUN printf '%s\n' '/usr/local/share/dsx/shell/plugins/zsh-completions path:src kind:fpath' \
+        | zsh -c 'source /opt/antidote/antidote.zsh; antidote bundle' \
+        > /usr/local/share/dsx/shell/plugins-pre.zsh \
+    && printf '%s\n' \
+        '/usr/local/share/dsx/shell/plugins/fzf-tab' \
+        '/usr/local/share/dsx/shell/plugins/zsh-history-substring-search' \
+        '/usr/local/share/dsx/shell/plugins/zsh-autosuggestions' \
+        '/usr/local/share/dsx/shell/plugins/zsh-syntax-highlighting' \
+        | zsh -c 'source /opt/antidote/antidote.zsh; antidote bundle' \
+        > /usr/local/share/dsx/shell/plugins-post.zsh \
+    && zsh -fc 'source /usr/local/share/dsx/shell/plugins-pre.zsh; autoload -Uz compinit; compinit -i -d /usr/local/share/dsx/shell/zcompdump' \
+    && zsh -fc 'zcompile -R /usr/local/share/dsx/shell/zcompdump.zwc /usr/local/share/dsx/shell/zcompdump' \
+    && fzf --zsh > /usr/local/share/dsx/shell/fzf-init.zsh \
+    && direnv hook zsh > /usr/local/share/dsx/shell/direnv-init.zsh \
+    && starship init zsh > /usr/local/share/dsx/shell/starship-init.zsh \
+    && chmod 0444 /usr/local/share/dsx/shell/plugins-pre.zsh \
+        /usr/local/share/dsx/shell/plugins-post.zsh \
+        /usr/local/share/dsx/shell/zcompdump \
+        /usr/local/share/dsx/shell/zcompdump.zwc \
+        /usr/local/share/dsx/shell/fzf-init.zsh \
+        /usr/local/share/dsx/shell/direnv-init.zsh \
+        /usr/local/share/dsx/shell/starship-init.zsh
+
 LABEL io.dsx.harness-lock.sha256="219209eda5f77b364f8270de14e6c5deffe1573f63edcf02b46dd16c00bdbda6"
 
 USER 501:20

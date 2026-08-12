@@ -23,30 +23,14 @@ const initHelp = `Usage: dsx init [--root PATH]
 Opens the same reviewable setup flow used by bare dsx.
 `
 
-const inspectHelp = `Usage: dsx inspect [--format text|json] [--root PATH] [--mode live|clone] [--sandbox NAME] [--agent NAME] [--browser]
+const inspectHelp = `Usage: dsx inspect [--format text|json] [--root PATH]
 
-Reads project declarations and prints the effective plan without mutation.
+Reads project declarations and prints reusable project defaults without mutation.
 `
 
 const doctorHelp = `Usage: dsx doctor [--format text|json] [--require-builder]
 
 Checks the supported macOS and Apple container runtime without mutation.
-`
-
-const startHelp = `Usage: dsx start [--root PATH] --approve-config HASH
-`
-
-const stopHelp = `Usage: dsx stop [--root PATH] [--name NAME]
-`
-
-const listHelp = `Usage: dsx list [--root PATH] [--format text|json]
-`
-
-const cleanHelp = `Usage: dsx clean [--root PATH] [--name NAME] [--force] [--discard-unfetched] [--purge-auth --agent NAME [--profile NAME]]
-       dsx clean --all [--force] [--discard-unfetched] [--purge-auth --agent NAME [--profile NAME]]
-`
-
-const shellHelp = `Usage: dsx shell [--root PATH] [--approve-config HASH] [--agent omp|codex|claude|opencode] [--profile NAME] [-- command args...]
 `
 
 func renderInspect(writer io.Writer, result app.InspectResult, format string) error {
@@ -66,7 +50,7 @@ func renderInspect(writer io.Writer, result app.InspectResult, format string) er
 	} else if image == "" && result.Plan.Image.File != "" {
 		image = "project build " + result.Plan.Image.File
 	}
-	if _, err := fmt.Fprintf(writer, "Mode: %q\nAgent: %q\nImage: %q\nExecutable hash: %s\n", terminal.SanitizeLine(string(result.Plan.Mode)), terminal.SanitizeLine(result.Plan.Agent), terminal.SanitizeLine(image), terminal.SanitizeLine(result.Plan.ExecutableHash)); err != nil {
+	if _, err := fmt.Fprintf(writer, "Default agent: %q\nImage: %q\nExecutable hash: %s\n", terminal.SanitizeLine(result.Plan.Agents.Default), terminal.SanitizeLine(image), terminal.SanitizeLine(result.Plan.ExecutableHash)); err != nil {
 		return model.Wrap(model.CodeInternal, "write inspect output", err)
 	}
 	var encoded bytes.Buffer
@@ -122,101 +106,6 @@ func renderDiagnostics(writer io.Writer, diagnostics []config.Diagnostic) error 
 	for _, diagnostic := range ordered {
 		if _, err := fmt.Fprintf(writer, "diagnostic severity=%q code=%q path=%q line=%d column=%d message=%q\n", terminal.SanitizeLine(diagnostic.Severity), terminal.SanitizeLine(diagnostic.Code), terminal.SanitizeLine(diagnostic.Path), diagnostic.Line, diagnostic.Column, terminal.SanitizeLine(diagnostic.Message)); err != nil {
 			return model.Wrap(model.CodeInternal, "write diagnostics", err)
-		}
-	}
-	return nil
-}
-
-func renderStart(writer io.Writer, result app.StartResult) error {
-	if _, err := fmt.Fprintf(writer, "Project: %q\nSandbox: %q\nRun: %q\nState: %q\nExisting: %t\n",
-		terminal.SanitizeLine(string(result.ProjectID)),
-		terminal.SanitizeLine(string(result.Sandbox)),
-		terminal.SanitizeLine(string(result.RunID)),
-		terminal.SanitizeLine(string(result.State)),
-		result.Existing,
-	); err != nil {
-		return model.Wrap(model.CodeInternal, "write start output", err)
-	}
-	urls := append([]string(nil), result.URLs...)
-	sort.Strings(urls)
-	for _, publishedURL := range urls {
-		if _, err := fmt.Fprintf(writer, "URL: %q\n", terminal.SanitizeLine(publishedURL)); err != nil {
-			return model.Wrap(model.CodeInternal, "write start URL", err)
-		}
-	}
-	return nil
-}
-
-func renderStop(writer io.Writer, result app.StopResult) error {
-	if _, err := fmt.Fprintf(writer, "Project: %q\nSandbox: %q\nRun: %q\nState: %q\n",
-		terminal.SanitizeLine(string(result.ProjectID)),
-		terminal.SanitizeLine(string(result.Sandbox)),
-		terminal.SanitizeLine(string(result.RunID)),
-		terminal.SanitizeLine(string(result.State)),
-	); err != nil {
-		return model.Wrap(model.CodeInternal, "write stop output", err)
-	}
-	return nil
-}
-
-func renderClean(writer io.Writer, result app.CleanResult) error {
-	if result.ProjectID != "" {
-		if _, err := fmt.Fprintf(writer, "Project: %q\n", terminal.SanitizeLine(string(result.ProjectID))); err != nil {
-			return model.Wrap(model.CodeInternal, "write clean output", err)
-		}
-	}
-	if _, err := fmt.Fprintf(writer, "Projects: %d\nDeleted manifests: %d\nDeleted resources: %d\n",
-		result.Projects, result.DeletedManifests, result.DeletedResources); err != nil {
-		return model.Wrap(model.CodeInternal, "write clean output", err)
-	}
-	preserved := append([]string(nil), result.Preserved...)
-	sort.Strings(preserved)
-	for _, item := range preserved {
-		if _, err := fmt.Fprintf(writer, "Preserved: %q\n", terminal.SanitizeLine(item)); err != nil {
-			return model.Wrap(model.CodeInternal, "write clean output", err)
-		}
-	}
-	return nil
-}
-
-func renderList(writer io.Writer, result app.ListResult, format string) error {
-	sandboxes := make([]app.SandboxSummary, len(result.Sandboxes))
-	copy(sandboxes, result.Sandboxes)
-	for index := range sandboxes {
-		sandboxes[index].Warnings = append([]string(nil), sandboxes[index].Warnings...)
-		sort.Strings(sandboxes[index].Warnings)
-	}
-	sort.SliceStable(sandboxes, func(left, right int) bool {
-		if sandboxes[left].Sandbox != sandboxes[right].Sandbox {
-			return sandboxes[left].Sandbox < sandboxes[right].Sandbox
-		}
-		return sandboxes[left].RunID < sandboxes[right].RunID
-	})
-	if format == "json" {
-		result.Sandboxes = sandboxes
-		return encodeJSON(writer, result)
-	}
-	if len(sandboxes) == 0 {
-		if _, err := io.WriteString(writer, "No sandboxes.\n"); err != nil {
-			return model.Wrap(model.CodeInternal, "write list output", err)
-		}
-		return nil
-	}
-	for _, sandbox := range sandboxes {
-		if _, err := fmt.Fprintf(writer, "Sandbox %q: state=%q mode=%q resources=%d run=%q project=%q\n",
-			terminal.SanitizeLine(string(sandbox.Sandbox)),
-			terminal.SanitizeLine(string(sandbox.State)),
-			terminal.SanitizeLine(string(sandbox.Mode)),
-			sandbox.Resources,
-			terminal.SanitizeLine(string(sandbox.RunID)),
-			terminal.SanitizeLine(string(sandbox.ProjectID)),
-		); err != nil {
-			return model.Wrap(model.CodeInternal, "write list output", err)
-		}
-		for _, warning := range sandbox.Warnings {
-			if _, err := fmt.Fprintf(writer, "  Warning: %q\n", terminal.SanitizeLine(warning)); err != nil {
-				return model.Wrap(model.CodeInternal, "write list output", err)
-			}
 		}
 	}
 	return nil

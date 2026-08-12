@@ -5,11 +5,12 @@ import (
 
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/runtime"
+	"github.com/srimajji/dsx/internal/state"
 )
 
-func TestIdentityLabelsAndNameDeterministic(t *testing.T) {
+func TestIdentityLabelsAndReadableNameDeterministic(t *testing.T) {
 	identity := testIdentity(t, runtime.ResourceWorkspace, "workspace")
-	if got, want := identity.Name(), "dsx-abcdefghijklmnopqrst-main-workspace"; got != want {
+	if got, want := identity.Name(), "dsx-tracking-chrome-feature-a-workspace-1abbf9"; got != want {
 		t.Fatalf("Name() = %q, want %q", got, want)
 	}
 	first, second := identity.Labels(), identity.Labels()
@@ -21,9 +22,12 @@ func TestIdentityLabelsAndNameDeterministic(t *testing.T) {
 			t.Fatalf("labels are not deterministic: %#v / %#v", first, second)
 		}
 	}
+	if first[3].Key != WorkspaceLabel || first[3].Value != "feature-a" {
+		t.Fatalf("workspace ownership label = %#v", first[3])
+	}
 }
 
-func TestClassifyOwnedRequiresCorroboration(t *testing.T) {
+func TestClassifyCurrentOwnedRequiresExactCorroboration(t *testing.T) {
 	identity := testIdentity(t, runtime.ResourceWorkspace, "workspace")
 	record := identity.ManifestRecord()
 	record.RuntimeID = record.ExpectedID
@@ -33,8 +37,15 @@ func TestClassifyOwnedRequiresCorroboration(t *testing.T) {
 		Labels:   identity.Labels(),
 	}
 	classification := Classify(&record, &observed)
-	if classification.Outcome != OutcomeOwned || !classification.DeleteAllowed {
+	if classification.Outcome != OutcomeOwned || !classification.DeleteAllowed || !classification.AdoptAllowed || classification.Legacy {
 		t.Fatalf("classification = %#v", classification)
+	}
+
+	observed.Labels = append([]runtime.Label(nil), observed.Labels...)
+	observed.Labels[2].Value = string(mustProjectID(t, "/different/project"))
+	classification = Classify(&record, &observed)
+	if classification.Outcome != OutcomeAmbiguous || classification.DeleteAllowed || classification.AdoptAllowed {
+		t.Fatalf("mismatched ownership classification = %#v", classification)
 	}
 }
 
@@ -46,18 +57,51 @@ func TestClassifyWriteAheadIntentAuthorizesOnlyExactRuntimeIdentity(t *testing.T
 		Labels:   identity.Labels(),
 	}
 	classification := Classify(&record, &observed)
-	if classification.Outcome != OutcomeOwned || !classification.DeleteAllowed {
+	if classification.Outcome != OutcomeOwned || !classification.DeleteAllowed || !classification.AdoptAllowed {
 		t.Fatalf("write-ahead classification = %#v", classification)
 	}
 	observed.ID = "different"
 	classification = Classify(&record, &observed)
-	if classification.Outcome != OutcomeAmbiguous || classification.DeleteAllowed {
+	if classification.Outcome != OutcomeAmbiguous || classification.DeleteAllowed || classification.AdoptAllowed {
 		t.Fatalf("mismatched write-ahead classification = %#v", classification)
 	}
 }
 
-func TestClassifyOrphansArePreserved(t *testing.T) {
-	identity := testIdentity(t, runtime.ResourceVolume, "project-home")
+func TestClassifyLegacyIsCleanupOnlyWithCorroboratingLabels(t *testing.T) {
+	identity := testIdentity(t, runtime.ResourceWorkspace, "workspace")
+	legacyRole := "project-home"
+	legacyName := "dsx-" + string(identity.ProjectID) + "-" + string(identity.Workspace) + "-" + legacyRole
+	legacyLabels := state.LegacyResourceOwnershipLabels(identity.ProjectID, identity.Workspace, identity.RunID, string(identity.Kind), legacyRole)
+	record := state.ResourceRecord{
+		Kind: string(identity.Kind), Role: legacyRole, Name: legacyName, ExpectedID: legacyName,
+		RuntimeID: legacyName, Created: true, Labels: legacyLabels,
+	}
+	observedLabels := make([]runtime.Label, len(legacyLabels))
+	for index, label := range legacyLabels {
+		observedLabels[index] = runtime.Label{Key: label.Key, Value: label.Value}
+	}
+	observed := runtime.ResourceSnapshot{
+		Resource: runtime.Resource{ID: runtime.ResourceID(legacyName), Name: legacyName, Kind: identity.Kind},
+		Labels:   observedLabels,
+	}
+	classification := Classify(&record, &observed)
+	if classification.Outcome != OutcomeLegacy || !classification.DeleteAllowed || classification.AdoptAllowed || !classification.Legacy {
+		t.Fatalf("legacy classification = %#v", classification)
+	}
+
+	withoutManifest := Classify(nil, &observed)
+	if withoutManifest.Outcome != OutcomeLegacy || withoutManifest.DeleteAllowed || withoutManifest.AdoptAllowed || !withoutManifest.Legacy {
+		t.Fatalf("unmanifested legacy classification = %#v", withoutManifest)
+	}
+	observed.Labels[2].Value = string(mustProjectID(t, "/different/project"))
+	mismatch := Classify(&record, &observed)
+	if mismatch.Outcome != OutcomeAmbiguous || mismatch.DeleteAllowed || mismatch.AdoptAllowed {
+		t.Fatalf("legacy label mismatch = %#v", mismatch)
+	}
+}
+
+func TestClassifyOrphansNamesAndBuildersArePreserved(t *testing.T) {
+	identity := testIdentity(t, runtime.ResourceVolume, "session")
 	record := identity.ManifestRecord()
 	record.RuntimeID = record.ExpectedID
 	record.Created = true
@@ -68,56 +112,16 @@ func TestClassifyOrphansArePreserved(t *testing.T) {
 	for name, classification := range map[string]Classification{
 		"manifest only": Classify(&record, nil),
 		"runtime only":  Classify(nil, &observed),
+		"name only":     Classify(nil, &runtime.ResourceSnapshot{Resource: runtime.Resource{ID: "dsx-old", Name: "dsx-old", Kind: runtime.ResourceWorkspace}}),
 	} {
-		if classification.Outcome != OutcomeOrphaned || classification.DeleteAllowed {
+		if classification.DeleteAllowed || classification.AdoptAllowed {
 			t.Fatalf("%s classification = %#v", name, classification)
 		}
 	}
-}
 
-func TestClassifyMismatchIsAmbiguousAndPreserved(t *testing.T) {
-	identity := testIdentity(t, runtime.ResourceNetwork, "network")
-	record := identity.ManifestRecord()
-	record.RuntimeID = record.ExpectedID
-	record.Created = true
-	observed := runtime.ResourceSnapshot{
-		Resource: runtime.Resource{ID: "different-id", Name: identity.Name(), Kind: runtime.ResourceNetwork},
-		Labels:   identity.Labels(),
-	}
-	classification := Classify(&record, &observed)
-	if classification.Outcome != OutcomeAmbiguous || classification.DeleteAllowed {
-		t.Fatalf("identity mismatch = %#v", classification)
-	}
-
-	observed.ID = runtime.ResourceID(record.ExpectedID)
-	observed.Labels = append([]runtime.Label(nil), identity.Labels()...)
-	observed.Labels[2].Value = "bbbbbbbbbbbbbbbbbbbb"
-	classification = Classify(&record, &observed)
-	if classification.Outcome != OutcomeAmbiguous || classification.DeleteAllowed {
-		t.Fatalf("label mismatch = %#v", classification)
-	}
-	observed.Labels = append(identity.Labels(), runtime.Label{Key: "com.example.extra", Value: "value"})
-	classification = Classify(&record, &observed)
-	if classification.Outcome != OutcomeAmbiguous || classification.DeleteAllowed {
-		t.Fatalf("extra-label mismatch = %#v", classification)
-	}
-}
-
-func TestClassifyForeignAndBuilderAlwaysExcluded(t *testing.T) {
-	foreign := runtime.ResourceSnapshot{Resource: runtime.Resource{ID: "foreign", Name: "user-container", Kind: runtime.ResourceWorkspace}}
-	classification := Classify(nil, &foreign)
-	if classification.Outcome != OutcomeForeign || classification.DeleteAllowed {
-		t.Fatalf("foreign = %#v", classification)
-	}
-
-	identity := testIdentity(t, runtime.ResourceWorkspace, "workspace")
-	record := identity.ManifestRecord()
-	record.Name = "buildkit"
-	record.RuntimeID = "builder"
-	record.Created = true
-	builder := runtime.ResourceSnapshot{Resource: runtime.Resource{ID: "builder", Name: "buildkit", Kind: runtime.ResourceWorkspace}, Labels: identity.Labels()}
-	classification = Classify(&record, &builder)
-	if classification.Outcome != OutcomeExcluded || classification.DeleteAllowed {
+	builder := runtime.ResourceSnapshot{Resource: runtime.Resource{ID: "buildkit", Name: "buildkit", Kind: runtime.ResourceWorkspace}, Labels: identity.Labels()}
+	classification := Classify(&record, &builder)
+	if classification.Outcome != OutcomeExcluded || classification.DeleteAllowed || classification.AdoptAllowed {
 		t.Fatalf("builder = %#v", classification)
 	}
 }
@@ -125,38 +129,46 @@ func TestClassifyForeignAndBuilderAlwaysExcluded(t *testing.T) {
 func TestClassifyDuplicateOrUnknownDSXLabelsAmbiguous(t *testing.T) {
 	identity := testIdentity(t, runtime.ResourceWorkspace, "workspace")
 	record := identity.ManifestRecord()
-	record.RuntimeID = "container-id"
+	record.RuntimeID = record.ExpectedID
 	record.Created = true
 	observed := runtime.ResourceSnapshot{
-		Resource: runtime.Resource{ID: "container-id", Name: identity.Name(), Kind: runtime.ResourceWorkspace},
+		Resource: runtime.Resource{ID: runtime.ResourceID(record.RuntimeID), Name: record.Name, Kind: runtime.ResourceWorkspace},
 		Labels:   append(identity.Labels(), runtime.Label{Key: ManagedLabel, Value: "true"}),
 	}
-	if got := Classify(&record, &observed); got.Outcome != OutcomeAmbiguous || got.DeleteAllowed {
+	if got := Classify(&record, &observed); got.Outcome != OutcomeAmbiguous || got.DeleteAllowed || got.AdoptAllowed {
 		t.Fatalf("duplicate = %#v", got)
 	}
 	observed.Labels = append(identity.Labels(), runtime.Label{Key: "dev.dsx.future", Value: "value"})
-	if got := Classify(&record, &observed); got.Outcome != OutcomeAmbiguous || got.DeleteAllowed {
+	if got := Classify(&record, &observed); got.Outcome != OutcomeAmbiguous || got.DeleteAllowed || got.AdoptAllowed {
 		t.Fatalf("unknown = %#v", got)
-	}
-	if got := Classify(nil, &observed); got.Outcome != OutcomeAmbiguous || got.DeleteAllowed {
-		t.Fatalf("unmanifested malformed DSX resource = %#v", got)
 	}
 }
 
 func TestInvalidIdentityRejected(t *testing.T) {
-	_, err := NewIdentity("abcdefghijklmnopqrst", "main", "01890f5c-7b00-7000-8000-000000000001", runtime.ResourceWorkspace, "this-role-name-is-far-too-long")
-	if err == nil {
-		t.Fatal("invalid long role accepted")
+	root := "/Volumes/Dev/work/tracking-chrome-extension"
+	projectID := mustProjectID(t, root)
+	workspace, _ := model.ParseWorkspaceName("feature-a")
+	runID, _ := model.ParseRunID("01890f5c-7b00-7000-8000-000000000001")
+	for _, test := range []struct {
+		projectID model.ProjectID
+		root      string
+		role      string
+	}{
+		{projectID: projectID, root: "/different/project", role: "workspace"},
+		{projectID: projectID, root: root, role: "role-too-long"},
+		{projectID: projectID, root: root, role: "bad_role"},
+	} {
+		if _, err := NewIdentity(test.projectID, test.root, workspace, runID, runtime.ResourceWorkspace, test.role); err == nil {
+			t.Fatalf("invalid identity accepted: %#v", test)
+		}
 	}
 }
 
 func testIdentity(t *testing.T, kind runtime.ResourceKind, role string) Identity {
 	t.Helper()
-	projectID, err := model.ParseProjectID("abcdefghijklmnopqrst")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sandbox, err := model.ParseSandboxName("main")
+	root := "/Volumes/Dev/work/tracking-chrome-extension"
+	projectID := mustProjectID(t, root)
+	workspace, err := model.ParseWorkspaceName("feature-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,9 +176,18 @@ func testIdentity(t *testing.T, kind runtime.ResourceKind, role string) Identity
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := NewIdentity(projectID, sandbox, runID, kind, role)
+	identity, err := NewIdentity(projectID, root, workspace, runID, kind, role)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return identity
+}
+
+func mustProjectID(t *testing.T, root string) model.ProjectID {
+	t.Helper()
+	projectID, err := model.NewProjectID(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return projectID
 }

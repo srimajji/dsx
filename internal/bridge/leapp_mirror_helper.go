@@ -358,14 +358,14 @@ func verifiedLeappMirrorHelperPaths(stateRoot string, identity LeaseIdentity) (l
 	}
 	root := filepath.Join(stateRoot, leappMirrorDirectoryName)
 	project := filepath.Join(root, string(identity.ProjectID))
-	sandbox := filepath.Join(project, string(identity.Sandbox))
-	run := filepath.Join(sandbox, string(identity.RunID))
-	for _, path := range []string{stateRoot, root, project, sandbox, run} {
+	workspace := filepath.Join(project, string(identity.Workspace))
+	run := filepath.Join(workspace, string(identity.RunID))
+	for _, path := range []string{stateRoot, root, project, workspace, run} {
 		if err := verifyPrivateDirectory(path); err != nil {
 			return leappMirrorPaths{}, err
 		}
 	}
-	return makeLeappMirrorPaths(root, project, sandbox, run), nil
+	return makeLeappMirrorPaths(root, project, workspace, run), nil
 }
 
 func cleanupLeappMirrorHelper(paths leappMirrorPaths) {

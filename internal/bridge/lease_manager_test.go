@@ -14,7 +14,8 @@ import (
 
 func leaseTestIdentity(t *testing.T, project, run string) LeaseIdentity {
 	t.Helper()
-	projectID, err := model.ParseProjectID(project)
+	canonicalRoot := "/Volumes/Dev/work/" + project
+	projectID, err := model.NewProjectID(canonicalRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +23,7 @@ func leaseTestIdentity(t *testing.T, project, run string) LeaseIdentity {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return LeaseIdentity{ProjectID: projectID, Sandbox: "main", RunID: runID}
+	return LeaseIdentity{ProjectID: projectID, CanonicalRoot: canonicalRoot, Workspace: "main", RunID: runID}
 }
 
 func leaseTestManager(t *testing.T) *ProductionLeaseManager {

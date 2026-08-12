@@ -55,13 +55,13 @@ func FuzzOwnershipFailsClosed(f *testing.F) {
 		}
 
 		classification := Classify(recordPointer, observedPointer)
-		if classification.DeleteAllowed != (classification.Outcome == OutcomeOwned) {
-			t.Fatalf("inconsistent classification: %#v", classification)
+		if classification.AdoptAllowed != (classification.Outcome == OutcomeOwned) {
+			t.Fatalf("inconsistent adoption classification: %#v", classification)
 		}
-		if caseNumber != 10 && classification.DeleteAllowed {
-			t.Fatalf("ambiguous ownership evidence authorized deletion: selector=%d value=%q classification=%#v", selector, value, classification)
+		if caseNumber != 10 && (classification.DeleteAllowed || classification.AdoptAllowed) {
+			t.Fatalf("ambiguous ownership evidence authorized mutation: selector=%d value=%q classification=%#v", selector, value, classification)
 		}
-		if caseNumber == 10 && !classification.DeleteAllowed {
+		if caseNumber == 10 && (!classification.DeleteAllowed || !classification.AdoptAllowed) {
 			t.Fatalf("exact ownership evidence was not recognized: %#v", classification)
 		}
 	})

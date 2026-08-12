@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
   "workspace": { "root": "." },
-  "image": { "ref": "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+  "image": { "ref": "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  "agents": { "default": "codex", "allowed": ["codex"] }
 }
