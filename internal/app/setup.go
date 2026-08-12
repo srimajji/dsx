@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	DefaultWorkspaceCPUs        = 4
+	DefaultWorkspaceCPUs        = 6
 	DefaultWorkspaceMemoryBytes = int64(6 << 30)
 	DefaultWorkspaceMemory      = "6GiB"
 )

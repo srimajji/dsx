@@ -188,19 +188,6 @@ func (runner *Runner) runAccessibleSetup(ctx context.Context, model *SetupModel)
 			}
 			return Intent{}, false, err
 		}
-		if model.imageChoice == "custom" {
-			model.customForm.
-				WithInput(input).
-				WithOutput(runner.Output).
-				WithAccessible(true).
-				WithTheme(huh.ThemeFunc(huh.ThemeBase))
-			if err := model.customForm.RunWithContext(ctx); err != nil {
-				if errors.Is(err, huh.ErrUserAborted) {
-					return Intent{}, false, nil
-				}
-				return Intent{}, false, err
-			}
-		}
 		model.applyForm()
 		preview, err := runner.Application.PreviewSetup(ctx, app.SetupPreviewRequest{Root: model.root, Config: model.document})
 		if err != nil {

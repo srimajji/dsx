@@ -966,6 +966,12 @@ Explicit CLI commands ─┐
 TUI actions ───────────┘
 ```
 
+
+Onboarding uses three presentation stages:
+
+1. A first screen offers only **Ubuntu — Default settings** and **Ubuntu — Custom**. The default applies 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom changes the agent, network, ports, CPU, or memory. Other image sources remain valid configuration and CLI inputs but are not offered by this TUI.
+2. A single concise review screen shows the effective environment and every non-default executable or authority-bearing detail. Routine internal digests, project discovery facts, and provenance priorities are omitted, while the complete executable hash, commands, mounts, credential imports, network grants, ports, and volumes remain reviewable. Overflow scrolls within the same screen and approval remains locked until its tail is visible.
+3. A bounded progress screen performs runtime preflight, persistence, Standard-image preparation, and dashboard transition.
 The setup flow performs detection and planning without mutation. Final confirmation first performs a read-only Apple container-system status check. A missing CLI or any service state other than `running` fails before configuration or approval persistence.
 
 Confirmed setup remains inside the TUI, renders bounded secret-free setup milestones, and transitions to the project dashboard.

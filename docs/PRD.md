@@ -109,20 +109,15 @@ Dev Container declarations are not discovered, imported, parsed, or executed.
 
 `dsx init` creates a project-ID-namespaced home-local configuration from safe, reviewable suggestions when an existing declaration does not fully describe the project. It does not translate or execute arbitrary Nix expressions.
 
-The setup flow presents:
+The setup flow has three stages:
 
-- Detected project facts.
-- Image source.
-- Allowed and default coding agents.
-- Internet and private-network access.
-- Published guest ports.
-- CPU and memory.
-- Setup and process definitions.
-- Mounts and credential grants.
-- Supported portable authentication imports.
-- The complete effective plan and executable-configuration hash.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. The default is 6 CPUs, 6 GiB of memory, internet allowed, no published ports, and no browser. Custom changes the coding agent, internet access, published guest ports, CPU, or memory. Alternate image configuration remains available through the configuration and CLI, not this onboarding screen.
+2. Review one concise approval screen containing the effective Ubuntu environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default command or authority grant. Routine internal digests, discovery facts, and provenance priorities are omitted. Overflow remains complete, bounded, and must be viewed before approval.
+3. Verify the runtime, persist configuration and approval, prepare the Standard image when needed, and open the workspace dashboard.
 
-New workspaces default to 4 CPUs and 6 GiB of memory. Guest ports entered during setup default to dynamic loopback host publication.
+The review retains exact setup and process commands, mounts, credential imports, host/private-network grants, published ports, volumes, image exceptions, and the executable-configuration hash whenever present.
+
+New workspaces default to 6 CPUs and 6 GiB of memory. Guest ports entered during setup default to dynamic loopback host publication.
 
 No project configuration, approval state, credential import, or runtime resource is created before final confirmation.
 
@@ -914,7 +909,7 @@ Existing DSX-owned resources from the prior resource model:
   - Default-agent selection.
   - Internet-policy selection.
   - Returning from review without losing selections or mutating state.
-- New workspaces must default to dynamic loopback publication, 4 CPUs, and 6 GiB unless configured otherwise.
+- New workspaces must default to dynamic loopback publication, 6 CPUs, and 6 GiB unless configured otherwise.
 - Authentication import must always be a separate explicit approval.
 - Workspace creation forms must not ask for authentication, a prompt, a browser, or a workspace mode.
 - No project configuration or runtime resource may be created before final setup confirmation.

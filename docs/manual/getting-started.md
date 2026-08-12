@@ -69,19 +69,15 @@ $ dsx init
 
 `inspect` is read-only. It reports detected project facts, effective project defaults, provenance for each effective value, and the executable-configuration hash. `init` opens the setup flow.
 
-The setup flow reviews:
+The setup flow has three steps:
 
-- image source;
-- repository layout;
-- finite setup commands and configured processes;
-- `agents.allowed` and `agents.default`;
-- supported portable authentication imports;
-- internet and private-network grants;
-- published guest ports;
-- CPU, memory, and workspace concurrency; and
-- the executable-configuration hash.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default means Codex, 6 CPUs, 6 GiB, network allowed, no published ports, and no browser. Custom exposes the coding assistant, internet access, ports, CPU, and memory.
+2. Review and approve one concise screen. DSX shows the effective environment and any non-default commands, mounts, credentials, network grants, ports, or volumes. It hides routine implementation digests and discovery noise while retaining the executable hash and every authority-bearing detail.
+3. DSX verifies Apple Container, saves configuration and approval, prepares DSX Standard when needed, and opens the workspace dashboard.
 
-New workspaces default to 4 CPUs and 6 GiB. Guest ports entered in setup receive dynamic `127.0.0.1` host ports. Cancelling before final confirmation writes no configuration, approval, credential, or runtime resource.
+Alternate OCI and project images remain supported through configuration and CLI workflows, but are intentionally absent from onboarding.
+
+Guest ports entered in setup receive dynamic `127.0.0.1` host ports. Cancelling before final confirmation writes no configuration, approval, credential, or runtime resource.
 
 Setup writes one of these mutually exclusive files:
 
@@ -110,7 +106,7 @@ A minimal configuration is:
     "imports": ["omp", "codex", "opencode"]
   },
   "resources": {
-    "cpus": 4,
+    "cpus": 6,
     "memory": "6GiB",
     "maxConcurrentWorkspaces": 3
   }
@@ -139,7 +135,7 @@ In the TUI, press **c** on the dashboard. The create form contains only:
 - committed source branch and revision; and
 - an optional workspace default selected from `agents.allowed`.
 
-Choose **Create and open** to enter the shell after creation, or **Create in background** to return to the dashboard.
+Choose **Create and open** to keep a bounded creation-progress screen visible until the workspace is ready, then hand the terminal directly to its shell. Choose **Create in background** to show the same progress without attaching a shell. DSX does not expose an idle host prompt between creation and shell attachment.
 
 ## Operate a workspace
 

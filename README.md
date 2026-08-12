@@ -15,6 +15,20 @@ It supports live project workspaces, independent named Git clones, coding-agent 
 - [MVP implementation outcome](docs/implementation-plan.md)
 - [Post-MVP backlog](docs/post-mvp-backlog.md)
 
+## Quick start
+
+Build DSX, then run it from a clean local Git checkout:
+
+```console
+make build
+cd ~/Code/my-project
+/path/to/dsx/bin/dsx
+```
+
+The first-run TUI offers **Ubuntu — Default settings** or **Ubuntu — Custom**, shows the complete approval review, and then performs bounded setup progress. Default settings use Codex, 6 CPUs, 6 GiB memory, internet access, no published ports, and no browser session.
+
+From the dashboard, press **c** to create a named workspace. **Create and open** keeps creation progress visible and hands the terminal directly to the ready workspace shell; **Create in background** returns after the same creation milestones without opening a shell.
+
 ## Build
 
 DSX requires Go 1.26.5. Build the Darwin/arm64 host CLI and Linux/arm64 guest helper together:

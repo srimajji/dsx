@@ -371,6 +371,61 @@ func (dispatcher *Dispatcher) loadDashboard(ctx context.Context, root string) (t
 	return data, nil
 }
 
+func (dispatcher *Dispatcher) executeTUIWorkspaceCreate(ctx context.Context, request tui.RunRequest, intent tui.Intent, stdout, stderr io.Writer) int {
+	root := intent.Root
+	if strings.TrimSpace(root) == "" {
+		root = "."
+	}
+	workspace, err := model.ParseWorkspaceName(intent.Workspace)
+	if err != nil {
+		return usageError(stderr, "dsx workspace create", err.Error())
+	}
+	if dispatcher == nil || dispatcher.dependencies.TUI == nil || dispatcher.dependencies.Workspaces == nil {
+		return reportError(stderr, "dsx workspace create", model.NewError(model.CodeUnavailable, "workspace creation is unavailable", nil))
+	}
+	progress := tui.ProgressRequest{
+		Title:      "Creating workspace",
+		Project:    root,
+		Detail:     "DSX is creating the approved workspace and waiting until it is ready.",
+		Accessible: request.Accessible,
+		Steps: []tui.ProgressStep{
+			{ID: "validate", Label: "Validate approved project plan"},
+			{ID: "workspace", Label: "Create and start workspace"},
+			{ID: "ready", Label: "Workspace ready"},
+		},
+	}
+	err = dispatcher.dependencies.TUI.RunProgress(ctx, progress, func(operationCtx context.Context, report func(string)) error {
+		report("validate")
+		report("workspace")
+		_, createErr := dispatcher.dependencies.Workspaces.Create(operationCtx, app.WorkspaceCreateRequest{
+			Root: root, Workspace: workspace, SourceBranch: intent.SourceBranch, SourceRevision: intent.SourceRevision,
+			DefaultAgent: intent.Agent, Open: false,
+		})
+		if createErr == nil {
+			report("ready")
+		}
+		return createErr
+	})
+	if err != nil {
+		return reportError(stderr, "dsx workspace create", err)
+	}
+	if !intent.Open {
+		return 0
+	}
+	opened, err := dispatcher.dependencies.Workspaces.Open(ctx, app.WorkspaceOpenRequest{
+		Root: root, Workspace: workspace, Terminal: true, Stdin: dispatcher.dependencies.Stdin,
+		Stdout: stdout, Stderr: stderr, RunInteractive: dispatcher.runInteractive,
+	})
+	if err != nil {
+		return reportError(stderr, "dsx workspace open", err)
+	}
+	exit, err := runtimeExitCode(opened.Exit, "workspace shell")
+	if err != nil {
+		return reportError(stderr, "dsx workspace open", err)
+	}
+	return exit
+}
+
 func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Intent, stdout, stderr io.Writer) int {
 	root := intent.Root
 	if strings.TrimSpace(root) == "" {

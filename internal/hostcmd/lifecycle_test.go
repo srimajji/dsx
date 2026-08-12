@@ -4,6 +4,7 @@ import (
 	"bytes"
 	tea "charm.land/bubbletea/v2"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -33,14 +34,29 @@ type workspaceStub struct {
 	listResult   app.WorkspaceListResult
 	removeResult app.WorkspaceRemoveResult
 	err          error
+	createErr    error
+	openErr      error
+	events       *[]string
 }
 
 func (stub *workspaceStub) Create(_ context.Context, request app.WorkspaceCreateRequest) (app.WorkspaceResult, error) {
 	stub.creates = append(stub.creates, request)
+	if stub.events != nil {
+		*stub.events = append(*stub.events, "create")
+	}
+	if stub.createErr != nil {
+		return stub.result, stub.createErr
+	}
 	return stub.result, stub.err
 }
 func (stub *workspaceStub) Open(_ context.Context, request app.WorkspaceOpenRequest) (app.WorkspaceOpenResult, error) {
 	stub.opens = append(stub.opens, request)
+	if stub.events != nil {
+		*stub.events = append(*stub.events, "open")
+	}
+	if stub.openErr != nil {
+		return stub.openResult, stub.openErr
+	}
 	return stub.openResult, stub.err
 }
 func (stub *workspaceStub) Start(_ context.Context, request app.WorkspaceStartRequest) (app.WorkspaceResult, error) {
@@ -141,6 +157,48 @@ func (stub *authStub) Purge(_ context.Context, r app.AuthPurgeRequest) error {
 	return nil
 }
 
+type tuiRunnerStub struct {
+	intents        []tui.Intent
+	progress       []tui.ProgressRequest
+	progressEvents []string
+	events         *[]string
+	progressErr    error
+	runs           int
+}
+
+func (stub *tuiRunnerStub) Run(context.Context, tui.RunRequest) (tui.Intent, bool, error) {
+	stub.runs++
+	if stub.events != nil {
+		*stub.events = append(*stub.events, "run")
+	}
+	if len(stub.intents) == 0 {
+		return tui.Intent{}, false, nil
+	}
+	intent := stub.intents[0]
+	stub.intents = stub.intents[1:]
+	return intent, true, nil
+}
+
+func (stub *tuiRunnerStub) RunProgress(ctx context.Context, request tui.ProgressRequest, operation tui.ProgressOperation) error {
+	stub.progress = append(stub.progress, request)
+	if stub.events != nil {
+		*stub.events = append(*stub.events, "progress-start")
+	}
+	if stub.progressErr != nil {
+		return stub.progressErr
+	}
+	err := operation(ctx, func(id string) {
+		stub.progressEvents = append(stub.progressEvents, id)
+		if stub.events != nil {
+			*stub.events = append(*stub.events, id)
+		}
+	})
+	if stub.events != nil {
+		*stub.events = append(*stub.events, "progress-end")
+	}
+	return err
+}
+
 func TestWorkspaceCommandsTargetExactNamedWorkspace(t *testing.T) {
 	code := 0
 	workspaces := &workspaceStub{result: app.WorkspaceResult{Workspace: "feature-a", State: model.StateRunning}, openResult: app.WorkspaceOpenResult{WorkspaceResult: app.WorkspaceResult{Workspace: "feature-a"}, Exit: runtime.Exit{Code: &code}}}
@@ -169,6 +227,110 @@ func TestWorkspaceCommandsTargetExactNamedWorkspace(t *testing.T) {
 	}
 	if len(git.updates) != 1 || git.updates[0].Workspace != "feature-a" || len(workspaces.removes) != 1 || workspaces.removes[0].Workspace != "feature-a" || !workspaces.removes[0].Confirmed || !workspaces.removes[0].DiscardUnfetched {
 		t.Fatalf("update=%#v remove=%#v", git.updates, workspaces.removes)
+	}
+}
+
+func TestTUICreateAndOpenKeepsProgressUntilInteractiveHandoff(t *testing.T) {
+	code := 0
+	events := []string{}
+	runner := &tuiRunnerStub{
+		intents: []tui.Intent{{
+			Action: "workspace-create", Root: "/project", Workspace: "feature-a",
+			SourceBranch: "main", SourceRevision: strings.Repeat("a", 40), Agent: "codex", Open: true,
+		}},
+		events: &events,
+	}
+	workspaces := &workspaceStub{
+		result:     app.WorkspaceResult{Workspace: "feature-a", State: model.StateRunning},
+		openResult: app.WorkspaceOpenResult{WorkspaceResult: app.WorkspaceResult{Workspace: "feature-a"}, Exit: runtime.Exit{Code: &code}},
+		events:     &events,
+	}
+	dispatcher := NewDispatcher(Dependencies{
+		TUI: runner, Workspaces: workspaces, Stdin: strings.NewReader(""),
+		IsTTY: func(io.Reader, io.Writer) bool { return true },
+	})
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.executeTUI(context.Background(), tui.RunRequest{Root: "/project"}, &stdout, &stderr); exit != 0 {
+		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+	}
+	wantEvents := "run,progress-start,validate,workspace,create,ready,progress-end,open"
+	if got := strings.Join(events, ","); got != wantEvents {
+		t.Fatalf("events = %q, want %q", got, wantEvents)
+	}
+	if len(workspaces.creates) != 1 || workspaces.creates[0].Open || workspaces.creates[0].RunInteractive != nil {
+		t.Fatalf("create request = %#v", workspaces.creates)
+	}
+	if len(workspaces.opens) != 1 || !workspaces.opens[0].Terminal || workspaces.opens[0].RunInteractive == nil {
+		t.Fatalf("open request = %#v", workspaces.opens)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("TUI create-and-open rendered lifecycle summary before handoff: %q", stdout.String())
+	}
+	if len(runner.progress) != 1 || strings.Join(runner.progressEvents, ",") != "validate,workspace,ready" {
+		t.Fatalf("progress requests = %#v events = %#v", runner.progress, runner.progressEvents)
+	}
+}
+
+func TestTUICreateFailureNeverOpensWorkspace(t *testing.T) {
+	events := []string{}
+	runner := &tuiRunnerStub{
+		intents: []tui.Intent{{Action: "workspace-create", Root: "/project", Workspace: "broken", Open: true}},
+		events:  &events,
+	}
+	workspaces := &workspaceStub{createErr: errors.New("injected create failure"), events: &events}
+	dispatcher := NewDispatcher(Dependencies{
+		TUI: runner, Workspaces: workspaces, Stdin: strings.NewReader(""),
+		IsTTY: func(io.Reader, io.Writer) bool { return true },
+	})
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.executeTUI(context.Background(), tui.RunRequest{Root: "/project"}, &stdout, &stderr); exit == 0 {
+		t.Fatalf("failure exit = 0, stderr = %q", stderr.String())
+	}
+	if len(workspaces.opens) != 0 || strings.Contains(strings.Join(events, ","), "ready") {
+		t.Fatalf("failed create events = %#v opens = %#v", events, workspaces.opens)
+	}
+}
+
+func TestTUICreateCancellationNeverCreatesOrOpensWorkspace(t *testing.T) {
+	runner := &tuiRunnerStub{
+		intents:     []tui.Intent{{Action: "workspace-create", Root: "/project", Workspace: "cancelled", Open: true}},
+		progressErr: context.Canceled,
+	}
+	workspaces := &workspaceStub{}
+	dispatcher := NewDispatcher(Dependencies{
+		TUI: runner, Workspaces: workspaces, Stdin: strings.NewReader(""),
+		IsTTY: func(io.Reader, io.Writer) bool { return true },
+	})
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.executeTUI(context.Background(), tui.RunRequest{Root: "/project"}, &stdout, &stderr); exit == 0 {
+		t.Fatalf("cancellation exit = 0, stderr = %q", stderr.String())
+	}
+	if len(workspaces.creates) != 0 || len(workspaces.opens) != 0 {
+		t.Fatalf("cancelled create requests = %#v, opens = %#v", workspaces.creates, workspaces.opens)
+	}
+}
+
+func TestTUIBackgroundCreateCompletesWithoutOpeningWorkspace(t *testing.T) {
+	events := []string{}
+	runner := &tuiRunnerStub{
+		intents: []tui.Intent{{Action: "workspace-create", Root: "/project", Workspace: "background"}},
+		events:  &events,
+	}
+	workspaces := &workspaceStub{events: &events}
+	dispatcher := NewDispatcher(Dependencies{
+		TUI: runner, Workspaces: workspaces, Stdin: strings.NewReader(""),
+		IsTTY: func(io.Reader, io.Writer) bool { return true },
+	})
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.executeTUI(context.Background(), tui.RunRequest{Root: "/project"}, &stdout, &stderr); exit != 0 {
+		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+	}
+	if runner.runs != 1 || len(workspaces.opens) != 0 {
+		t.Fatalf("dashboard runs = %d, opens = %#v", runner.runs, workspaces.opens)
+	}
+	wantEvents := "run,progress-start,validate,workspace,create,ready,progress-end"
+	if got := strings.Join(events, ","); got != wantEvents {
+		t.Fatalf("events = %q, want %q", got, wantEvents)
 	}
 }
 

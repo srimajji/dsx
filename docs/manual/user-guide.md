@@ -124,7 +124,7 @@ A representative configuration is:
     }
   ],
   "resources": {
-    "cpus": 4,
+    "cpus": 6,
     "memory": "6GiB",
     "maxConcurrentWorkspaces": 4
   }
@@ -145,18 +145,13 @@ Reviewed host-directory grants, where supported for narrow integrations, must be
 
 With a terminal, bare `dsx` opens setup for an unconfigured project or the dashboard for a configured project. `dsx init [--root PATH]` opens the same setup flow directly. If stdin or stdout is not a TTY, bare `dsx` prints help and changes nothing; interactive setup fails rather than prompting invisibly.
 
-Setup covers:
+Setup is a three-step flow:
 
-- detected project facts and image source;
-- allowed and default agents;
-- supported authentication-import declarations;
-- setup, processes, services, mounts, and volumes;
-- internet and private-network grants;
-- published guest ports;
-- CPU, memory, and maximum concurrent workspaces; and
-- provenance plus executable-configuration hash.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default agent, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI.
+2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews scroll without truncation and cannot be approved before the complete content has been viewed.
+3. Verify Apple Container, persist configuration and approval, prepare DSX Standard when required, and open the dashboard.
 
-Authentication import is a separate explicit approval. Setup does not silently import credentials. No configuration, approval, credential, or runtime resource is persisted before final confirmation. A post-confirmation Apple runtime preflight must succeed before project mutation.
+Authentication import remains a separate explicit approval. Setup does not silently import credentials. No configuration, approval, credential, or runtime resource is persisted before final confirmation. A post-confirmation Apple runtime preflight must succeed before project mutation.
 
 Use `DSX_ACCESSIBLE=1` for accessible form mode. `NO_COLOR` is respected. Narrow terminals, resize, masked secret input, and terminal-safe rendering are part of the interface contract.
 
@@ -190,6 +185,8 @@ Actions for the selected workspace are state-aware:
 Update and restart are disabled while another lifecycle mutation is active. A workspace needing conflict resolution remains openable.
 
 The create form contains only the validated name, recorded source branch/revision, and optional default agent selected from `agents.allowed`. It offers create-and-open or background creation. It never asks for credentials, a task prompt, browser selection, or a workspace mode.
+
+After either create action, the TUI remains on a bounded milestone screen while DSX validates the approved plan and creates, starts, and bootstraps the workspace. **Create and open** hands directly from completed progress to the workspace shell without exposing an idle host prompt. **Create in background** completes after the same progress without attaching a shell.
 
 The agent form contains only an agent selection and an **Enable isolated browser** checkbox. Browser selection is per session and is not stored as a workspace-creation default.
 

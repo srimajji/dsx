@@ -52,6 +52,7 @@ type Doctor interface {
 
 type TUIRunner interface {
 	Run(context.Context, tui.RunRequest) (tui.Intent, bool, error)
+	RunProgress(context.Context, tui.ProgressRequest, tui.ProgressOperation) error
 }
 
 type WorkspaceLifecycle interface {
@@ -185,10 +186,13 @@ func (dispatcher *Dispatcher) executeTUI(ctx context.Context, request tui.RunReq
 	if err != nil {
 		return reportError(stderr, "dsx", err)
 	}
-	if found {
-		return dispatcher.executeIntent(ctx, intent, stdout, stderr)
+	if !found {
+		return 0
 	}
-	return 0
+	if intent.Action == "workspace-create" {
+		return dispatcher.executeTUIWorkspaceCreate(ctx, request, intent, stdout, stderr)
+	}
+	return dispatcher.executeIntent(ctx, intent, stdout, stderr)
 }
 
 func (dispatcher *Dispatcher) interactive(stdout io.Writer) bool {

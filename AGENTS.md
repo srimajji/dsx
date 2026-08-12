@@ -30,6 +30,8 @@ Primary flow:
 
 The local checkout is the source and integration point, not a DSX workspace. Workspace creation transfers clean committed revisions through bounded verified Git bundles into guest-owned volumes without shared Git objects or host source/home mounts. Every lifecycle and Git operation names its workspace; workspace, agent, authentication, and browser-session lifecycles remain separate. Results return through verified bundles and guarded fetch/apply transactions. A browser receives only the selected workspace's private network—never source, auth, AWS, host paths, or published host control ports—and is deleted with its agent session.
 
+Interactive onboarding is intentionally narrow: choose Ubuntu default or custom settings, review the complete effective authority, then run bounded setup progress. The default is Codex with 6 CPUs, 6 GiB, internet access, no published ports, and no browser session. TUI models continue to emit intents only; `internal/hostcmd` owns workspace-creation progress and the direct terminal handoff for **Create and open**.
+
 ## Key Directories
 
 - `cmd/dsx/`: Darwin/ARM64 host CLI and production dependency composition.

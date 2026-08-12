@@ -94,81 +94,41 @@ func TestSetupCancelDoesNotCallApplicationCommand(t *testing.T) {
 	}
 }
 
-func TestSetupRejectsBlankCustomImage(t *testing.T) {
-	if err := validateCustomImage(" \t"); err == nil || !strings.Contains(err.Error(), "digest-pinned") {
-		t.Fatalf("blank custom image validation = %v", err)
-	}
-}
-
-func TestSetupOmitsUnavailableImageOptions(t *testing.T) {
-	preview := app.SetupPreview{
-		Config: config.ConfigDocument{SchemaVersion: 1},
-		ImageOptions: []app.SetupImageOption{
-			{ID: "standard", Name: "DSX Standard", Available: false},
-			{ID: "custom", Name: "Use another image", Available: true},
-		},
-		SelectedImageOption: "custom",
-	}
-	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
-	if len(model.imageOptions) != 1 || model.imageOptions[0].ID != "custom" {
-		t.Fatalf("image options = %#v, want only custom", model.imageOptions)
-	}
-	if model.imageChoice != "custom" {
-		t.Fatalf("selected image option = %q, want custom", model.imageChoice)
-	}
-}
-
-func TestSetupFormShowsConciseImageAndSupportedAgentChoices(t *testing.T) {
+func TestSetupFormOffersOnlyDefaultAndCustomUbuntu(t *testing.T) {
 	preview := app.SetupPreview{
 		Config: config.ConfigDocument{
 			SchemaVersion: 1,
 			Agents:        config.AgentConfig{Default: "codex", Allowed: []string{"codex"}},
 		},
 		ImageOptions: []app.SetupImageOption{
-			{
-				ID:          "standard",
-				Name:        "DSX Standard — Ubuntu (Recommended)",
-				Description: "Built locally on first use with Codex, Claude, OMP, and OpenCode",
-				Available:   true,
-				Image:       config.ImageConfig{Standard: true},
-			},
-			{ID: "custom", Name: "Use another image — Advanced", Available: true},
+			{ID: "standard", Name: "DSX Standard", Available: true, Image: config.ImageConfig{Standard: true}},
+			{ID: "dockerfile:Dockerfile", Name: "Project Dockerfile", Available: true},
+			{ID: "custom", Name: "Use another image", Available: true},
 		},
-		SelectedImageOption: "standard",
 	}
 	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
 	model.form.Init()
-	imageView := ansi.Strip(model.form.View())
-	for _, expected := range []string{"DSX Standard — Ubuntu (Recommended)", "Use another image — Advanced"} {
-		if !strings.Contains(imageView, expected) {
-			t.Fatalf("image choices omitted %q:\n%s", expected, imageView)
+	view := ansi.Strip(model.form.View())
+	for _, expected := range []string{"Ubuntu — Default settings", "Ubuntu — Custom", "6 CPUs", "6 GiB", "network allowed", "no browser"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("setup choice omitted %q:\n%s", expected, view)
 		}
 	}
-	for _, unwanted := range []string{"Choose a starting environment", "Built locally on first use"} {
-		if strings.Contains(imageView, unwanted) {
-			t.Fatalf("image choices retained redundant copy %q:\n%s", unwanted, imageView)
+	for _, forbidden := range []string{"Use another image", "Project Dockerfile", "Container image reference", "Coding assistant"} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("default setup exposed %q:\n%s", forbidden, view)
 		}
 	}
 
+	model.setupChoice = "ubuntu-custom"
+	model.form.Init()
 	model.form.NextGroup()
-	agentView := ansi.Strip(model.form.View())
-	for _, expected := range []string{"Codex", "Claude Code", "OMP", "OpenCode"} {
-		if !strings.Contains(agentView, expected) {
-			t.Fatalf("coding assistant choices omitted %q:\n%s", expected, agentView)
+	customView := ansi.Strip(model.form.View())
+	for _, expected := range []string{"Coding assistant", "Codex", "Claude Code", "OMP", "OpenCode", "Published guest ports", "CPU allocation", "Memory allocation"} {
+		if !strings.Contains(customView, expected) {
+			t.Fatalf("custom setup omitted %q:\n%s", expected, customView)
 		}
 	}
-	if strings.Contains(agentView, "OpenCode  Let this workspace") {
-		t.Fatalf("internet question ran into the final coding assistant option:\n%s", agentView)
-	}
-	for _, line := range strings.Split(agentView, "\n") {
-		if strings.Contains(line, "Allow") && strings.Contains(line, "Keep offline") {
-			if strings.Index(line, "Allow") > 4 {
-				t.Fatalf("internet choices are centered instead of form-aligned: %q", line)
-			}
-			return
-		}
-	}
-	t.Fatalf("internet choices were not rendered together:\n%s", agentView)
 }
 
 func TestSetupShowsManagedStandardBuildProgressAfterConfirmation(t *testing.T) {
@@ -218,25 +178,19 @@ func TestWorkspaceProgressShowsBoundedMilestones(t *testing.T) {
 	}
 }
 
-func TestSetupAppliesSelectedDetectedImage(t *testing.T) {
-	detected := config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: "Dockerfile"}}
+func TestSetupAlwaysAppliesStandardUbuntuImage(t *testing.T) {
+	standard := config.ImageConfig{Ref: "example@sha256:" + strings.Repeat("a", 64)}
 	preview := app.SetupPreview{
 		Config: config.ConfigDocument{SchemaVersion: 1},
 		ImageOptions: []app.SetupImageOption{
-			{ID: "standard", Name: "DSX Standard", Available: true, Image: config.ImageConfig{Ref: "example@sha256:" + strings.Repeat("a", 64)}},
-			{ID: "dockerfile:Dockerfile", Name: "Project build", Available: true, Image: detected},
-			{ID: "custom", Name: "Custom", Available: true},
+			{ID: "standard", Name: "DSX Standard", Available: true, Image: standard},
+			{ID: "dockerfile:Dockerfile", Name: "Project build", Available: true, Image: config.ImageConfig{Build: &config.ImageBuild{Context: ".", File: "Dockerfile"}}},
 		},
-		SelectedImageOption: "standard",
 	}
 	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
-	model.imageChoice = "dockerfile:Dockerfile"
 	model.applyForm()
-	if model.document.Image.Build == nil ||
-		model.document.Image.Build.Context != detected.Build.Context ||
-		model.document.Image.Build.File != detected.Build.File ||
-		model.document.Image.Ref != "" {
-		t.Fatalf("selected image = %#v", model.document.Image)
+	if model.document.Image.Ref != standard.Ref || model.document.Image.Build != nil {
+		t.Fatalf("selected image = %#v, want standard Ubuntu", model.document.Image)
 	}
 }
 
@@ -248,6 +202,7 @@ func TestSetupAllowsSelectedSupportedAgent(t *testing.T) {
 		},
 	}
 	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
+	model.setupChoice = "ubuntu-custom"
 	model.agent = "claude"
 	model.applyForm()
 	if model.document.Agents.Default != "claude" || !slices.Contains(model.document.Agents.Allowed, "claude") {
@@ -260,34 +215,23 @@ func TestSetupResourceScreenDefaultsAndAppliesSelections(t *testing.T) {
 	model := NewSetupModel(context.Background(), application, "/tmp/project", app.SetupPreview{
 		Config: config.ConfigDocument{SchemaVersion: 1},
 	}, false)
-	if model.cpus != 4 || model.memory != "6GiB" {
+	if model.cpus != 6 || model.memory != "6GiB" {
 		t.Fatalf("resource defaults = %d CPU, %q memory", model.cpus, model.memory)
 	}
+	model.setupChoice = "ubuntu-custom"
+	model.buildSetupForm()
 	model.form.Init()
-	model.form.NextGroup()
-	model.form.NextGroup()
 	model.form.NextGroup()
 	resourceView := ansi.Strip(model.form.View())
 	for _, expected := range []string{
-		"CPU allocation", "4 CPUs (Recommended)", "Memory allocation", "6GiB (Recommended)",
+		"Published guest ports", "CPU allocation", "6 CPUs (Recommended)", "Memory allocation", "6GiB (Recommended)",
 	} {
 		if !strings.Contains(resourceView, expected) {
-			t.Fatalf("resource screen omitted %q:\n%s", expected, resourceView)
-		}
-	}
-	portModel := NewSetupModel(context.Background(), application, "/tmp/project", app.SetupPreview{
-		Config: config.ConfigDocument{SchemaVersion: 1},
-	}, false)
-	portModel.form.Init()
-	portModel.form.NextGroup()
-	portModel.form.NextGroup()
-	portView := ansi.Strip(portModel.form.View())
-	for _, expected := range []string{"Published guest ports", "comma-separated"} {
-		if !strings.Contains(portView, expected) {
-			t.Fatalf("port screen omitted %q:\n%s", expected, portView)
+			t.Fatalf("custom resource screen omitted %q:\n%s", expected, resourceView)
 		}
 	}
 
+	model.setupChoice = "ubuntu-custom"
 	model.cpus = 8
 	model.memory = "12GiB"
 	model.applyForm()
@@ -348,8 +292,8 @@ func TestSetupReviewBackReturnsToEnvironmentWithSelections(t *testing.T) {
 		t.Fatalf("back result: stage=%d command=%v", model.stage, command)
 	}
 	environment := ansi.Strip(model.form.View())
-	if !strings.Contains(environment, "DSX Standard — Ubuntu (Recommended)") {
-		t.Fatalf("back did not return to environment screen:\n%s", environment)
+	if !strings.Contains(environment, "Ubuntu — Default settings") {
+		t.Fatalf("back did not return to Ubuntu choice:\n%s", environment)
 	}
 	if model.agent != "omp" || model.cpus != 8 || model.memory != "12GiB" {
 		t.Fatalf("back lost selections: agent=%q resources=%d/%q", model.agent, model.cpus, model.memory)
@@ -407,20 +351,24 @@ func TestCompleteReviewUsesReadableCardsWithoutRawJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"PROJECT DEFAULTS", "Reusable settings", "Allowed agents", "codex · omp", "Default agent", "DETECTED PROJECT", "package-lock.json",
-		"ACCESS & ISOLATION", "Approved authentication import codex", "db.internal:5432", "127.0.0.1:8080",
-		"COMMANDS & SERVICES", `"npm" "install"`, "NPM_TOKEN = secret reference secret://npm", "healthcheck",
-		"FILES & PERSISTENCE", "tracked", "cache → /cache", "APPROVAL",
-		"Source agent ← config .dsx/config.jsonc:12", "approved-hash",
-		"development", "FEATURE=enabled", "2 concurrent workspace(s)",
+		"UBUNTU WORKSPACE", "Environment", "Resources", "2 CPUs", "2 GiB", "Network", "Allowed",
+		"Browser", "Disabled", "Agent", "codex", "Port web", "127.0.0.1:8080",
+		`Setup command: "npm" "install"`, "NPM_TOKEN = secret reference secret://npm",
+		`Service web: "npm" "run" "dev"`, "Mount /tmp/config → /etc/dsx/project • read-only",
+		"Authentication import: codex", "Host grant database → db.internal:5432",
+		"Volume cache → /cache", "Approval", "approved-hash",
 	} {
 		if !strings.Contains(review, expected) {
-			t.Fatalf("readable review omitted %q:\n%s", expected, review)
+			t.Fatalf("concise review omitted %q:\n%s", expected, review)
 		}
 	}
-	for _, raw := range []string{`"raw-json-must-not-render"`, `"canonical_root"`, `"contract_version"`} {
-		if strings.Contains(review, raw) {
-			t.Fatalf("readable review exposed raw JSON field %q:\n%s", raw, review)
+	for _, omitted := range []string{
+		`"raw-json-must-not-render"`, `"canonical_root"`, `"contract_version"`,
+		"PROJECT DEFAULTS", "DETECTED PROJECT", "package-lock.json", "Configuration digest",
+		"Project state", "Source agent", "tracked", "FEATURE=enabled",
+	} {
+		if strings.Contains(review, omitted) {
+			t.Fatalf("concise review exposed unnecessary detail %q:\n%s", omitted, review)
 		}
 	}
 }
