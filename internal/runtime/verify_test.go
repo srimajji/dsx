@@ -7,14 +7,14 @@ import (
 
 func TestVerifyWorkspacePostconditionAcceptsResolvedDynamicPort(t *testing.T) {
 	expected := WorkspaceSpec{
-		Mounts: []Mount{{Source: "workspace", Target: "/workspace", Type: "volume", Authority: MountAuthorityVolume}},
+		Mounts:   []Mount{{Source: "workspace", Target: "/workspace", Type: "volume", Authority: MountAuthorityVolume}},
 		Networks: []string{"private-network"},
 		Ports: []PortRequest{{
 			HostIP: netip.MustParseAddr("127.0.0.1"), GuestPort: 3000, Protocol: "tcp",
 		}},
 	}
 	observed := ResourceSnapshot{
-		Mounts: []Mount{{Source: "workspace", Target: "/workspace", Type: "volume"}},
+		Mounts:   []Mount{{Source: "workspace", Target: "/workspace", Type: "volume"}},
 		Networks: []string{"private-network"},
 		Ports: []PortBinding{{
 			HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: 49152, GuestPort: 3000, Protocol: "tcp",

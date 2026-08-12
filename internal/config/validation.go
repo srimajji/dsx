@@ -429,18 +429,17 @@ func (v *semanticValidator) validateAuth(auth AuthConfig) {
 func (v *semanticValidator) validateAWS(aws AWSConfig) {
 	switch aws.Mode {
 	case "", "none":
-		if aws.Directory != "" || aws.Profile != "" {
-			v.add("/aws", "AWS directory and profile require mode leapp")
+		if aws.Directory != "" {
+			v.add("/aws/directory", "AWS directory requires mode host-default")
 		}
-	case "leapp":
+	case "host-default":
 		if aws.Directory == "" {
-			v.add("/aws", "leapp mode requires directory")
-		}
-		if aws.Directory != "" && (!path.IsAbs(aws.Directory) || path.Clean(aws.Directory) != aws.Directory) {
+			v.add("/aws/directory", "host-default mode requires directory")
+		} else if !path.IsAbs(aws.Directory) || path.Clean(aws.Directory) != aws.Directory {
 			v.add("/aws/directory", "AWS directory must be a canonical absolute path")
 		}
 	default:
-		v.add("/aws/mode", "AWS mode must be none or leapp")
+		v.add("/aws/mode", "AWS mode must be none or host-default")
 	}
 }
 

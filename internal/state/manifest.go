@@ -72,6 +72,7 @@ type Manifest struct {
 	RunID          model.RunID          `json:"run_id"`
 	PlanHash       string               `json:"plan_hash"`
 	DefaultAgent   string               `json:"default_agent,omitempty"`
+	AWSGrant       *AWSGrantRecord      `json:"aws_grant,omitempty"`
 	State          model.WorkspaceState `json:"state"`
 	Operation      string               `json:"operation"`
 	Resources      []ResourceRecord     `json:"resources"`
@@ -83,6 +84,10 @@ type Manifest struct {
 	CreatedAt      time.Time            `json:"created_at"`
 	UpdatedAt      time.Time            `json:"updated_at"`
 	Legacy         bool                 `json:"-"`
+}
+
+type AWSGrantRecord struct {
+	Enabled bool `json:"enabled"`
 }
 
 type SessionRecord struct {
@@ -140,9 +145,19 @@ func ValidateManifest(manifest Manifest) error {
 		return fmt.Errorf("invalid manifest state %q", manifest.State)
 	}
 	switch manifest.Operation {
-	case "", "create", "open", "start", "stop", "restart", "update", "remove", "capture":
+	case "", "create", "open", "start", "stop", "restart", "update", "remove", "capture", "aws-enable", "aws-disable":
 	default:
 		return fmt.Errorf("invalid manifest operation %q", manifest.Operation)
+	}
+	switch manifest.Operation {
+	case "aws-enable":
+		if manifest.AWSGrant == nil || !manifest.AWSGrant.Enabled {
+			return fmt.Errorf("aws-enable operation requires an enabled AWS grant")
+		}
+	case "aws-disable":
+		if manifest.AWSGrant == nil || manifest.AWSGrant.Enabled {
+			return fmt.Errorf("aws-disable operation requires a disabled AWS grant")
+		}
 	}
 	if manifest.UncapturedWork && manifest.State == model.StateDeleted {
 		return fmt.Errorf("deleted workspace manifest has uncaptured work")
@@ -693,6 +708,9 @@ func decodeManifestJSON(data []byte, destination any) error {
 func ValidateLegacyManifestForCleanup(manifest Manifest) error {
 	if manifest.Version != LegacyManifestVersion || !manifest.Legacy {
 		return fmt.Errorf("manifest is not legacy cleanup evidence")
+	}
+	if manifest.AWSGrant != nil {
+		return fmt.Errorf("legacy manifest contains an AWS grant")
 	}
 	if manifest.Generation == 0 {
 		return fmt.Errorf("legacy manifest generation must be positive")

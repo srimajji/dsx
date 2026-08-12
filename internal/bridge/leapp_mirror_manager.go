@@ -62,9 +62,9 @@ type leappMirrorPaths struct {
 	ledger, token, failure, socket, lock, mirror string
 }
 
-// ProductionLeappMirrorManager launches the installed dsx executable in its
-// hidden mirror mode and authenticates every reattach and stop.
-type ProductionLeappMirrorManager struct {
+// ProductionHostAWSWorkspaceManager launches the installed dsx executable in
+// hidden helper mode while preserving a stable workspace publication path.
+type ProductionHostAWSWorkspaceManager struct {
 	stateRoot       string
 	executable      executableIdentity
 	readyWait       time.Duration
@@ -73,47 +73,44 @@ type ProductionLeappMirrorManager struct {
 	loadReadyLedger func(string) (leappMirrorLedger, bool, error)
 	verifySnapshot  func(string) error
 	controlOverride func(context.Context, leappMirrorPaths, leappMirrorCommand) (leappMirrorResponse, error)
+	launchOverride  func(context.Context, leappMirrorPaths, LeaseIdentity, leappMirrorSpec, string) (string, error)
 	artifactsAbsent func(leappMirrorPaths) (bool, error)
 	processAlive    func(int) (bool, error)
 	verifySocket    func(string) error
 }
 
-var _ LeappMirrorManager = (*ProductionLeappMirrorManager)(nil)
+var _ HostAWSWorkspaceManager = (*ProductionHostAWSWorkspaceManager)(nil)
 
-func NewProductionLeappMirrorManager(stateRoot, executable string) (*ProductionLeappMirrorManager, error) {
+func NewProductionHostAWSWorkspaceManager(stateRoot, executable string) (*ProductionHostAWSWorkspaceManager, error) {
 	if stateRoot == "" || !filepath.IsAbs(stateRoot) || filepath.Clean(stateRoot) != stateRoot {
-		return nil, model.NewError(model.CodeInvalidInput, "Leapp mirror state root must be a clean absolute path", nil)
+		return nil, model.NewError(model.CodeInvalidInput, "host AWS workspace state root must be a clean absolute path", nil)
 	}
 	if err := verifyPrivateDirectory(stateRoot); err != nil {
-		return nil, model.Wrap(model.CodeUnavailable, "verify Leapp mirror state root", err)
+		return nil, model.Wrap(model.CodeUnavailable, "verify host AWS workspace state root", err)
 	}
 	identity, err := canonicalExecutableIdentity(executable)
 	if err != nil {
-		return nil, model.Wrap(model.CodeUnavailable, "verify dsx Leapp mirror executable", err)
+		return nil, model.Wrap(model.CodeUnavailable, "verify dsx host AWS helper executable", err)
 	}
-	return &ProductionLeappMirrorManager{
+	return &ProductionHostAWSWorkspaceManager{
 		stateRoot: stateRoot, executable: identity, readyWait: defaultReadyWait, stopWait: defaultStopWait,
 		now: func() time.Time { return time.Now().UTC() },
 		loadReadyLedger: func(path string) (leappMirrorLedger, bool, error) {
 			return loadPrivateJSON[leappMirrorLedger](path, MaxControlBytes)
 		},
 		verifySnapshot:  verifyLeappMirrorSnapshot,
-		artifactsAbsent: exactLeappMirrorArtifactsAbsent,
+		artifactsAbsent: exactLeappMirrorHelperArtifactsAbsent,
 		processAlive:    leappMirrorProcessAlive,
 		verifySocket:    verifyPrivateSocket,
 	}, nil
 }
 
-func (manager *ProductionLeappMirrorManager) Ensure(ctx context.Context, identity LeaseIdentity, authority LeappAuthority) (string, error) {
+func (manager *ProductionHostAWSWorkspaceManager) Prepare(ctx context.Context, identity LeaseIdentity) (string, error) {
 	if ctx == nil {
-		return "", model.NewError(model.CodeInvalidInput, "Leapp mirror ensure context is nil", nil)
+		return "", model.NewError(model.CodeInvalidInput, "host AWS workspace prepare context is nil", nil)
 	}
 	if err := identity.Validate(); err != nil {
-		return "", model.NewError(model.CodeInvalidInput, "invalid Leapp mirror identity", err)
-	}
-	spec, digest, err := validatedLeappMirrorSpec(authority)
-	if err != nil {
-		return "", model.NewError(model.CodeInvalidInput, "invalid Leapp mirror authority", err)
+		return "", model.NewError(model.CodeInvalidInput, "invalid host AWS workspace identity", err)
 	}
 	paths, err := manager.ensurePaths(identity)
 	if err != nil {
@@ -124,69 +121,121 @@ func (manager *ProductionLeappMirrorManager) Ensure(ctx context.Context, identit
 		return "", err
 	}
 	defer unlock()
+	if err := manager.prepareLocked(paths, identity); err != nil {
+		return "", err
+	}
+	return paths.mirror, nil
+}
+
+func (manager *ProductionHostAWSWorkspaceManager) Enable(ctx context.Context, identity LeaseIdentity, authority HostAWSAuthority) (string, error) {
+	if ctx == nil {
+		return "", model.NewError(model.CodeInvalidInput, "host AWS workspace enable context is nil", nil)
+	}
+	if err := identity.Validate(); err != nil {
+		return "", model.NewError(model.CodeInvalidInput, "invalid host AWS workspace identity", err)
+	}
+	spec, digest, err := validatedLeappMirrorSpec(authority)
+	if err != nil {
+		return "", model.NewError(model.CodeInvalidInput, "invalid host AWS authority", err)
+	}
 	if err := manager.verifyExecutable(); err != nil {
 		return "", err
 	}
+	paths, err := manager.ensurePaths(identity)
+	if err != nil {
+		return "", err
+	}
+	unlock, err := acquireLeaseLock(ctx, paths.lock)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	ledger, found, err := loadPrivateJSON[leappMirrorLedger](paths.ledger, MaxControlBytes)
 	if err != nil {
-		return "", model.NewError(model.CodeAmbiguous, "Leapp mirror ledger is unsafe or corrupt; preserving it", err)
+		return "", model.NewError(model.CodeAmbiguous, "host AWS helper ledger is unsafe or corrupt; preserving it", err)
 	}
 	if found {
 		if err := validateLeappMirrorLedger(ledger, identity, spec, digest, manager.executable); err != nil {
-			return "", model.NewError(model.CodeAmbiguous, "Leapp mirror evidence differs from the requested workspace; preserving it", err)
+			return "", model.NewError(model.CodeAmbiguous, "host AWS helper evidence differs from the requested workspace; preserving it", err)
+		}
+		if _, err := os.Lstat(paths.failure); err == nil {
+			return "", model.NewError(model.CodeAmbiguous, "active host AWS helper has contradictory failure evidence; preserving it", nil)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if err := rejectUnexpectedHostAWSRunEvidence(paths, true, true, true, false); err != nil {
+			return "", err
 		}
 		token, tokenErr := readPrivateToken(paths.token)
 		if tokenErr != nil {
-			return "", model.NewError(model.CodeAmbiguous, "Leapp mirror token evidence is unavailable; preserving it", tokenErr)
+			return "", model.NewError(model.CodeAmbiguous, "host AWS helper token evidence is unavailable; preserving it", tokenErr)
 		}
 		response, controlErr := manager.control(ctx, paths, leappMirrorCommand{Version: 1, Action: "status", Identity: identity, SpecDigest: digest, Token: token})
 		if controlErr != nil {
-			return "", model.NewError(model.CodeAmbiguous, "Leapp mirror helper cannot prove its live authority; preserving it", controlErr)
+			return "", model.NewError(model.CodeAmbiguous, "host AWS helper cannot prove its live authority; preserving it", controlErr)
 		}
 		if err := validateLeappMirrorResponse(response, ledger, "running"); err != nil {
-			return "", model.NewError(model.CodeAmbiguous, "Leapp mirror helper returned contradictory ownership evidence; preserving it", err)
+			return "", model.NewError(model.CodeAmbiguous, "host AWS helper returned contradictory ownership evidence; preserving it", err)
 		}
 		if err := verifyLeappMirrorSnapshot(paths.mirror); err != nil {
-			return "", model.NewError(model.CodeAmbiguous, "Leapp mirror snapshot is unsafe or incomplete; preserving it", err)
+			return "", model.NewError(model.CodeAmbiguous, "host AWS publication is unsafe or incomplete; preserving it", err)
 		}
 		return paths.mirror, nil
 	}
-	if err := rejectUnexpectedLeappMirrorEvidence(paths, false); err != nil {
-		return "", err
-	}
 	failure, failed, err := loadPrivateJSON[leappMirrorFailure](paths.failure, MaxControlBytes)
 	if err != nil {
-		return "", model.NewError(model.CodeAmbiguous, "Leapp mirror failure evidence is unsafe or corrupt; preserving it", err)
+		return "", model.NewError(model.CodeAmbiguous, "host AWS helper failure evidence is unsafe or corrupt; preserving it", err)
+	}
+	if failed && (failure.Version != 1 || failure.Identity != identity || failure.SpecDigest != digest || !validLeappMirrorFailure(failure.Failure)) {
+		return "", model.NewError(model.CodeAmbiguous, "host AWS helper failure evidence differs from the requested workspace; preserving it", nil)
+	}
+	if err := rejectUnexpectedHostAWSHelperEvidence(paths); err != nil {
+		return "", err
 	}
 	if failed {
-		if failure.Version != 1 || failure.Identity != identity || failure.SpecDigest != digest || !validLeappMirrorFailure(failure.Failure) {
-			return "", model.NewError(model.CodeAmbiguous, "Leapp mirror failure evidence differs from the requested workspace; preserving it", nil)
-		}
 		if err := removePrivateRegular(paths.failure); err != nil {
-			return "", model.Wrap(model.CodeInternal, "clear exact Leapp mirror failure evidence", err)
+			return "", model.Wrap(model.CodeInternal, "clear exact host AWS helper failure evidence", err)
 		}
-		if err := removeLeappMirrorDirectory(paths.mirror); err != nil {
-			return "", model.NewError(model.CodeAmbiguous, "clear exact failed Leapp mirror snapshot", err)
-		}
+	}
+	if err := rejectUnexpectedHostAWSRunEvidence(paths, false, false, false, false); err != nil {
+		return "", err
+	}
+	if err := ensureHostAWSPublication(paths.mirror, false); err != nil {
+		return "", model.NewError(model.CodeAmbiguous, "prepare host AWS publication", err)
+	}
+	if manager.launchOverride != nil {
+		return manager.launchOverride(ctx, paths, identity, spec, digest)
 	}
 	return manager.launch(ctx, paths, identity, spec, digest)
 }
 
-func (manager *ProductionLeappMirrorManager) Path(identity LeaseIdentity) (string, error) {
-	if err := identity.Validate(); err != nil {
-		return "", model.NewError(model.CodeInvalidInput, "invalid Leapp mirror identity", err)
+func (manager *ProductionHostAWSWorkspaceManager) Disable(ctx context.Context, identity LeaseIdentity) error {
+	if ctx == nil {
+		return model.NewError(model.CodeInvalidInput, "host AWS workspace disable context is nil", nil)
 	}
-	return filepath.Join(manager.stateRoot, leappMirrorDirectoryName, string(identity.ProjectID), string(identity.Workspace), string(identity.RunID), leappMirrorDataName), nil
+	if err := identity.Validate(); err != nil {
+		return model.NewError(model.CodeInvalidInput, "invalid host AWS workspace identity", err)
+	}
+	paths, exists, err := manager.existingPaths(identity)
+	if err != nil || !exists {
+		return err
+	}
+	unlock, err := acquireLeaseLock(ctx, paths.lock)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := manager.stopHelperLocked(ctx, paths, identity); err != nil {
+		return err
+	}
+	if err := ensureHostAWSPublication(paths.mirror, true); err != nil {
+		return model.NewError(model.CodeAmbiguous, "publish empty disabled host AWS channel", err)
+	}
+	return nil
 }
 
-func (manager *ProductionLeappMirrorManager) Stop(ctx context.Context, identity LeaseIdentity) error {
-	if ctx == nil {
-		return model.NewError(model.CodeInvalidInput, "Leapp mirror stop context is nil", nil)
-	}
-	if err := identity.Validate(); err != nil {
-		return model.NewError(model.CodeInvalidInput, "invalid Leapp mirror identity", err)
-	}
-	if err := manager.verifyExecutable(); err != nil {
+func (manager *ProductionHostAWSWorkspaceManager) Remove(ctx context.Context, identity LeaseIdentity) error {
+	if err := manager.Disable(ctx, identity); err != nil {
 		return err
 	}
 	paths, exists, err := manager.existingPaths(identity)
@@ -198,80 +247,119 @@ func (manager *ProductionLeappMirrorManager) Stop(ctx context.Context, identity 
 		return err
 	}
 	defer unlock()
+	if err := rejectUnexpectedHostAWSHelperEvidence(paths); err != nil {
+		return err
+	}
+	if _, found, err := loadPrivateJSON[leappMirrorFailure](paths.failure, MaxControlBytes); err != nil || found {
+		return model.NewError(model.CodeAmbiguous, "host AWS removal found unexpected failure evidence; preserving it", err)
+	}
+	if err := rejectUnexpectedHostAWSRunEvidence(paths, false, false, false, false); err != nil {
+		return err
+	}
+	if err := removeLeappMirrorDirectory(paths.mirror); err != nil {
+		return model.NewError(model.CodeAmbiguous, "remove exact host AWS publication", err)
+	}
+	return removeExactLeappMirrorRunDirectory(paths.run)
+}
+
+func (manager *ProductionHostAWSWorkspaceManager) prepareLocked(paths leappMirrorPaths, identity LeaseIdentity) error {
+	if _, found, err := loadPrivateJSON[leappMirrorLedger](paths.ledger, MaxControlBytes); err != nil || found {
+		return model.NewError(model.CodeAmbiguous, "host AWS prepare found active or unsafe helper evidence; preserving it", err)
+	}
+	if failure, found, err := loadPrivateJSON[leappMirrorFailure](paths.failure, MaxControlBytes); err != nil || found {
+		if err == nil && (failure.Version != 1 || failure.Identity != identity || !validLeappMirrorFailure(failure.Failure)) {
+			err = errors.New("contradictory host AWS failure ownership")
+		}
+		return model.NewError(model.CodeAmbiguous, "host AWS prepare found helper failure evidence; preserving it", err)
+	}
+	if err := rejectUnexpectedHostAWSHelperEvidence(paths); err != nil {
+		return err
+	}
+	if err := rejectUnexpectedHostAWSRunEvidence(paths, false, false, false, false); err != nil {
+		return err
+	}
+	if err := ensureHostAWSPublication(paths.mirror, false); err != nil {
+		return model.NewError(model.CodeAmbiguous, "prepare host AWS publication", err)
+	}
+	empty, err := hostAWSPublicationEmpty(paths.mirror)
+	if err != nil || !empty {
+		if err == nil {
+			err = errors.New("existing host AWS publication is not empty")
+		}
+		return model.NewError(model.CodeAmbiguous, "host AWS publication has unexpected content; preserving it", err)
+	}
+	return nil
+}
+
+func (manager *ProductionHostAWSWorkspaceManager) stopHelperLocked(ctx context.Context, paths leappMirrorPaths, identity LeaseIdentity) error {
 	ledger, found, err := loadPrivateJSON[leappMirrorLedger](paths.ledger, MaxControlBytes)
 	if err != nil {
-		return model.NewError(model.CodeAmbiguous, "Leapp mirror ledger is unsafe or corrupt; preserving it", err)
+		return model.NewError(model.CodeAmbiguous, "host AWS helper ledger is unsafe or corrupt; preserving it", err)
 	}
 	if !found {
 		failure, failed, failureErr := loadPrivateJSON[leappMirrorFailure](paths.failure, MaxControlBytes)
 		if failureErr != nil {
-			return model.NewError(model.CodeAmbiguous, "Leapp mirror failure evidence is unsafe or corrupt; preserving it", failureErr)
+			return model.NewError(model.CodeAmbiguous, "host AWS helper failure evidence is unsafe or corrupt; preserving it", failureErr)
 		}
-		if failed {
-			if failure.Version != 1 || failure.Identity != identity || !validLeappMirrorFailure(failure.Failure) {
-				return model.NewError(model.CodeAmbiguous, "Leapp mirror failure evidence has contradictory ownership; preserving it", nil)
-			}
-			if err := removeLeappMirrorDirectory(paths.mirror); err != nil {
-				return model.NewError(model.CodeAmbiguous, "remove exact failed Leapp mirror snapshot", err)
-			}
-			if err := removePrivateRegular(paths.failure); err != nil {
-				return model.Wrap(model.CodeInternal, "remove exact Leapp mirror failure evidence", err)
-			}
+		if failed && (failure.Version != 1 || failure.Identity != identity || !validLeappMirrorFailure(failure.Failure)) {
+			return model.NewError(model.CodeAmbiguous, "host AWS helper failure evidence has contradictory ownership; preserving it", nil)
 		}
-		if err := rejectUnexpectedLeappMirrorEvidence(paths, true); err != nil {
+		if err := rejectUnexpectedHostAWSHelperEvidence(paths); err != nil {
 			return err
 		}
-		if err := removeLeappMirrorDirectory(paths.mirror); err != nil {
-			return model.NewError(model.CodeAmbiguous, "remove exact Leapp mirror snapshot", err)
+		if failed {
+			if err := removePrivateRegular(paths.failure); err != nil {
+				return model.Wrap(model.CodeInternal, "remove exact host AWS helper failure evidence", err)
+			}
 		}
-		return removeExactLeappMirrorRunDirectory(paths.run)
+		if err := rejectUnexpectedHostAWSRunEvidence(paths, false, false, false, false); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := os.Lstat(paths.failure); err == nil {
+		return model.NewError(model.CodeAmbiguous, "active host AWS helper has contradictory failure evidence; preserving it", nil)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := manager.verifyExecutable(); err != nil {
+		return err
 	}
 	if ledger.Version != 1 || ledger.Identity != identity || ledger.PID <= 0 || ledger.Executable != manager.executable {
-		return model.NewError(model.CodeAmbiguous, "Leapp mirror ownership evidence is contradictory; preserving it", nil)
+		return model.NewError(model.CodeAmbiguous, "host AWS helper ownership evidence is contradictory; preserving it", nil)
+	}
+	if err := rejectUnexpectedHostAWSRunEvidence(paths, true, true, true, false); err != nil {
+		return err
 	}
 	token, err := readPrivateToken(paths.token)
 	if err != nil {
-		return model.NewError(model.CodeAmbiguous, "Leapp mirror token evidence is unavailable; preserving it", err)
+		return model.NewError(model.CodeAmbiguous, "host AWS helper token evidence is unavailable; preserving it", err)
 	}
 	response, err := manager.control(ctx, paths, leappMirrorCommand{Version: 1, Action: "stop", Identity: identity, SpecDigest: ledger.SpecDigest, Token: token})
 	if err != nil {
-		recoveryErr := manager.recoverDeadLeappMirror(paths, ledger)
-		if recoveryErr == nil {
-			return nil
+		if recoveryErr := manager.recoverDeadLeappMirror(paths, ledger); recoveryErr != nil {
+			return model.NewError(model.CodeAmbiguous, "host AWS helper did not authenticate stop and absence is unproven; preserving it", errors.Join(err, recoveryErr))
 		}
-		return model.NewError(model.CodeAmbiguous, "Leapp mirror helper did not authenticate stop and absence is unproven; preserving it", errors.Join(err, recoveryErr))
+		return nil
 	}
 	if err := validateLeappMirrorResponse(response, ledger, "stopped"); err != nil {
-		return model.NewError(model.CodeAmbiguous, "Leapp mirror helper returned contradictory stop evidence; preserving it", err)
+		return model.NewError(model.CodeAmbiguous, "host AWS helper returned contradictory stop evidence; preserving it", err)
 	}
-	deadline := time.Now().Add(manager.stopWait)
-	for {
-		absent, absenceErr := exactLeappMirrorArtifactsAbsent(paths)
-		if absenceErr != nil {
-			return model.NewError(model.CodeAmbiguous, "verify stopped Leapp mirror cleanup", absenceErr)
-		}
-		if absent {
-			return removeExactLeappMirrorRunDirectory(paths.run)
-		}
-		if err := ctx.Err(); err != nil {
-			return model.Wrap(model.CodeUnavailable, "wait for Leapp mirror helper cleanup", err)
-		}
-		if time.Now().After(deadline) {
-			return model.NewError(model.CodeUnavailable, "Leapp mirror helper did not finish exact cleanup before the deadline", nil)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := manager.waitForLeappMirrorArtifactsAbsent(ctx, paths); err != nil {
+		return model.NewError(model.CodeUnavailable, "host AWS helper did not finish exact cleanup before the deadline", err)
 	}
+	return nil
 }
-func (manager *ProductionLeappMirrorManager) recoverDeadLeappMirror(paths leappMirrorPaths, ledger leappMirrorLedger) error {
+func (manager *ProductionHostAWSWorkspaceManager) recoverDeadLeappMirror(paths leappMirrorPaths, ledger leappMirrorLedger) error {
 	if ledger.Executable != manager.executable || ledger.PID <= 0 {
-		return errors.New("Leapp mirror dead-helper ownership evidence is contradictory")
+		return errors.New("host AWS dead-helper ownership evidence is contradictory")
 	}
 	verifySocket := manager.verifySocket
 	if verifySocket == nil {
 		verifySocket = verifyPrivateSocket
 	}
 	if err := verifySocket(paths.socket); err != nil {
-		return errors.New("Leapp mirror dead-helper socket evidence is unavailable")
+		return errors.New("host AWS dead-helper socket evidence is unavailable")
 	}
 	processAlive := manager.processAlive
 	if processAlive == nil {
@@ -279,10 +367,7 @@ func (manager *ProductionLeappMirrorManager) recoverDeadLeappMirror(paths leappM
 	}
 	alive, err := processAlive(ledger.PID)
 	if err != nil || alive {
-		return errors.New("Leapp mirror helper absence is unproven")
-	}
-	if err := removeLeappMirrorDirectory(paths.mirror); err != nil {
-		return err
+		return errors.New("host AWS helper absence is unproven")
 	}
 	if err := removePrivateSocket(paths.socket); err != nil {
 		return err
@@ -293,10 +378,10 @@ func (manager *ProductionLeappMirrorManager) recoverDeadLeappMirror(paths leappM
 	if err := removePrivateRegular(paths.ledger); err != nil {
 		return err
 	}
-	if err := rejectUnexpectedLeappMirrorEvidence(paths, true); err != nil {
+	if err := rejectUnexpectedHostAWSHelperEvidence(paths); err != nil {
 		return err
 	}
-	return removeExactLeappMirrorRunDirectory(paths.run)
+	return rejectUnexpectedHostAWSRunEvidence(paths, false, false, false, false)
 }
 
 func leappMirrorProcessAlive(pid int) (bool, error) {
@@ -313,71 +398,91 @@ func leappMirrorProcessAlive(pid int) (bool, error) {
 	}
 }
 
-func (manager *ProductionLeappMirrorManager) Status(ctx context.Context, identity LeaseIdentity) (LeappMirrorStatus, error) {
+func (manager *ProductionHostAWSWorkspaceManager) Status(ctx context.Context, identity LeaseIdentity) (HostAWSMirrorStatus, error) {
 	if ctx == nil {
-		return LeappMirrorStatus{}, model.NewError(model.CodeInvalidInput, "Leapp mirror status context is nil", nil)
+		return HostAWSMirrorStatus{}, model.NewError(model.CodeInvalidInput, "host AWS workspace status context is nil", nil)
 	}
 	if err := identity.Validate(); err != nil {
-		return LeappMirrorStatus{}, model.NewError(model.CodeInvalidInput, "invalid Leapp mirror identity", err)
+		return HostAWSMirrorStatus{}, model.NewError(model.CodeInvalidInput, "invalid host AWS workspace identity", err)
 	}
 	paths, exists, err := manager.existingPaths(identity)
 	if err != nil || !exists {
-		return LeappMirrorStatus{State: "absent"}, err
+		return HostAWSMirrorStatus{State: "disabled"}, err
 	}
 	unlock, err := acquireLeaseLock(ctx, paths.lock)
 	if err != nil {
-		return LeappMirrorStatus{}, err
+		return HostAWSMirrorStatus{}, err
 	}
 	defer unlock()
 	ledger, found, err := loadPrivateJSON[leappMirrorLedger](paths.ledger, MaxControlBytes)
 	if err != nil {
-		return LeappMirrorStatus{}, model.NewError(model.CodeAmbiguous, "Leapp mirror ledger is unsafe or corrupt", err)
+		return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "host AWS helper ledger is unsafe or corrupt", err)
 	}
 	if !found {
 		failure, failed, failureErr := loadPrivateJSON[leappMirrorFailure](paths.failure, MaxControlBytes)
 		if failureErr != nil {
-			return LeappMirrorStatus{}, model.NewError(model.CodeAmbiguous, "Leapp mirror failure evidence is unsafe or corrupt", failureErr)
+			return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "host AWS helper failure evidence is unsafe or corrupt", failureErr)
+		}
+		if err := rejectUnexpectedHostAWSHelperEvidence(paths); err != nil {
+			return HostAWSMirrorStatus{}, err
+		}
+		if err := rejectUnexpectedHostAWSRunEvidence(paths, false, false, false, failed); err != nil {
+			return HostAWSMirrorStatus{}, err
+		}
+		if err := verifyLeappMirrorSnapshot(paths.mirror); err != nil {
+			if errors.Is(err, os.ErrNotExist) && !failed {
+				return HostAWSMirrorStatus{State: "disabled"}, nil
+			}
+			return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "host AWS publication is unsafe or incomplete", err)
 		}
 		if failed {
 			if failure.Version != 1 || failure.Identity != identity || !validLeappMirrorFailure(failure.Failure) {
-				return LeappMirrorStatus{}, model.NewError(model.CodeAmbiguous, "Leapp mirror failure evidence has contradictory ownership", nil)
+				return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "host AWS helper failure evidence has contradictory ownership", nil)
 			}
-			absent, absenceErr := exactLeappMirrorArtifactsAbsent(paths)
-			if absenceErr != nil || !absent {
-				return LeappMirrorStatus{}, model.NewError(model.CodeAmbiguous, "failed Leapp mirror retained unsafe or incomplete artifacts", absenceErr)
-			}
-			return LeappMirrorStatus{State: "error", Failure: failure.Failure}, nil
+			return HostAWSMirrorStatus{State: "degraded", Failure: failure.Failure}, nil
 		}
-		if err := rejectUnexpectedLeappMirrorEvidence(paths, true); err != nil {
-			return LeappMirrorStatus{}, err
+		empty, emptyErr := hostAWSPublicationEmpty(paths.mirror)
+		if emptyErr != nil {
+			return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "inspect host AWS publication", emptyErr)
 		}
-		return LeappMirrorStatus{State: "absent"}, nil
+		if empty {
+			return HostAWSMirrorStatus{State: "disabled"}, nil
+		}
+		return HostAWSMirrorStatus{State: "stopped"}, nil
 	}
 	if ledger.Version != 1 || ledger.Identity != identity || ledger.Executable != manager.executable {
-		return LeappMirrorStatus{}, model.NewError(model.CodeAmbiguous, "Leapp mirror ownership evidence is contradictory", nil)
+		return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "host AWS helper ownership evidence is contradictory", nil)
+	}
+	if _, err := os.Lstat(paths.failure); err == nil {
+		return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "active host AWS helper has contradictory failure evidence", nil)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return HostAWSMirrorStatus{}, err
+	}
+	if err := rejectUnexpectedHostAWSRunEvidence(paths, true, true, true, false); err != nil {
+		return HostAWSMirrorStatus{}, err
 	}
 	token, err := readPrivateToken(paths.token)
 	if err != nil {
-		return LeappMirrorStatus{State: "dead"}, nil
+		return HostAWSMirrorStatus{State: "stopped"}, nil
 	}
 	response, err := manager.control(ctx, paths, leappMirrorCommand{Version: 1, Action: "status", Identity: identity, SpecDigest: ledger.SpecDigest, Token: token})
 	if err != nil {
-		return LeappMirrorStatus{State: "dead"}, nil
+		return HostAWSMirrorStatus{State: "stopped"}, nil
 	}
 	if err := validateLeappMirrorResponse(response, ledger, "running"); err != nil {
-		return LeappMirrorStatus{}, model.NewError(model.CodeAmbiguous, "Leapp mirror helper returned contradictory ownership evidence", err)
+		return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "host AWS helper returned contradictory ownership evidence", err)
 	}
 	if err := verifyLeappMirrorSnapshot(paths.mirror); err != nil {
-		return LeappMirrorStatus{}, model.NewError(model.CodeAmbiguous, "Leapp mirror snapshot is unsafe or incomplete", err)
+		return HostAWSMirrorStatus{}, model.NewError(model.CodeAmbiguous, "host AWS publication is unsafe or incomplete", err)
 	}
-	return LeappMirrorStatus{State: "running"}, nil
+	return HostAWSMirrorStatus{State: "current"}, nil
 }
 func configureLeappMirrorCommand(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
-func (manager *ProductionLeappMirrorManager) launch(ctx context.Context, paths leappMirrorPaths, identity LeaseIdentity, spec leappMirrorSpec, digest string) (string, error) {
-	if err := rejectUnexpectedLeappMirrorEvidence(paths, true); err != nil {
+func (manager *ProductionHostAWSWorkspaceManager) launch(ctx context.Context, paths leappMirrorPaths, identity LeaseIdentity, spec leappMirrorSpec, digest string) (string, error) {
+	if err := rejectUnexpectedHostAWSHelperEvidence(paths); err != nil {
 		return "", err
 	}
 	tokenBytes := make([]byte, 32)
@@ -412,7 +517,7 @@ func (manager *ProductionLeappMirrorManager) launch(ctx context.Context, paths l
 	}
 	defer acceptanceReader.Close()
 	defer acceptanceWriter.Close()
-	command := exec.Command(manager.executable.Path, "__dsx_leapp_mirror_v1")
+	command := exec.Command(manager.executable.Path, "__dsx_host_aws_mirror_v1")
 	command.Dir = paths.run
 	command.Stdin = bytes.NewReader(input)
 	command.Stdout = nil
@@ -461,6 +566,9 @@ func (manager *ProductionLeappMirrorManager) launch(ctx context.Context, paths l
 		}
 		ready = decoded.ready
 	}
+	if ready.Version == 1 && ready.State == "error" && ready.Identity == identity && ready.SpecDigest == digest && ready.PID == command.Process.Pid && ready.Executable == manager.executable && validLeappMirrorFailure(ready.Failure) {
+		return "", failUnaccepted(model.NewError(model.CodeUnavailable, "host AWS helper could not publish its first filtered generation: "+ready.Failure, nil))
+	}
 	if ready.Version != 1 || ready.State != "ready" || ready.Identity != identity || ready.SpecDigest != digest || ready.PID != command.Process.Pid || ready.Executable != manager.executable {
 		return "", failUnaccepted(model.NewError(model.CodeAmbiguous, "Leapp mirror helper readiness evidence differs from the requested authority", nil))
 	}
@@ -472,7 +580,7 @@ func (manager *ProductionLeappMirrorManager) launch(ctx context.Context, paths l
 	}
 	return paths.mirror, nil
 }
-func (manager *ProductionLeappMirrorManager) validateReadyLeappMirrorArtifacts(paths leappMirrorPaths, identity LeaseIdentity, spec leappMirrorSpec, digest string, ready leappMirrorResponse) error {
+func (manager *ProductionHostAWSWorkspaceManager) validateReadyLeappMirrorArtifacts(paths leappMirrorPaths, identity LeaseIdentity, spec leappMirrorSpec, digest string, ready leappMirrorResponse) error {
 	loadLedger := manager.loadReadyLedger
 	if loadLedger == nil {
 		loadLedger = func(path string) (leappMirrorLedger, bool, error) {
@@ -496,7 +604,7 @@ func (manager *ProductionLeappMirrorManager) validateReadyLeappMirrorArtifacts(p
 	return nil
 }
 
-func (manager *ProductionLeappMirrorManager) failAcceptedLeappMirrorLaunch(ctx context.Context, paths leappMirrorPaths, identity LeaseIdentity, digest, token string, ready leappMirrorResponse, acceptance io.Writer, cause error) error {
+func (manager *ProductionHostAWSWorkspaceManager) failAcceptedLeappMirrorLaunch(ctx context.Context, paths leappMirrorPaths, identity LeaseIdentity, digest, token string, ready leappMirrorResponse, acceptance io.Writer, cause error) error {
 	if !writeLeappMirrorAcceptance(acceptance) {
 		return model.NewError(model.CodeAmbiguous, "Leapp mirror launch failed before readiness acceptance; preserving ownership evidence", cause)
 	}
@@ -508,7 +616,7 @@ func (manager *ProductionLeappMirrorManager) failAcceptedLeappMirrorLaunch(ctx c
 	return cause
 }
 
-func (manager *ProductionLeappMirrorManager) stopAcceptedLeappMirrorLaunch(ctx context.Context, paths leappMirrorPaths, identity LeaseIdentity, digest, token string, ready leappMirrorResponse) error {
+func (manager *ProductionHostAWSWorkspaceManager) stopAcceptedLeappMirrorLaunch(ctx context.Context, paths leappMirrorPaths, identity LeaseIdentity, digest, token string, ready leappMirrorResponse) error {
 	response, err := manager.control(ctx, paths, leappMirrorCommand{Version: 1, Action: "stop", Identity: identity, SpecDigest: digest, Token: token})
 	if err != nil {
 		return err
@@ -519,13 +627,13 @@ func (manager *ProductionLeappMirrorManager) stopAcceptedLeappMirrorLaunch(ctx c
 	if err := manager.waitForLeappMirrorArtifactsAbsent(ctx, paths); err != nil {
 		return err
 	}
-	return removeExactLeappMirrorRunDirectory(paths.run)
+	return nil
 }
 
-func (manager *ProductionLeappMirrorManager) waitForLeappMirrorArtifactsAbsent(ctx context.Context, paths leappMirrorPaths) error {
+func (manager *ProductionHostAWSWorkspaceManager) waitForLeappMirrorArtifactsAbsent(ctx context.Context, paths leappMirrorPaths) error {
 	artifactsAbsent := manager.artifactsAbsent
 	if artifactsAbsent == nil {
-		artifactsAbsent = exactLeappMirrorArtifactsAbsent
+		artifactsAbsent = exactLeappMirrorHelperArtifactsAbsent
 	}
 	deadline := time.Now().Add(manager.stopWait)
 	for {
@@ -545,7 +653,7 @@ func (manager *ProductionLeappMirrorManager) waitForLeappMirrorArtifactsAbsent(c
 		time.Sleep(10 * time.Millisecond)
 	}
 }
-func (manager *ProductionLeappMirrorManager) control(ctx context.Context, paths leappMirrorPaths, request leappMirrorCommand) (leappMirrorResponse, error) {
+func (manager *ProductionHostAWSWorkspaceManager) control(ctx context.Context, paths leappMirrorPaths, request leappMirrorCommand) (leappMirrorResponse, error) {
 	if manager.controlOverride != nil {
 		return manager.controlOverride(ctx, paths, request)
 	}
@@ -557,7 +665,7 @@ func (manager *ProductionLeappMirrorManager) control(ctx context.Context, paths 
 	controlContext, cancel := context.WithTimeout(ctx, manager.stopWait)
 	defer cancel()
 	output := &boundedOutput{maximum: MaxControlBytes}
-	command := exec.CommandContext(controlContext, manager.executable.Path, "__dsx_leapp_mirror_v1")
+	command := exec.CommandContext(controlContext, manager.executable.Path, "__dsx_host_aws_mirror_v1")
 	command.Dir = paths.run
 	command.Stdin = bytes.NewReader(encoded)
 	command.Stdout = output
@@ -571,11 +679,11 @@ func (manager *ProductionLeappMirrorManager) control(ctx context.Context, paths 
 	return response, nil
 }
 
-func (manager *ProductionLeappMirrorManager) ensurePaths(identity LeaseIdentity) (leappMirrorPaths, error) {
+func (manager *ProductionHostAWSWorkspaceManager) ensurePaths(identity LeaseIdentity) (leappMirrorPaths, error) {
 	if err := verifyPrivateDirectory(manager.stateRoot); err != nil {
 		return leappMirrorPaths{}, model.Wrap(model.CodeUnavailable, "verify Leapp mirror state root", err)
 	}
-	root, err := ensurePrivateChildDirectory(manager.stateRoot, leappMirrorDirectoryName)
+	root, err := ensurePrivateChildDirectory(manager.stateRoot, hostAWSWorkspaceDirectoryName)
 	if err != nil {
 		return leappMirrorPaths{}, err
 	}
@@ -594,8 +702,8 @@ func (manager *ProductionLeappMirrorManager) ensurePaths(identity LeaseIdentity)
 	return makeLeappMirrorPaths(root, project, workspace, run), nil
 }
 
-func (manager *ProductionLeappMirrorManager) existingPaths(identity LeaseIdentity) (leappMirrorPaths, bool, error) {
-	root := filepath.Join(manager.stateRoot, leappMirrorDirectoryName)
+func (manager *ProductionHostAWSWorkspaceManager) existingPaths(identity LeaseIdentity) (leappMirrorPaths, bool, error) {
+	root := filepath.Join(manager.stateRoot, hostAWSWorkspaceDirectoryName)
 	project := filepath.Join(root, string(identity.ProjectID))
 	workspace := filepath.Join(project, string(identity.Workspace))
 	run := filepath.Join(workspace, string(identity.RunID))
@@ -617,10 +725,10 @@ func (manager *ProductionLeappMirrorManager) existingPaths(identity LeaseIdentit
 }
 
 func makeLeappMirrorPaths(root, project, workspace, run string) leappMirrorPaths {
-	return leappMirrorPaths{root: root, project: project, workspace: workspace, run: run, ledger: filepath.Join(run, leappMirrorLedgerName), token: filepath.Join(run, leappMirrorTokenName), failure: filepath.Join(run, leappMirrorFailureName), socket: filepath.Join(run, leappMirrorSocketName), lock: filepath.Join(workspace, leappMirrorLockName), mirror: filepath.Join(run, leappMirrorDataName)}
+	return leappMirrorPaths{root: root, project: project, workspace: workspace, run: run, ledger: filepath.Join(run, leappMirrorLedgerName), token: filepath.Join(run, leappMirrorTokenName), failure: filepath.Join(run, leappMirrorFailureName), socket: filepath.Join(run, leappMirrorSocketName), lock: filepath.Join(workspace, leappMirrorLockName), mirror: filepath.Join(run, hostAWSWorkspaceDataName)}
 }
 
-func (manager *ProductionLeappMirrorManager) verifyExecutable() error {
+func (manager *ProductionHostAWSWorkspaceManager) verifyExecutable() error {
 	current, err := canonicalExecutableIdentity(manager.executable.Path)
 	if err != nil || current != manager.executable {
 		return model.NewError(model.CodeAmbiguous, "dsx Leapp mirror executable identity changed", err)
@@ -644,15 +752,15 @@ func validateLeappMirrorResponse(response leappMirrorResponse, ledger leappMirro
 
 func validLeappMirrorFailure(value string) bool {
 	switch value {
-	case "source_identity_changed", "source_unsafe", "source_oversized", "control_failed", "startup_failed":
+	case "source_identity_changed", "source_unsafe", "source_oversized", "source_unavailable", "control_failed", "startup_failed":
 		return true
 	default:
 		return false
 	}
 }
 
-func exactLeappMirrorArtifactsAbsent(paths leappMirrorPaths) (bool, error) {
-	for _, path := range []string{paths.ledger, paths.token, paths.socket, paths.mirror} {
+func exactLeappMirrorHelperArtifactsAbsent(paths leappMirrorPaths) (bool, error) {
+	for _, path := range []string{paths.ledger, paths.token, paths.socket} {
 		_, err := os.Lstat(path)
 		if err == nil {
 			return false, nil
@@ -664,22 +772,113 @@ func exactLeappMirrorArtifactsAbsent(paths leappMirrorPaths) (bool, error) {
 	return true, nil
 }
 
-func rejectUnexpectedLeappMirrorEvidence(paths leappMirrorPaths, allowFailure bool) error {
-	for _, path := range []string{paths.token, paths.socket, paths.mirror} {
+func rejectUnexpectedHostAWSHelperEvidence(paths leappMirrorPaths) error {
+	for _, path := range []string{paths.token, paths.socket} {
 		if _, err := os.Lstat(path); err == nil {
-			return model.NewError(model.CodeAmbiguous, "Leapp mirror has incomplete ownership evidence; preserving it", nil)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	if !allowFailure {
-		if _, err := os.Lstat(paths.failure); err == nil {
-			return nil
+			return model.NewError(model.CodeAmbiguous, "host AWS workspace has incomplete helper ownership evidence; preserving it", nil)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	return nil
+}
+
+func rejectUnexpectedHostAWSRunEvidence(paths leappMirrorPaths, allowLedger, allowToken, allowSocket, allowFailure bool) error {
+	entries, err := os.ReadDir(paths.run)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		allowed := entry.Name() == filepath.Base(paths.mirror) ||
+			allowLedger && entry.Name() == filepath.Base(paths.ledger) ||
+			allowToken && entry.Name() == filepath.Base(paths.token) ||
+			allowSocket && entry.Name() == filepath.Base(paths.socket) ||
+			allowFailure && entry.Name() == filepath.Base(paths.failure)
+		if !allowed {
+			return model.NewError(model.CodeAmbiguous, "host AWS workspace retained unexpected evidence; preserving it", nil)
+		}
+	}
+	return nil
+}
+func rejectUnexpectedHostAWSPublicationEvidence(mirror string) error {
+	entries, err := os.ReadDir(mirror)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		known := entry.Name() == leappMirrorCurrentName && entry.Type()&os.ModeSymlink != 0 ||
+			strings.HasPrefix(entry.Name(), leappMirrorGenerationPrefix) && entry.IsDir() ||
+			strings.HasPrefix(entry.Name(), leappMirrorWritePrefix) && entry.Type().IsRegular() ||
+			strings.HasPrefix(entry.Name(), leappMirrorCurrentPrefix) && (entry.Type().IsRegular() || entry.Type()&os.ModeSymlink != 0)
+		if !known {
+			return model.NewError(model.CodeAmbiguous, "host AWS publication retained unexpected evidence; preserving it", nil)
+		}
+	}
+	return nil
+}
+
+func ensureHostAWSPublication(mirror string, publishEmpty bool) error {
+	info, err := os.Lstat(mirror)
+	if errors.Is(err, os.ErrNotExist) {
+		created, createErr := ensurePrivateChildDirectory(filepath.Dir(mirror), filepath.Base(mirror))
+		if createErr != nil {
+			return createErr
+		}
+		if created != mirror {
+			return errors.New("host AWS publication path changed during creation")
+		}
+	} else if err != nil {
+		return err
+	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("host AWS publication path is not a private directory")
+	} else if err := verifyPrivateDirectory(mirror); err != nil {
+		return err
+	}
+	if err := rejectUnexpectedHostAWSPublicationEvidence(mirror); err != nil {
+		return err
+	}
+	generation, err := currentLeappMirrorGeneration(mirror)
+	if err != nil {
+		return err
+	}
+	if generation == "" {
+		entries, readErr := os.ReadDir(mirror)
+		if readErr != nil {
+			return readErr
+		}
+		if len(entries) != 0 {
+			return errors.New("host AWS publication has incomplete ownership evidence")
+		}
+		return publishLeappMirrorGeneration(mirror, HostAWSDirectorySnapshot{}, nil)
+	}
+	if !publishEmpty {
+		return verifyLeappMirrorSnapshot(mirror)
+	}
+	empty, err := hostAWSPublicationEmpty(mirror)
+	if err != nil || empty {
+		return err
+	}
+	return publishLeappMirrorGeneration(mirror, HostAWSDirectorySnapshot{}, nil)
+}
+
+func hostAWSPublicationEmpty(mirror string) (bool, error) {
+	if err := verifyLeappMirrorSnapshot(mirror); err != nil {
+		return false, err
+	}
+	generation, err := currentLeappMirrorGeneration(mirror)
+	if err != nil {
+		return false, err
+	}
+	for _, name := range []string{hostAWSConfigFile, hostAWSCredentialsFile} {
+		info, err := os.Lstat(filepath.Join(generation, name))
+		if err != nil {
+			return false, err
+		}
+		if info.Size() != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func verifyLeappMirrorSnapshot(path string) error {
@@ -726,14 +925,26 @@ func verifyLeappMirrorGeneration(path string) error {
 	if err := verifyPrivateDirectory(path); err != nil {
 		return err
 	}
-	for _, name := range []string{leappConfigFile, leappCredentialsFile} {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 2 {
+		return errors.New("host AWS publication generation has unexpected artifacts")
+	}
+	for _, entry := range entries {
+		if entry.Name() != hostAWSConfigFile && entry.Name() != hostAWSCredentialsFile {
+			return errors.New("host AWS publication generation has unexpected artifacts")
+		}
+	}
+	for _, name := range []string{hostAWSConfigFile, hostAWSCredentialsFile} {
 		file := filepath.Join(path, name)
 		info, err := os.Lstat(file)
 		if err != nil {
 			return err
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 || info.Size() < 0 || info.Size() > MaxLeappFileBytes || !ok || stat.Uid != uint32(os.Geteuid()) {
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 || info.Size() < 0 || info.Size() > MaxHostAWSFileBytes || !ok || stat.Uid != uint32(os.Geteuid()) {
 			return errors.New("Leapp mirror file type, mode, owner, or size is invalid")
 		}
 	}
@@ -800,7 +1011,7 @@ func removeLeappMirrorGeneration(path string) error {
 		return errors.New("refusing to remove incomplete Leapp mirror generation")
 	}
 	for _, entry := range entries {
-		if entry.Name() != leappConfigFile && entry.Name() != leappCredentialsFile {
+		if entry.Name() != hostAWSConfigFile && entry.Name() != hostAWSCredentialsFile {
 			return errors.New("refusing to remove unexpected Leapp mirror generation artifact")
 		}
 		if err := removeLeappMirrorFile(filepath.Join(path, entry.Name())); err != nil {
@@ -819,7 +1030,7 @@ func removeStagedLeappMirrorGeneration(path string) error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() != leappConfigFile && entry.Name() != leappCredentialsFile {
+		if entry.Name() != hostAWSConfigFile && entry.Name() != hostAWSCredentialsFile {
 			return errors.New("refusing to remove unexpected staged Leapp mirror artifact")
 		}
 		if err := removeLeappMirrorFile(filepath.Join(path, entry.Name())); err != nil {
@@ -850,7 +1061,7 @@ func removeLeappMirrorStagingFile(path string, requireEmpty bool) error {
 		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400 || info.Size() < 0 || info.Size() > MaxLeappFileBytes || requireEmpty && info.Size() != 0 || !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 && info.Mode().Perm() != 0o400 || info.Size() < 0 || info.Size() > MaxHostAWSFileBytes || requireEmpty && info.Size() != 0 || !ok || stat.Uid != uint32(os.Geteuid()) {
 		return errors.New("refusing to remove unsafe Leapp mirror staging file")
 	}
 	return os.Remove(path)

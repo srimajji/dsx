@@ -237,7 +237,7 @@ func newWorkspaceRebaseFixture(t *testing.T, conflict bool) workspaceRebaseFixtu
 	}
 	return workspaceRebaseFixture{
 		guest: guest, bundle: bundle, before: before,
-		record: state.GitRecord{GuestPath: guest, SourceBranch: "main", SourceRevision: source, WorkspaceBranch: "dsx/alpha"},
+		record:   state.GitRecord{GuestPath: guest, SourceBranch: "main", SourceRevision: source, WorkspaceBranch: "dsx/alpha"},
 		artifact: gitx.SourceArtifact{SourceBranch: "main", SourceRevision: updated, BundleRef: privateRef},
 	}
 }
@@ -288,4 +288,3 @@ func workspaceRunGit(t *testing.T, directory string, arguments ...string) string
 	}
 	return string(output)
 }
-

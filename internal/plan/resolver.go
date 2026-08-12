@@ -40,13 +40,13 @@ type DefaultValues struct {
 }
 
 type AuthorityInputs struct {
-	BuildContext          *ContentDigest
-	StandardImageDigest   string
-	ImportedContent       []ContentDigest
-	BrowserImageReference string
-	BrowserImageDigest    string
-	HostMounts            []HostMountAuthority
-	LeappDirectory        *HostMountAuthority
+	BuildContext            *ContentDigest
+	StandardImageDigest     string
+	ImportedContent         []ContentDigest
+	BrowserImageReference   string
+	BrowserImageDigest      string
+	HostMounts              []HostMountAuthority
+	HostDefaultAWSDirectory *HostMountAuthority
 }
 
 type ContentDigest struct {

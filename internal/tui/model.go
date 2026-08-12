@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,6 +58,8 @@ type SetupModel struct {
 	setupChoice         string
 	agent               string
 	initialAgent        string
+	awsMode             string
+	awsDirectory        string
 	initialConfigDigest string
 	internet            bool
 	cpus                int
@@ -105,6 +109,8 @@ func NewSetupModel(ctx context.Context, application Application, root string, in
 		cpus:         initial.Config.Resources.CPUs,
 		memory:       initial.Config.Resources.Memory,
 		portInput:    formatGuestPorts(initial.Config.Ports),
+		awsMode:      initial.Config.AWS.Mode,
+		awsDirectory: initial.Config.AWS.Directory,
 		accessible:   accessible,
 		width:        80,
 		color:        terminal.ColorEnabled(),
@@ -121,6 +127,12 @@ func NewSetupModel(ctx context.Context, application Application, root string, in
 	}
 	if model.memory == "" {
 		model.memory = setupMemoryValue(initial.Plan.Limits.MemoryBytes)
+	}
+	if model.awsMode == "" {
+		model.awsMode = plan.AWSModeNone
+	}
+	if model.awsDirectory == "" {
+		model.awsDirectory = defaultHostAWSDirectory()
 	}
 	model.buildSetupForm()
 	model.resetReview(initial)
@@ -227,6 +239,29 @@ func validateGuestPorts(value string) error {
 	return err
 }
 
+func defaultHostAWSDirectory() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	directory := filepath.Join(home, ".aws")
+	if physical, resolveErr := filepath.EvalSymlinks(directory); resolveErr == nil {
+		return filepath.Clean(physical)
+	}
+	return filepath.Clean(directory)
+}
+
+func validateHostAWSDirectory(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("enter the canonical host directory that contains the standard AWS files")
+	}
+	if !filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return errors.New("AWS directory must be a canonical absolute path")
+	}
+	return nil
+}
+
 func (model *SetupModel) buildSetupForm() {
 	ubuntuChoice := huh.NewSelect[string]().
 		Title("Choose your Ubuntu workspace").
@@ -236,6 +271,21 @@ func (model *SetupModel) buildSetupForm() {
 			huh.NewOption("Ubuntu — Custom", "ubuntu-custom"),
 		).
 		Value(&model.setupChoice)
+	awsCapability := huh.NewSelect[string]().
+		Title("AWS capability").
+		Description("Optional. New workspaces always start with AWS disabled.").
+		Options(
+			huh.NewOption("None — no host AWS access", plan.AWSModeNone),
+			huh.NewOption("Follow host default — selected workspaces only", plan.AWSModeHostDefault),
+		).
+		Value(&model.awsMode)
+	awsDirectory := huh.NewGroup(
+		huh.NewInput().
+			Title("Host AWS directory").
+			Description("Canonical standard-file directory. Leapp Desktop or a compatible provider must keep one complete temporary [default] active. Named profiles are unavailable.").
+			Value(&model.awsDirectory).
+			Validate(validateHostAWSDirectory),
+	).WithHideFunc(func() bool { return model.awsMode != plan.AWSModeHostDefault })
 	custom := huh.NewGroup(
 		huh.NewSelect[string]().
 			Title("Coding assistant").
@@ -268,7 +318,7 @@ func (model *SetupModel) buildSetupForm() {
 			Options(setupMemoryOptions(model.memory)...).
 			Value(&model.memory),
 	).WithHideFunc(func() bool { return model.setupChoice != "ubuntu-custom" })
-	model.form = huh.NewForm(huh.NewGroup(ubuntuChoice), custom).WithAccessible(model.accessible)
+	model.form = huh.NewForm(huh.NewGroup(ubuntuChoice, awsCapability), awsDirectory, custom).WithAccessible(model.accessible)
 	if model.accessible || !model.color {
 		model.form.WithTheme(huh.ThemeFunc(huh.ThemeBase))
 	}
@@ -492,6 +542,15 @@ func (model *SetupModel) applyForm() {
 	if model.document.Agents.Default != "" && !slices.Contains(model.document.Agents.Allowed, model.document.Agents.Default) {
 		model.document.Agents.Allowed = append(model.document.Agents.Allowed, model.document.Agents.Default)
 	}
+	switch model.awsMode {
+	case plan.AWSModeHostDefault:
+		model.document.AWS = config.AWSConfig{
+			Mode:      plan.AWSModeHostDefault,
+			Directory: strings.TrimSpace(model.awsDirectory),
+		}
+	default:
+		model.document.AWS = config.AWSConfig{Mode: plan.AWSModeNone}
+	}
 	internet := model.internet
 	model.document.Network.Internet = &internet
 	model.document.Resources.CPUs = model.cpus
@@ -682,7 +741,39 @@ func buildConciseReview(builder *setupReviewBuilder, preview app.SetupPreview) {
 			builder.bullet("Volume " + volume.Name + " → " + volume.Target)
 		}
 	}
-	builder.item("Approval", preview.Hash)
+	buildAWSCapabilityReview(builder, execution.AWS)
+	builder.section("Approval", "The executable identity for this complete project authority.")
+	builder.item("Executable hash", preview.Hash)
+}
+
+func buildAWSCapabilityReview(builder *setupReviewBuilder, capability plan.AWSCapability) {
+	builder.section("AWS capability", "Optional default-only host AWS authority; credential values are never part of this review.")
+	if capability.Mode == "" || capability.Mode == plan.AWSModeNone {
+		builder.item("Mode", "Disabled — no host AWS credential authority is approved")
+		return
+	}
+	builder.item("Mode", capability.Mode)
+	builder.item("Source", capability.SourceDirectory)
+	builder.item("Source identity", capability.SourceIdentity)
+	builder.item("Destination", capability.Destination)
+	access := "read/write"
+	if capability.ReadOnly {
+		access = "read-only"
+	}
+	builder.item("Access", access)
+	builder.item("Eligible profile", capability.EligibleProfile+" only")
+	workspaceDefault := "Enabled"
+	if !capability.WorkspaceDefaultEnabled {
+		workspaceDefault = "Disabled"
+	}
+	builder.item("Default for new workspaces", workspaceDefault)
+	builder.item("Authority model", capability.AuthorityModel)
+	builder.item("Host availability", "Status only, not approval authority — enablement requires a valid temporary host default; if unavailable, start the host default session")
+	builder.bullet("This capability is for selected workspaces only; new workspaces start with AWS access disabled.")
+	builder.bullet("Leapp Desktop or a compatible provider must keep a temporary default session active for enablement and rotation.")
+	builder.bullet("Only AWS-enabled running workspaces follow the host default.")
+	builder.bullet("Switching the host default changes every AWS-enabled running workspace without another approval or workspace restart.")
+	builder.bullet("Named host profiles are unavailable.")
 }
 
 func nonInternetBridgeCount(bridges []plan.BridgeGrant) int {

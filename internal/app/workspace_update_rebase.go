@@ -40,9 +40,9 @@ func (writer *hardLimitWriter) Write(value []byte) (int, error) {
 type workspaceGitExecutor func(context.Context, string, []string, io.Writer, io.Writer) (runtime.Exit, error)
 
 type workspaceRebaseResult struct {
-	BackupRef   string
+	BackupRef    string
 	ResultCommit string
-	Conflict    bool
+	Conflict     bool
 }
 
 type workspaceRebaseResolution struct {

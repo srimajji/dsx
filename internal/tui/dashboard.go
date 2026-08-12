@@ -13,16 +13,18 @@ import (
 )
 
 const (
-	maxDashboardFieldBytes      = 256
-	maxWorkspaceNameBytes       = 24
-	defaultDashboardWidth       = 80
-	defaultDashboardHeight      = 24
-	maxVisibleWorkspaceRows     = 12
-	dashboardNonWorkspaceRows   = 14
-	workspaceDisplayRowHeight   = 2
-	createFormFocusCount        = 4
-	agentFormFocusCount         = 3
-	dashboardActionGap          = "   "
+	maxDashboardFieldBytes    = 256
+	maxWorkspaceNameBytes     = 24
+	defaultDashboardWidth     = 80
+	defaultDashboardHeight    = 24
+	maxVisibleWorkspaceRows   = 12
+	dashboardNonWorkspaceRows = 14
+	workspaceDisplayRowHeight = 2
+	createFormFocusCount      = 4
+	agentFormFocusCount       = 3
+	dashboardActionGap        = "   "
+	intentAWSEnable           = "aws-enable"
+	intentAWSDisable          = "aws-disable"
 )
 
 type DashboardData struct {
@@ -32,14 +34,19 @@ type DashboardData struct {
 	Clean         bool
 	AllowedAgents []string
 	DefaultAgent  string
+	AWSCapability string
 	Workspaces    []DashboardWorkspace
 }
 
 type DashboardWorkspace struct {
-	Name           string
-	State          string
-	DefaultAgent   string
-	MutationActive bool
+	Name                string
+	State               string
+	DefaultAgent        string
+	MutationActive      bool
+	AWSEnabled          bool
+	AWSHostAvailability string
+	AWSMirrorHealth     string
+	AWSFailureCode      string
 }
 
 type Intent struct {
@@ -61,6 +68,7 @@ const (
 	dashboardAgent
 	dashboardGit
 	dashboardRemove
+	dashboardAWS
 )
 
 type DashboardModel struct {
@@ -82,6 +90,9 @@ func NewDashboardModel(data DashboardData) *DashboardModel {
 	data.Branch = boundedLine(data.Branch)
 	data.Revision = boundedLine(data.Revision)
 	data.DefaultAgent = boundedLine(data.DefaultAgent)
+	if data.AWSCapability != "host-default" {
+		data.AWSCapability = "none"
+	}
 	data.AllowedAgents = normalizedAgents(data.AllowedAgents)
 	if !slices.Contains(data.AllowedAgents, data.DefaultAgent) {
 		data.DefaultAgent = ""
@@ -93,6 +104,9 @@ func NewDashboardModel(data DashboardData) *DashboardModel {
 			continue
 		}
 		workspace.State = boundedLine(workspace.State)
+		workspace.AWSHostAvailability = boundedAWSState(workspace.AWSHostAvailability, "unknown")
+		workspace.AWSMirrorHealth = boundedAWSState(workspace.AWSMirrorHealth, "unknown")
+		workspace.AWSFailureCode = boundedAWSState(workspace.AWSFailureCode, "")
 		workspace.MutationActive = workspace.MutationActive || workspace.State == "planned" || workspace.State == "creating" || workspace.State == "cleaning"
 		workspace.DefaultAgent = boundedLine(workspace.DefaultAgent)
 		if !slices.Contains(data.AllowedAgents, workspace.DefaultAgent) {
@@ -138,6 +152,8 @@ func (model *DashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model.updateGit(pressed)
 	case dashboardRemove:
 		return model.updateRemove(pressed)
+	case dashboardAWS:
+		return model.updateAWS(pressed)
 	default:
 		return model.updateHome(pressed)
 	}
@@ -186,6 +202,10 @@ func (model *DashboardModel) updateHome(pressed string) (tea.Model, tea.Cmd) {
 	case "g":
 		if workspace := model.selectedWorkspace(); workspace != nil && canGit(*workspace) {
 			model.screen, model.focus = dashboardGit, 0
+		}
+	case "w":
+		if workspace := model.selectedWorkspace(); workspace != nil && canAWS(*workspace) && model.data.AWSCapability == "host-default" {
+			model.screen = dashboardAWS
 		}
 	case "d":
 		if workspace := model.selectedWorkspace(); workspace != nil && canRemove(*workspace) {
@@ -309,33 +329,65 @@ func (model *DashboardModel) updateRemove(pressed string) (tea.Model, tea.Cmd) {
 	return model, nil
 }
 
+func (model *DashboardModel) updateAWS(pressed string) (tea.Model, tea.Cmd) {
+	switch pressed {
+	case "esc", "n":
+		model.cancelForm()
+	case "y", "enter":
+		workspace := model.selectedWorkspace()
+		if workspace == nil || !canAWS(*workspace) || model.data.AWSCapability != "host-default" {
+			return model, nil
+		}
+		action := intentAWSEnable
+		if workspace.AWSEnabled {
+			action = intentAWSDisable
+		}
+		return model.emit(action, *workspace)
+	}
+	return model, nil
+}
+
 func (model *DashboardModel) emit(action string, workspace DashboardWorkspace) (tea.Model, tea.Cmd) {
 	model.intent = &Intent{Action: action, Root: model.data.Root, Workspace: workspace.Name}
 	return model, tea.Quit
 }
 
-func (model *DashboardModel) cancelForm() { model.screen, model.focus, model.notice, model.browser = dashboardHome, 0, "", false }
+func (model *DashboardModel) cancelForm() {
+	model.screen, model.focus, model.notice, model.browser = dashboardHome, 0, "", false
+}
 func (model *DashboardModel) moveSelection(delta int) {
-	if len(model.data.Workspaces) != 0 { model.selected = (model.selected + delta + len(model.data.Workspaces)) % len(model.data.Workspaces) }
+	if len(model.data.Workspaces) != 0 {
+		model.selected = (model.selected + delta + len(model.data.Workspaces)) % len(model.data.Workspaces)
+	}
 }
 func (model *DashboardModel) selectedWorkspace() *DashboardWorkspace {
-	if model.selected < 0 || model.selected >= len(model.data.Workspaces) { return nil }
+	if model.selected < 0 || model.selected >= len(model.data.Workspaces) {
+		return nil
+	}
 	return &model.data.Workspaces[model.selected]
 }
 func (model *DashboardModel) defaultAgentIndex(workspaceDefault string) int {
 	selected := workspaceDefault
-	if selected == "" { selected = model.data.DefaultAgent }
+	if selected == "" {
+		selected = model.data.DefaultAgent
+	}
 	return max(0, slices.Index(model.data.AllowedAgents, selected))
 }
 func (model *DashboardModel) moveAgent(delta int) {
-	if len(model.data.AllowedAgents) != 0 { model.agentIndex = (model.agentIndex + delta + len(model.data.AllowedAgents)) % len(model.data.AllowedAgents) }
+	if len(model.data.AllowedAgents) != 0 {
+		model.agentIndex = (model.agentIndex + delta + len(model.data.AllowedAgents)) % len(model.data.AllowedAgents)
+	}
 }
 func (model *DashboardModel) selectedAgent() string {
-	if model.agentIndex < 0 || model.agentIndex >= len(model.data.AllowedAgents) { return "" }
+	if model.agentIndex < 0 || model.agentIndex >= len(model.data.AllowedAgents) {
+		return ""
+	}
 	return model.data.AllowedAgents[model.agentIndex]
 }
 func (model *DashboardModel) Intent() (Intent, bool) {
-	if model.intent == nil { return Intent{}, false }
+	if model.intent == nil {
+		return Intent{}, false
+	}
 	return *model.intent, true
 }
 
@@ -344,14 +396,23 @@ func (model *DashboardModel) View() tea.View {
 	header := theme.header("Project", friendlyProjectName(model.data.Root), model.width)
 	var content string
 	switch model.screen {
-	case dashboardCreate: content = model.renderCreate(theme)
-	case dashboardAgent: content = model.renderAgent(theme)
-	case dashboardGit: content = model.renderGit(theme)
-	case dashboardRemove: content = model.renderRemove(theme)
-	default: content = model.renderHome(theme)
+	case dashboardCreate:
+		content = model.renderCreate(theme)
+	case dashboardAgent:
+		content = model.renderAgent(theme)
+	case dashboardGit:
+		content = model.renderGit(theme)
+	case dashboardAWS:
+		content = model.renderAWS(theme)
+	case dashboardRemove:
+		content = model.renderRemove(theme)
+	default:
+		content = model.renderHome(theme)
 	}
 	rendered := terminal.Wrap(header+"\n\n"+content, tuiContentWidth(model.width))
-	if !model.accessible { rendered = theme.layout(rendered, model.width) }
+	if !model.accessible {
+		rendered = theme.layout(rendered, model.width)
+	}
 	view := tea.NewView(rendered)
 	view.AltScreen = !model.accessible
 	return view
@@ -374,8 +435,14 @@ func (model *DashboardModel) renderHome(theme visualTheme) string {
 }
 
 func (model *DashboardModel) renderWorkspaceList(theme visualTheme) string {
-	if len(model.data.Workspaces) == 0 { return theme.muted.Render("No workspaces yet. Press c to create one from the committed local checkout.") }
-	maxVisible := max(1, min(maxVisibleWorkspaceRows, (model.height-dashboardNonWorkspaceRows)/workspaceDisplayRowHeight))
+	if len(model.data.Workspaces) == 0 {
+		return theme.muted.Render("No workspaces yet. Press c to create one from the committed local checkout.")
+	}
+	rowHeight := workspaceDisplayRowHeight
+	if model.data.AWSCapability == "host-default" {
+		rowHeight += 2
+	}
+	maxVisible := max(1, min(maxVisibleWorkspaceRows, (model.height-dashboardNonWorkspaceRows)/rowHeight))
 	start := max(0, model.selected-maxVisible+1)
 	end := min(len(model.data.Workspaces), start+maxVisible)
 	if end-start < maxVisible {
@@ -388,12 +455,23 @@ func (model *DashboardModel) renderWorkspaceList(theme visualTheme) string {
 	for index := start; index < end; index++ {
 		workspace := model.data.Workspaces[index]
 		marker, name := "  ", theme.title
-		if index == model.selected { marker, name = "> ", theme.accent }
+		if index == model.selected {
+			marker, name = "> ", theme.accent
+		}
 		state, tone := workspaceStateLabel(workspace.State)
 		defaultAgent, inherited := workspace.DefaultAgent, ""
-		if defaultAgent == "" { defaultAgent, inherited = model.data.DefaultAgent, " (project default)" }
+		if defaultAgent == "" {
+			defaultAgent, inherited = model.data.DefaultAgent, " (project default)"
+		}
 		fmt.Fprintf(&output, "%s%s  %s\n", marker, name.Render(boundedLine(workspace.Name)), theme.badge(state, tone))
 		fmt.Fprintf(&output, "    Default: %s%s · Approved: %s\n", agentDisplayName(defaultAgent), inherited, agentListDisplay(model.data.AllowedAgents))
+		if model.data.AWSCapability == "host-default" {
+			status := fmt.Sprintf("    AWS: %s · Host: %s · Mirror: %s", awsGrantLabel(workspace.AWSEnabled), awsAvailabilityShort(workspace.AWSHostAvailability), awsMirrorLabel(workspace.AWSMirrorHealth))
+			if workspace.AWSFailureCode != "" {
+				status += " · Reason: " + workspace.AWSFailureCode
+			}
+			fmt.Fprintln(&output, status)
+		}
 	}
 	if remaining := len(model.data.Workspaces) - end; remaining > 0 {
 		fmt.Fprintf(&output, "  ↓ %d more\n", remaining)
@@ -408,13 +486,44 @@ func (model *DashboardModel) renderActions(theme visualTheme) string {
 	}
 	workspace := model.selectedWorkspace()
 	if workspace != nil {
-		if canOpen(*workspace) { actions = append(actions, "[Enter] Open") }
-		if canAgent(*workspace) && len(model.data.AllowedAgents) != 0 { actions = append(actions, "[a] Open agent") }
-		if model.sourceReady() && canUpdate(*workspace) { actions = append(actions, "[u] Update from local checkout") } else if workspace.MutationActive { actions = append(actions, "[u] Update unavailable while lifecycle change runs") } else if !model.sourceReady() && (workspace.State == "running" || workspace.State == "stopped") { actions = append(actions, "[u] Update unavailable — "+model.sourceBlockedReason()) }
-		if !workspace.MutationActive && (workspace.State == "running" || workspace.State == "needs_resolution") { actions = append(actions, "[s] Stop") } else if !workspace.MutationActive && workspace.State == "stopped" { actions = append(actions, "[s] Start") }
-		if canRestart(*workspace) { actions = append(actions, "[r] Restart") } else if workspace.MutationActive { actions = append(actions, "[r] Restart unavailable while lifecycle change runs") }
-		if canGit(*workspace) { actions = append(actions, "[g] Review Git changes") }
-		if canRemove(*workspace) { actions = append(actions, "[d] Remove") }
+		if canOpen(*workspace) {
+			actions = append(actions, "[Enter] Open")
+		}
+		if canAgent(*workspace) && len(model.data.AllowedAgents) != 0 {
+			actions = append(actions, "[a] Open agent")
+		}
+		if model.sourceReady() && canUpdate(*workspace) {
+			actions = append(actions, "[u] Update from local checkout")
+		} else if workspace.MutationActive {
+			actions = append(actions, "[u] Update unavailable while lifecycle change runs")
+		} else if !model.sourceReady() && (workspace.State == "running" || workspace.State == "stopped") {
+			actions = append(actions, "[u] Update unavailable — "+model.sourceBlockedReason())
+		}
+		if !workspace.MutationActive && (workspace.State == "running" || workspace.State == "needs_resolution") {
+			actions = append(actions, "[s] Stop")
+		} else if !workspace.MutationActive && workspace.State == "stopped" {
+			actions = append(actions, "[s] Start")
+		}
+		if canRestart(*workspace) {
+			actions = append(actions, "[r] Restart")
+		} else if workspace.MutationActive {
+			actions = append(actions, "[r] Restart unavailable while lifecycle change runs")
+		}
+		if canGit(*workspace) {
+			actions = append(actions, "[g] Review Git changes")
+		}
+		if model.data.AWSCapability == "host-default" && canAWS(*workspace) {
+			if workspace.AWSEnabled {
+				actions = append(actions, "[w] Disable AWS")
+			} else {
+				actions = append(actions, "[w] Enable AWS")
+			}
+		} else if model.data.AWSCapability == "host-default" && workspace.MutationActive {
+			actions = append(actions, "[w] AWS unavailable while lifecycle change runs")
+		}
+		if canRemove(*workspace) {
+			actions = append(actions, "[d] Remove")
+		}
 	}
 	actions = append(actions, "[q] Quit")
 	rendered := make([]string, len(actions))
@@ -459,36 +568,84 @@ func (model *DashboardModel) checkoutLabel() string {
 
 func (model *DashboardModel) renderCreate(theme visualTheme) string {
 	name := model.name
-	if name == "" { name = "e.g. feature-a" }
+	if name == "" {
+		name = "e.g. feature-a"
+	}
 	agent := model.selectedAgent()
 	displayAgent := agentDisplayName(agent)
-	if agent == "" { displayAgent = "No approved agents" }
+	if agent == "" {
+		displayAgent = "No approved agents"
+	}
 	inherited := ""
-	if agent == model.data.DefaultAgent { inherited = " — inherited from project" }
+	if agent == model.data.DefaultAgent {
+		inherited = " — inherited from project"
+	}
 	body := formRow(theme, model.focus == 0, "Name", name) + "\n\n" + formRow(theme, false, "Starting point", boundedLine(model.data.Branch)+" @ "+boundedLine(model.data.Revision)+" (immutable)") + "\n\n" + formRow(theme, model.focus == 1, "Default agent", displayAgent+inherited) + "\n\n" + formChoice(theme, model.focus == 2, "Create and open") + "\n" + formChoice(theme, model.focus == 3, "Create in background")
-	if model.notice != "" { body += "\n\n" + theme.warning.Render(boundedLine(model.notice)) }
+	if model.notice != "" {
+		body += "\n\n" + theme.warning.Render(boundedLine(model.notice))
+	}
 	body += "\n\n" + theme.help("[Tab] Next field", "[←/→] Select agent", "[Enter] Choose action", "[Esc] Cancel")
 	return theme.panel("Create workspace", body, model.width, true)
 }
 
 func (model *DashboardModel) renderAgent(theme visualTheme) string {
-	workspace := model.selectedWorkspace(); name := ""
-	if workspace != nil { name = workspace.Name }
-	check := "[ ]"; if model.browser { check = "[x]" }
+	workspace := model.selectedWorkspace()
+	name := ""
+	if workspace != nil {
+		name = workspace.Name
+	}
+	check := "[ ]"
+	if model.browser {
+		check = "[x]"
+	}
 	body := theme.muted.Render("Workspace  "+boundedLine(name)) + "\n\n" + formRow(theme, model.focus == 0, "Agent", agentDisplayName(model.selectedAgent())) + "\n\n" + formRow(theme, model.focus == 1, "Browser", check+" Enable isolated browser for this session only") + "\n\n" + formChoice(theme, model.focus == 2, "Open agent") + "\n\n" + theme.help("[Tab] Next field", "[←/→] Select agent", "[Space] Toggle browser", "[Enter] Choose", "[Esc] Cancel")
 	return theme.panel("Open agent", body, model.width, true)
 }
 func (model *DashboardModel) renderGit(theme visualTheme) string {
-	workspace := model.selectedWorkspace(); name := ""; if workspace != nil { name = workspace.Name }
+	workspace := model.selectedWorkspace()
+	name := ""
+	if workspace != nil {
+		name = workspace.Name
+	}
 	return theme.panel("Review Git changes", "Workspace  "+boundedLine(name)+"\n\n"+theme.help("[s] Status", "[d] Diff", "[f] Fetch", "[a] Apply", "[Esc] Cancel"), model.width, true)
 }
 func (model *DashboardModel) renderRemove(theme visualTheme) string {
-	workspace := model.selectedWorkspace(); name := ""; if workspace != nil { name = workspace.Name }
+	workspace := model.selectedWorkspace()
+	name := ""
+	if workspace != nil {
+		name = workspace.Name
+	}
 	body := theme.danger.Render("Remove workspace "+boundedLine(name)+"?") + "\n\nDSX will preserve unfetched or uncertain work unless loss is explicitly confirmed outside this dashboard.\n\n" + theme.help("[y] Remove", "[n/Esc] Cancel")
 	return theme.panel("Confirm removal", body, model.width, true)
 }
+func (model *DashboardModel) renderAWS(theme visualTheme) string {
+	workspace := model.selectedWorkspace()
+	if workspace == nil {
+		return theme.panel("AWS access", "No workspace selected.\n\n"+theme.help("[Esc] Cancel"), model.width, true)
+	}
+	host := awsAvailabilityLabel(workspace.AWSHostAvailability)
+	if workspace.AWSHostAvailability != "available" {
+		host += "\n  Start or renew one complete temporary [default] session in Leapp Desktop or a compatible provider, then try again."
+	}
+	if workspace.AWSEnabled {
+		body := theme.danger.Render("Disable AWS for "+boundedLine(workspace.Name)+"?") +
+			"\n\nHost default\n  " + host +
+			"\n\nEffect\n  Access is revoked immediately for this workspace only. Its AWS mirror and helper are removed; other workspaces are unchanged." +
+			"\n\n" + theme.help("[y/Enter] Disable", "[n/Esc] Cancel")
+		return theme.panel("Confirm AWS revocation", body, model.width, true)
+	}
+	body := theme.warning.Render("Enable AWS for "+boundedLine(workspace.Name)+"?") +
+		"\n\nHost default\n  " + host +
+		"\n\nEffect\n  This workspace and its agents will continuously follow whichever AWS account and role the host provider assigns to default. Switching the host default changes authority without another approval or workspace restart. Named profiles are unavailable. Other workspaces are unchanged." +
+		"\n\n" + theme.help("[y/Enter] Enable", "[n/Esc] Cancel")
+	return theme.panel("Confirm dynamic AWS authority", body, model.width, true)
+}
+
 func formRow(theme visualTheme, active bool, label, value string) string {
-	marker, style := "  ", theme.value; if active { marker, style = "> ", theme.accent }
+	marker, style := "  ", theme.value
+	if active {
+		marker, style = "> ", theme.accent
+	}
 	return marker + theme.label.Render(label) + "\n    " + style.Render(boundedLine(value))
 }
 
@@ -500,12 +657,73 @@ func formChoice(theme visualTheme, active bool, label string) string {
 	return marker + style.Render("[ "+boundedLine(label)+" ]")
 }
 
-func canOpen(workspace DashboardWorkspace) bool { return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped" || workspace.State == "needs_resolution") }
-func canAgent(workspace DashboardWorkspace) bool { return !workspace.MutationActive && workspace.State == "running" }
-func canUpdate(workspace DashboardWorkspace) bool { return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped") }
-func canRestart(workspace DashboardWorkspace) bool { return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped") }
-func canGit(workspace DashboardWorkspace) bool { return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped" || workspace.State == "needs_resolution" || workspace.State == "failed") }
-func canRemove(workspace DashboardWorkspace) bool { return !workspace.MutationActive && workspace.State != "deleted" }
+func canOpen(workspace DashboardWorkspace) bool {
+	return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped" || workspace.State == "needs_resolution")
+}
+func canAgent(workspace DashboardWorkspace) bool {
+	return !workspace.MutationActive && workspace.State == "running"
+}
+func canUpdate(workspace DashboardWorkspace) bool {
+	return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped")
+}
+func canRestart(workspace DashboardWorkspace) bool {
+	return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped")
+}
+func canGit(workspace DashboardWorkspace) bool {
+	return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped" || workspace.State == "needs_resolution" || workspace.State == "failed")
+}
+func canRemove(workspace DashboardWorkspace) bool {
+	return !workspace.MutationActive && workspace.State != "deleted"
+}
+func canAWS(workspace DashboardWorkspace) bool {
+	return !workspace.MutationActive && (workspace.State == "running" || workspace.State == "stopped" || workspace.State == "needs_resolution")
+}
+
+func boundedAWSState(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	for _, allowed := range []string{"available", "unavailable", "disabled", "stopped", "current", "degraded", "host-unavailable", "manager-unavailable", "status-unavailable", "mirror-disabled", "mirror-degraded", "source_identity_changed", "source_unsafe", "source_oversized", "source_unavailable"} {
+		if value == allowed {
+			return value
+		}
+	}
+	return fallback
+}
+
+func awsGrantLabel(enabled bool) string {
+	if enabled {
+		return "Enabled"
+	}
+	return "Disabled"
+}
+
+func awsAvailabilityLabel(availability string) string {
+	if availability == "available" {
+		return "Available — temporary default detected"
+	}
+	return "Unavailable — start the host default session"
+}
+
+func awsAvailabilityShort(availability string) string {
+	if availability == "available" {
+		return "Available"
+	}
+	return "Unavailable"
+}
+
+func awsMirrorLabel(health string) string {
+	switch health {
+	case "current":
+		return "Current"
+	case "stopped":
+		return "Stopped"
+	case "disabled":
+		return "Disabled"
+	case "degraded":
+		return "Degraded"
+	default:
+		return "Unavailable"
+	}
+}
 func workspaceStateLabel(state string) (string, string) {
 	switch state {
 	case "running":

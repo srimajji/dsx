@@ -109,7 +109,7 @@ func TestSetupFormOffersOnlyDefaultAndCustomUbuntu(t *testing.T) {
 	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
 	model.form.Init()
 	view := ansi.Strip(model.form.View())
-	for _, expected := range []string{"Ubuntu — Default settings", "Ubuntu — Custom", "6 CPUs", "6 GiB", "network allowed", "no browser"} {
+	for _, expected := range []string{"Ubuntu — Default settings", "Ubuntu — Custom", "6 CPUs", "6 GiB", "network allowed", "no browser", "AWS capability", "None — no host AWS access", "Follow host default — selected workspaces only"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("setup choice omitted %q:\n%s", expected, view)
 		}
@@ -128,6 +128,36 @@ func TestSetupFormOffersOnlyDefaultAndCustomUbuntu(t *testing.T) {
 		if !strings.Contains(customView, expected) {
 			t.Fatalf("custom setup omitted %q:\n%s", expected, customView)
 		}
+	}
+}
+
+func TestSetupAWSCapabilityDefaultsOffAndAppliesHostDefaultDraft(t *testing.T) {
+	t.Setenv("HOME", "/Users/example")
+	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", app.SetupPreview{
+		Config: config.ConfigDocument{SchemaVersion: 1},
+	}, false)
+	if model.awsMode != plan.AWSModeNone || model.awsDirectory != "/Users/example/.aws" {
+		t.Fatalf("default AWS choice = mode %q, directory %q", model.awsMode, model.awsDirectory)
+	}
+	model.applyForm()
+	if model.document.AWS.Mode != plan.AWSModeNone || model.document.AWS.Directory != "" {
+		t.Fatalf("default AWS draft = %#v", model.document.AWS)
+	}
+
+	model.awsMode = plan.AWSModeHostDefault
+	model.awsDirectory = "/Users/example/.aws"
+	model.applyForm()
+	model.buildSetupForm()
+	model.form.Init()
+	model.form.NextGroup()
+	directoryView := ansi.Strip(model.form.View())
+	for _, expected := range []string{"Host AWS directory", "Leapp Desktop or a compatible provider", "Named profiles are unavailable"} {
+		if !strings.Contains(directoryView, expected) {
+			t.Fatalf("host-default directory form omitted %q:\n%s", expected, directoryView)
+		}
+	}
+	if model.document.AWS != (config.AWSConfig{Mode: plan.AWSModeHostDefault, Directory: "/Users/example/.aws"}) {
+		t.Fatalf("host-default AWS draft = %#v", model.document.AWS)
 	}
 }
 
@@ -341,7 +371,12 @@ func TestCompleteReviewUsesReadableCardsWithoutRawJSON(t *testing.T) {
 			Ports: []plan.PortRequest{{
 				Name: "web", GuestPort: 3000, Protocol: "tcp", HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: &hostPort,
 			}},
-			Bridges:    []plan.BridgeGrant{{Kind: "tcp", Name: "database", Destination: "db.internal", Port: 5432, ReadOnly: true}},
+			Bridges: []plan.BridgeGrant{{Kind: "tcp", Name: "database", Destination: "db.internal", Port: 5432, ReadOnly: true}},
+			AWS: plan.AWSCapability{
+				Mode: "host-default", SourceDirectory: "/Users/sri/.aws", SourceIdentity: "dev=1;ino=2",
+				Destination: "/run/dsx/aws", ReadOnly: true, EligibleProfile: "default",
+				WorkspaceDefaultEnabled: false, AuthorityModel: "dynamic-host-default",
+			},
 			Limits:     plan.ResourceLimits{CPUs: 2, MemoryBytes: 2 << 30, MaxConcurrentWorkspaces: 2},
 			Provenance: map[string]config.SourceRef{"agent": {Kind: "config", Path: ".dsx/config.jsonc", Line: 12}},
 		},
@@ -355,8 +390,13 @@ func TestCompleteReviewUsesReadableCardsWithoutRawJSON(t *testing.T) {
 		"Browser", "Disabled", "Agent", "codex", "Port web", "127.0.0.1:8080",
 		`Setup command: "npm" "install"`, "NPM_TOKEN = secret reference secret://npm",
 		`Service web: "npm" "run" "dev"`, "Mount /tmp/config → /etc/dsx/project • read-only",
-		"Authentication import: codex", "Host grant database → db.internal:5432",
-		"Volume cache → /cache", "Approval", "approved-hash",
+		"Authentication import: codex", "Host grant database → db.internal:5432", "Volume cache → /cache",
+		"AWS CAPABILITY", "host-default", "/Users/sri/.aws", "dev=1;ino=2", "/run/dsx/aws", "read-only",
+		"default only", "Default for new workspaces: Disabled", "dynamic-host-default",
+		"Status only, not approval authority", "selected workspaces only", "new workspaces start with AWS access disabled",
+		"temporary default session active for enablement and rotation", "Only AWS-enabled running workspaces",
+		"without another approval or workspace restart", "Named host profiles are unavailable",
+		"APPROVAL", "Executable hash", "approved-hash",
 	} {
 		if !strings.Contains(review, expected) {
 			t.Fatalf("concise review omitted %q:\n%s", expected, review)
@@ -478,7 +518,15 @@ func TestCompleteReviewRequiresTailGrantAndRejectsOverBound(t *testing.T) {
 	}
 	bridges = append(bridges, plan.BridgeGrant{Kind: "tcp", Name: "tail", Destination: tailGrant, Port: 8443})
 	preview := app.SetupPreview{
-		Plan:                plan.ExecutionPlan{ContractVersion: plan.ContractVersion, Bridges: bridges},
+		Plan: plan.ExecutionPlan{
+			ContractVersion: plan.ContractVersion,
+			Bridges:         bridges,
+			AWS: plan.AWSCapability{
+				Mode: "host-default", SourceDirectory: "/Users/sri/.aws", SourceIdentity: "dev=1;ino=2",
+				Destination: "/run/dsx/aws", ReadOnly: true, EligibleProfile: "default",
+				AuthorityModel: "dynamic-host-default",
+			},
+		},
 		RenderedConfig:      []byte("{}\n"),
 		Hash:                strings.Repeat("a", 64),
 		ConfigContentDigest: strings.Repeat("b", 64),
@@ -499,14 +547,16 @@ func TestCompleteReviewRequiresTailGrantAndRejectsOverBound(t *testing.T) {
 	}
 
 	tailVisible := false
+	awsWarningVisible := false
 	for {
 		content := model.View().Content
 		pages := reviewSectionPages(model.review, model.width, model.height)
 		sectionView := renderReviewSectionPage(pages[model.reviewPage], newVisualTheme(model.color))
 		tailVisible = tailVisible || strings.Contains(sectionView, tailGrant)
+		awsWarningVisible = awsWarningVisible || strings.Contains(sectionView, "Named host profiles are unavailable")
 		if model.reviewPage+1 == model.reviewPageCount() {
-			if !tailVisible {
-				t.Fatal("reached final confirmation without displaying the complete tail trust grant")
+			if !tailVisible || !awsWarningVisible {
+				t.Fatalf("reached final confirmation without displaying complete authority: tail=%t aws-warning=%t", tailVisible, awsWarningVisible)
 			}
 			if !strings.Contains(content, "Final confirmation:") {
 				t.Fatal("final page did not expose confirmation")

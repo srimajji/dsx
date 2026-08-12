@@ -83,6 +83,33 @@ func (stub *workspaceStub) calls() int {
 	return len(stub.creates) + len(stub.opens) + len(stub.starts) + len(stub.stops) + len(stub.restarts) + len(stub.removes) + len(stub.lists)
 }
 
+type awsWorkspaceStub struct {
+	enables       []app.AWSWorkspaceRequest
+	disables      []app.AWSWorkspaceRequest
+	statuses      []app.AWSWorkspaceRequest
+	enableResult  app.AWSWorkspaceResult
+	disableResult app.AWSWorkspaceResult
+	statusResult  app.AWSWorkspaceResult
+	enableErr     error
+	disableErr    error
+	statusErr     error
+}
+
+func (stub *awsWorkspaceStub) Enable(_ context.Context, request app.AWSWorkspaceRequest) (app.AWSWorkspaceResult, error) {
+	stub.enables = append(stub.enables, request)
+	return stub.enableResult, stub.enableErr
+}
+
+func (stub *awsWorkspaceStub) Disable(_ context.Context, request app.AWSWorkspaceRequest) (app.AWSWorkspaceResult, error) {
+	stub.disables = append(stub.disables, request)
+	return stub.disableResult, stub.disableErr
+}
+
+func (stub *awsWorkspaceStub) Status(_ context.Context, request app.AWSWorkspaceRequest) (app.AWSWorkspaceResult, error) {
+	stub.statuses = append(stub.statuses, request)
+	return stub.statusResult, stub.statusErr
+}
+
 type gitStub struct {
 	updates  []app.WorkspaceUpdateRequest
 	statuses []app.GitStatusRequest
@@ -521,5 +548,75 @@ func TestDashboardLoadsCleanAndDirtyGitCheckoutSummary(t *testing.T) {
 	}
 	if len(workspaces.creates) != 1 || workspaces.creates[0].SourceBranch != clean.Branch || workspaces.creates[0].SourceRevision != clean.Revision {
 		t.Fatalf("create request after HEAD advance = %#v", workspaces.creates)
+	}
+}
+
+func TestDashboardLoadsNonSecretAWSWorkspaceStatus(t *testing.T) {
+	inspector := &fakeInspector{result: app.InspectResult{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project", Branch: "main", Revision: "abc123", Clean: true},
+		Plan: plan.ExecutionPlan{
+			AWS:    plan.AWSCapability{Mode: plan.AWSModeHostDefault},
+			Agents: plan.AgentPlan{Default: "codex", Allowed: []string{"codex"}},
+		},
+	}}
+	workspaces := &workspaceStub{listResult: app.WorkspaceListResult{Workspaces: []app.WorkspaceSummary{{
+		Workspace: "feature-a", State: model.StateRunning, DefaultAgent: "codex",
+	}}}}
+	aws := &awsWorkspaceStub{statusResult: app.AWSWorkspaceResult{
+		Workspace: "feature-a", Enabled: true, HostAvailability: app.AWSHostAvailable, MirrorHealth: app.AWSMirrorCurrent,
+	}}
+	dispatcher := NewDispatcher(Dependencies{Inspector: inspector, Workspaces: workspaces, AWS: aws})
+	data, err := dispatcher.loadDashboard(context.Background(), "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data.AWSCapability != plan.AWSModeHostDefault || len(data.Workspaces) != 1 {
+		t.Fatalf("AWS dashboard data = %#v", data)
+	}
+	entry := data.Workspaces[0]
+	if !entry.AWSEnabled || entry.AWSHostAvailability != app.AWSHostAvailable || entry.AWSMirrorHealth != app.AWSMirrorCurrent || len(aws.statuses) != 1 {
+		t.Fatalf("AWS workspace status = %#v, requests = %#v", entry, aws.statuses)
+	}
+
+	aws.statusErr = errors.New("raw-host-file-secret")
+	data, err = dispatcher.loadDashboard(context.Background(), "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry = data.Workspaces[0]
+	if entry.AWSEnabled || entry.AWSHostAvailability != app.AWSHostUnavailable || entry.AWSMirrorHealth != app.AWSMirrorDegraded || entry.AWSFailureCode != "status-unavailable" {
+		t.Fatalf("safe AWS status failure = %#v", entry)
+	}
+	if strings.Contains(tui.NewDashboardModel(data).View().Content, "raw-host-file-secret") {
+		t.Fatal("dashboard exposed raw AWS status error")
+	}
+}
+
+func TestExecuteAWSDashboardIntentsUseApplicationServiceAndRenderStatus(t *testing.T) {
+	aws := &awsWorkspaceStub{
+		enableResult:  app.AWSWorkspaceResult{Workspace: "feature-a", Enabled: true, HostAvailability: app.AWSHostAvailable, MirrorHealth: app.AWSMirrorCurrent},
+		disableResult: app.AWSWorkspaceResult{Workspace: "feature-a", HostAvailability: app.AWSHostUnavailable, MirrorHealth: app.AWSMirrorDisabled},
+	}
+	dispatcher := NewDispatcher(Dependencies{AWS: aws})
+	for _, action := range []string{"aws-enable", "aws-disable"} {
+		var stdout, stderr bytes.Buffer
+		exit := dispatcher.executeIntent(context.Background(), tui.Intent{Action: action, Root: "/tmp/project", Workspace: "feature-a"}, &stdout, &stderr)
+		if exit != 0 || stderr.Len() != 0 {
+			t.Fatalf("%s exit = %d, stdout = %q, stderr = %q", action, exit, stdout.String(), stderr.String())
+		}
+		for _, expected := range []string{`Workspace: "feature-a"`, "Host availability:", "Mirror health:"} {
+			if !strings.Contains(stdout.String(), expected) {
+				t.Fatalf("%s output omitted %q: %q", action, expected, stdout.String())
+			}
+		}
+	}
+	if len(aws.enables) != 1 || len(aws.disables) != 1 || aws.enables[0].Workspace != "feature-a" || aws.disables[0].Workspace != "feature-a" {
+		t.Fatalf("AWS application requests = enable %#v, disable %#v", aws.enables, aws.disables)
+	}
+
+	aws.enableErr = errors.New("safe unavailable")
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.executeIntent(context.Background(), tui.Intent{Action: "aws-enable", Root: "/tmp/project", Workspace: "feature-a"}, &stdout, &stderr); exit == 0 || !strings.Contains(stderr.String(), "safe unavailable") {
+		t.Fatalf("AWS application error exit/output = %d, %q", exit, stderr.String())
 	}
 }

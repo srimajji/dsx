@@ -38,6 +38,47 @@ func TestManifestRepositoryPersistsThreeWorkspacePeersDeterministically(t *testi
 	}
 }
 
+func TestManifestRepositoryPersistsAWSGrantAndRejectsStaleCAS(t *testing.T) {
+	root := t.TempDir()
+	repository, err := NewManifestRepository(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := fsManifestFixture(t, root, "aws", "01890f5c-7b00-7000-8000-000000000005")
+	manifest.AWSGrant = &state.AWSGrantRecord{}
+	if err := repository.CreateIntent(context.Background(), manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, found, err := repository.LoadManifest(context.Background(), manifest.ProjectID, manifest.Workspace, manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || persisted.AWSGrant == nil || persisted.AWSGrant.Enabled {
+		t.Fatalf("default-off AWS grant = found %t grant %#v", found, persisted.AWSGrant)
+	}
+
+	enabled := persisted
+	enabled.AWSGrant = &state.AWSGrantRecord{Enabled: true}
+	enabled.Operation = "aws-enable"
+	if err := repository.ReplaceManifest(context.Background(), enabled, persisted.Generation); err != nil {
+		t.Fatal(err)
+	}
+	stale := persisted
+	stale.Operation = "aws-disable"
+	if err := repository.ReplaceManifest(context.Background(), stale, persisted.Generation); model.ErrorCodeOf(err) != model.CodeConflict {
+		t.Fatalf("stale AWS grant replacement error = %v", err)
+	}
+
+	persisted, found, err = repository.LoadManifest(context.Background(), manifest.ProjectID, manifest.Workspace, manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || persisted.Generation != 2 || persisted.AWSGrant == nil || !persisted.AWSGrant.Enabled || persisted.Operation != "aws-enable" {
+		t.Fatalf("persisted enabled AWS grant = found %t manifest %#v", found, persisted)
+	}
+}
+
 func TestManifestRepositoryLegacyDecodeIsImmutable(t *testing.T) {
 	// Legacy decoding is covered in state; repository replacement must never adopt it.
 	root := t.TempDir()

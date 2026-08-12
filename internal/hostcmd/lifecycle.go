@@ -30,6 +30,10 @@ const workspaceHelp = `Usage:
   dsx workspace remove --all|--legacy-resources [--root PATH] [--force]
 `
 
+type AWSWorkspaceRequest = app.AWSWorkspaceRequest
+
+type AWSWorkspaceResult = app.AWSWorkspaceResult
+
 func (dispatcher *Dispatcher) executeWorkspace(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		return usageError(stderr, "dsx workspace", "workspace requires create, list, open, start, stop, restart, update, or remove")
@@ -362,11 +366,29 @@ func (dispatcher *Dispatcher) loadDashboard(ctx context.Context, root string) (t
 		AllowedAgents: append([]string(nil), inspected.Plan.Agents.Allowed...),
 		DefaultAgent:  inspected.Plan.Agents.Default,
 	}
+	data.AWSCapability = inspected.Plan.AWS.Mode
 	for _, workspace := range listed.Workspaces {
 		if workspace.Legacy {
 			continue
 		}
-		data.Workspaces = append(data.Workspaces, tui.DashboardWorkspace{Name: string(workspace.Workspace), State: string(workspace.State), DefaultAgent: workspace.DefaultAgent, MutationActive: workspace.MutationActive})
+		entry := tui.DashboardWorkspace{Name: string(workspace.Workspace), State: string(workspace.State), DefaultAgent: workspace.DefaultAgent, MutationActive: workspace.MutationActive}
+		if inspected.Plan.AWS.Mode == "host-default" {
+			entry.AWSHostAvailability = app.AWSHostUnavailable
+			entry.AWSMirrorHealth = app.AWSMirrorDegraded
+			entry.AWSFailureCode = "status-unavailable"
+			if dispatcher.dependencies.AWS != nil {
+				status, statusErr := dispatcher.dependencies.AWS.Status(ctx, app.AWSWorkspaceRequest{Root: inspected.Facts.CanonicalRoot, Workspace: workspace.Workspace})
+				if statusErr == nil {
+					entry.AWSEnabled = status.Enabled
+					entry.AWSHostAvailability = status.HostAvailability
+					entry.AWSMirrorHealth = status.MirrorHealth
+					entry.AWSFailureCode = status.FailureCode
+				} else if ctxErr := ctx.Err(); ctxErr != nil {
+					return tui.DashboardData{}, ctxErr
+				}
+			}
+		}
+		data.Workspaces = append(data.Workspaces, entry)
 	}
 	return data, nil
 }
@@ -435,6 +457,25 @@ func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Inte
 	if err != nil {
 		return usageError(stderr, "dsx "+intent.Action, err.Error())
 	}
+	if intent.Action == "aws-enable" || intent.Action == "aws-disable" {
+		if dispatcher.dependencies.AWS == nil {
+			return reportError(stderr, "dsx "+intent.Action, model.NewError(model.CodeUnavailable, "AWS workspace service is unavailable", nil))
+		}
+		request := app.AWSWorkspaceRequest{Root: root, Workspace: workspace}
+		var result app.AWSWorkspaceResult
+		if intent.Action == "aws-enable" {
+			result, err = dispatcher.dependencies.AWS.Enable(ctx, request)
+		} else {
+			result, err = dispatcher.dependencies.AWS.Disable(ctx, request)
+		}
+		if err != nil {
+			return reportError(stderr, "dsx "+intent.Action, err)
+		}
+		if err := renderAWSWorkspaceResult(stdout, result, "text"); err != nil {
+			return reportError(stderr, "dsx "+intent.Action, err)
+		}
+		return 0
+	}
 	if dispatcher.dependencies.Workspaces == nil {
 		return reportError(stderr, "dsx "+intent.Action, model.NewError(model.CodeUnavailable, "workspace service is unavailable", nil))
 	}
@@ -490,6 +531,24 @@ func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Inte
 		return usageError(stderr, "dsx", fmt.Sprintf("unknown terminal action %q", intent.Action))
 	}
 	return 0
+}
+
+func renderAWSWorkspaceResult(writer io.Writer, result AWSWorkspaceResult, format string) error {
+	if format == "json" {
+		return encodeJSON(writer, result)
+	}
+	if _, err := fmt.Fprintf(
+		writer,
+		"Workspace: %q\nEnabled: %t\nHost availability: %q\nMirror health: %q\nFailure code: %q\n",
+		terminal.SanitizeLine(string(result.Workspace)),
+		result.Enabled,
+		terminal.SanitizeLine(result.HostAvailability),
+		terminal.SanitizeLine(result.MirrorHealth),
+		terminal.SanitizeLine(result.FailureCode),
+	); err != nil {
+		return model.Wrap(model.CodeInternal, "write AWS workspace result", err)
+	}
+	return nil
 }
 
 func renderWorkspaceResult(writer io.Writer, result app.WorkspaceResult) error {

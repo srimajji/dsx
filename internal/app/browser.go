@@ -15,16 +15,18 @@ import (
 )
 
 const (
-	browserRole           = "browser"
-	browserMCPName        = "playwright"
-	browserMCPPort        = 8931
-	browserMCPPath        = "/mcp"
-	browserReadyTimeout   = 30 * time.Second
-	browserReadyPoll      = 250 * time.Millisecond
-	browserCleanupTimeout = 30 * time.Second
+	browserRole                 = "browser"
+	browserMCPName              = "playwright"
+	browserMCPPort              = 8931
+	browserMCPPath              = "/mcp"
+	browserReadyTimeout         = 30 * time.Second
+	browserReadyPoll            = 250 * time.Millisecond
+	browserEntrypointExecutable = "node"
+	browserEntrypointScript     = "/app/entrypoint.mjs"
+	browserCleanupTimeout       = 30 * time.Second
 )
 
-var browserEntrypoint = []string{"node", "/app/entrypoint.mjs"}
+var browserEntrypoint = []string{browserEntrypointExecutable, browserEntrypointScript}
 
 type browserSession struct {
 	Root      string
@@ -77,9 +79,12 @@ func (service *AgentService) createBrowserSession(ctx context.Context, access wo
 		return nil, model.NewError(model.CodeUnavailable, "runtime returned an unexpected browser image digest", nil)
 	}
 	spec := runtime.BrowserSpec{
-		Name: record.Name, Image: image, Entrypoint: append([]string(nil), browserEntrypoint...),
+		Name: record.Name, Image: image, Entrypoint: append([]string(nil), browserEntrypoint...), Env: nil,
 		Networks: []string{access.Network.Name}, Labels: identity.Labels(),
 		CPUs: access.Plan.Limits.CPUs, MemoryBytes: access.Plan.Limits.MemoryBytes,
+	}
+	if err := validateBrowserSpec(spec); err != nil {
+		return nil, err
 	}
 	created, err := service.workspaces.runtime.CreateBrowser(ctx, spec)
 	if err != nil {
@@ -127,6 +132,13 @@ func (service *AgentService) createBrowserSession(ctx context.Context, access wo
 	}
 	cleanupNeeded = false
 	return &browserSession{Root: access.Manifest.CanonicalRoot, Workspace: access.Manifest.Workspace, Record: record, Server: server}, nil
+}
+func validateBrowserSpec(spec runtime.BrowserSpec) error {
+	if len(spec.Env) != 0 || len(spec.Entrypoint) != 2 ||
+		spec.Entrypoint[0] != browserEntrypointExecutable || spec.Entrypoint[1] != browserEntrypointScript {
+		return model.NewError(model.CodeInternal, "browser specification violated its fixed credential-free contract", nil)
+	}
+	return nil
 }
 
 func verifyBrowserSnapshot(record state.ResourceRecord, snapshot runtime.ResourceSnapshot, network, imageDigest string, requireRunning bool) error {

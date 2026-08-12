@@ -137,11 +137,26 @@ func (server *Server) listen() (*net.UnixListener, error) {
 		return nil, errors.New("control directory is not a real directory")
 	}
 	uid, gid, ok := fileOwnership(info)
-	if !ok || uid != server.ownerUID || gid != server.gid {
+	if !ok || uid != server.ownerUID {
 		return nil, errors.New("control directory ownership is unsafe")
 	}
-	if info.Mode().Perm() != controlDirectoryMode {
-		return nil, fmt.Errorf("control directory mode must be %04o", controlDirectoryMode)
+	permissions := info.Mode().Perm()
+	if gid != server.gid {
+		if permissions&0o022 != 0 {
+			return nil, errors.New("control directory ownership is unsafe")
+		}
+		if err := os.Chown(parent, int(server.ownerUID), int(server.gid)); err != nil {
+			return nil, fmt.Errorf("normalize control directory ownership: %w", err)
+		}
+	}
+	permissions = info.Mode().Perm()
+	if permissions != controlDirectoryMode {
+		if permissions&0o022 != 0 || permissions&0o700 != 0o700 {
+			return nil, fmt.Errorf("control directory mode must be %04o", controlDirectoryMode)
+		}
+		if err := os.Chmod(parent, controlDirectoryMode); err != nil {
+			return nil, fmt.Errorf("normalize control directory permissions: %w", err)
+		}
 	}
 	if err := validateControlAncestorChain(parent, server.ownerUID); err != nil {
 		return nil, fmt.Errorf("verify control directory chain: %w", err)

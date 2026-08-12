@@ -65,12 +65,12 @@ func collectAuthorityInputs(root string, validated config.ValidatedConfig, impor
 		}
 		authority.HostMounts = append(authority.HostMounts, resolved)
 	}
-	if validated.Document.AWS.Mode == "leapp" {
-		resolved, err := bridge.ResolveLeappDirectory(validated.Document.AWS.Directory)
+	if validated.Document.AWS.Mode == plan.AWSModeHostDefault {
+		resolved, err := bridge.ResolveHostAWSDirectory(validated.Document.AWS.Directory)
 		if err != nil {
-			return plan.AuthorityInputs{}, fmt.Errorf("resolve Leapp directory %q: %w", validated.Document.AWS.Directory, err)
+			return plan.AuthorityInputs{}, fmt.Errorf("resolve host default AWS directory %q: %w", validated.Document.AWS.Directory, err)
 		}
-		authority.LeappDirectory = &plan.HostMountAuthority{
+		authority.HostDefaultAWSDirectory = &plan.HostMountAuthority{
 			DeclaredPath:  resolved.DeclaredPath,
 			CanonicalPath: resolved.CanonicalPath,
 			Identity:      resolved.Identity,

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +50,14 @@ func TestInspectConfiguredProjectBuildsHashedPlan(t *testing.T) {
 	}
 	if result.Plan.Browser == nil || result.Plan.Browser.ImageReference != standardBrowserImageReference || result.Plan.Browser.ImageDigest != standardBrowserImageDigest {
 		t.Fatalf("browser authority missing: %#v", result.Plan.Browser)
+	}
+	if result.Plan.AWS != (plan.AWSCapability{Mode: plan.AWSModeNone}) {
+		t.Fatalf("default AWS capability = %#v", result.Plan.AWS)
+	}
+	for _, grant := range result.Plan.Bridges {
+		if grant.Kind == "aws" {
+			t.Fatalf("default AWS capability leaked into BridgeGrant: %#v", grant)
+		}
 	}
 }
 
@@ -96,6 +106,77 @@ func TestInspectWithoutConfigDoesNotInventPlan(t *testing.T) {
 	}
 	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "incomplete_plan" || !strings.Contains(result.Diagnostics[0].Message, "no executable plan") {
 		t.Fatalf("diagnostics = %#v", result.Diagnostics)
+	}
+}
+
+func TestInspectHostDefaultCapabilityIgnoresCredentialAvailabilityAndContent(t *testing.T) {
+	root := canonicalTemporaryDirectory(t)
+	configDirectory := filepath.Join(root, ".dsx")
+	if err := os.Mkdir(configDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sourceDirectory := canonicalTemporaryDirectory(t)
+	configuration := fmt.Sprintf(`{
+  "schemaVersion": 1,
+  "workspace": {"root": "."},
+  "image": {"ref": "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "agents": {"default": "codex", "allowed": ["codex"]},
+  "aws": {"mode": "host-default", "directory": %q}
+}`, sourceDirectory)
+	if err := os.WriteFile(filepath.Join(configDirectory, "config.jsonc"), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := NewInspectionServiceWithDependencies(InspectionDependencies{
+		InspectProject: func(string) (projectinspect.Facts, error) {
+			return projectinspect.Facts{WorkspaceRoot: root, GitRoots: []string{"."}}, nil
+		},
+		Resolver: plan.NewResolver(),
+	})
+
+	unavailable, err := service.Inspect(context.Background(), InspectRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability := unavailable.Plan.AWS
+	if capability.Mode != plan.AWSModeHostDefault ||
+		capability.SourceDirectory != sourceDirectory ||
+		capability.SourceIdentity == "" ||
+		capability.Destination != plan.AWSGuestDestination ||
+		!capability.ReadOnly ||
+		capability.EligibleProfile != plan.AWSDefaultProfile ||
+		capability.WorkspaceDefaultEnabled ||
+		capability.AuthorityModel != plan.AWSAuthorityDynamicHostDefault {
+		t.Fatalf("host-default AWS capability = %#v", capability)
+	}
+	for _, grant := range unavailable.Plan.Bridges {
+		if grant.Kind == "aws" {
+			t.Fatalf("host-default AWS capability leaked into BridgeGrant: %#v", grant)
+		}
+	}
+
+	configSecret := "do-not-serialize-config-secret"
+	credentialSecret := "do-not-serialize-credential-secret"
+	if err := os.WriteFile(filepath.Join(sourceDirectory, "config"), []byte("[default]\nregion=us-east-1\n[profile engineering]\nregion=us-west-2\n# "+configSecret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDirectory, "credentials"), []byte("[default]\naws_access_key_id="+credentialSecret+"\n[engineering]\naws_access_key_id=named-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	available, err := service.Inspect(context.Background(), InspectRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if available.Plan.AWS != capability || available.Plan.ExecutableHash != unavailable.Plan.ExecutableHash {
+		t.Fatalf("host availability or credential content changed capability/hash: unavailable=%#v available=%#v", unavailable.Plan, available.Plan)
+	}
+	serialized, err := json.Marshal(available.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{configSecret, credentialSecret, "engineering", "named-secret", "AWS_PROFILE"} {
+		if strings.Contains(string(serialized), forbidden) {
+			t.Fatalf("inspection plan exposed host credential/profile content %q: %s", forbidden, serialized)
+		}
 	}
 }
 

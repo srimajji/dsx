@@ -258,6 +258,17 @@ func (service *AgentService) Run(ctx context.Context, request AgentRunRequest) (
 		}
 		spec.Env[key] = value
 	}
+
+	preparedExecution, err := service.workspaces.PrepareWorkspaceExecution(ctx, *access.Manifest, runtime.ExecSpec{
+		Env: harnessEnvironment(spec.Env),
+	})
+	if err != nil {
+		return result, err
+	}
+	spec.Env, err = environmentMap(preparedExecution.Env)
+	if err != nil {
+		return result, model.Wrap(model.CodeInternal, "prepare typed workspace execution environment", err)
+	}
 	result = AgentRunResult{Agent: name, Version: artifact.Version}
 	if request.BeforeExec != nil {
 		if err := request.BeforeExec(result); err != nil {
@@ -964,6 +975,24 @@ func harnessEnvironment(environment map[string]string) []string {
 		result = append(result, key+"="+environment[key])
 	}
 	return result
+}
+
+func environmentMap(environment []string) (map[string]string, error) {
+	if len(environment) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]string, len(environment))
+	for _, assignment := range environment {
+		key, value, found := strings.Cut(assignment, "=")
+		if !found || !validExecEnvironmentName(key) {
+			return nil, errors.New("invalid workspace execution environment")
+		}
+		if _, duplicate := result[key]; duplicate {
+			return nil, errors.New("duplicate workspace execution environment")
+		}
+		result[key] = value
+	}
+	return result, nil
 }
 
 func cloneEnvironment(environment map[string]string) map[string]string {

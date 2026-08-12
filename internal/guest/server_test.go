@@ -59,6 +59,28 @@ func TestServerSocketPermissionsControlRoundTripAndCleanup(t *testing.T) {
 	shutdownSupervisor(t, supervisor)
 }
 
+func TestServerNormalizesSafePreexistingControlDirectory(t *testing.T) {
+	supervisor := newTestSupervisor(t, nil)
+	socket := shortSocketPath(t)
+	parent := filepath.Dir(socket)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server, cancel, result := startTestServer(t, supervisor, socket)
+	if info, err := os.Stat(parent); err != nil || info.Mode().Perm() != controlDirectoryMode {
+		t.Fatalf("normalized control directory = info %v, err %v", info, err)
+	}
+	cancel()
+	if err := <-result; err != nil {
+		t.Fatalf("Serve() = %v", err)
+	}
+	shutdownSupervisor(t, supervisor)
+	_ = server
+}
+
 func TestServerMalformedStartDoesNotMutateGeneration(t *testing.T) {
 	supervisor := newTestSupervisor(t, nil)
 	socket := shortSocketPath(t)

@@ -1078,6 +1078,7 @@ func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
 	}
 	mountTargets := make(map[string]struct{}, len(s.Mounts))
 	workspaceVolumes := 0
+	hostAWSMirrors := 0
 	for _, mount := range s.Mounts {
 		if _, err := mountArg(mount); err != nil {
 			return "", err
@@ -1085,6 +1086,12 @@ func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
 		if mount.Authority == runtime.MountAuthorityReviewedHost {
 			if err := validReviewedHostMount(s, mount); err != nil {
 				return "", err
+			}
+		}
+		if mount.Authority == runtime.MountAuthorityHostAWSMirror {
+			hostAWSMirrors++
+			if s.HostAWSMirrorSource == "" || mount.Source != string(s.HostAWSMirrorSource) {
+				return "", errors.New("host AWS mirror source does not match the exact workspace grant")
 			}
 		}
 		if _, duplicate := mountTargets[mount.Target]; duplicate {
@@ -1095,6 +1102,9 @@ func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
 			mount.Authority == runtime.MountAuthorityVolume && !mount.ReadOnly {
 			workspaceVolumes++
 		}
+	}
+	if (s.HostAWSMirrorSource == "" && hostAWSMirrors != 0) || (s.HostAWSMirrorSource != "" && hostAWSMirrors != 1) {
+		return "", errors.New("host AWS mirror mount does not match the workspace capability")
 	}
 	if workspaceVolumes != 1 {
 		return "", errors.New("exactly one writable private workspace volume required")
@@ -1820,9 +1830,9 @@ func validMountAuthority(m runtime.Mount) error {
 			return err
 		}
 		return validGuestHelperHostDirectory(m.Source)
-	case runtime.MountAuthorityLeappMirror:
+	case runtime.MountAuthorityHostAWSMirror:
 		if m.Type != "bind" || m.Target != "/run/dsx/aws" || !m.ReadOnly {
-			return errors.New("Leapp mirror authority has an invalid type, target, or mode")
+			return errors.New("host AWS mirror authority has an invalid type, target, or mode")
 		}
 		return hostPath(runtime.HostPath(m.Source))
 	case runtime.MountAuthorityReviewedHost:

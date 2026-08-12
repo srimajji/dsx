@@ -106,6 +106,67 @@ func TestWorkspaceConfigCutover(t *testing.T) {
 	})
 }
 
+func TestAWSConfig(t *testing.T) {
+	t.Parallel()
+	base := `{"schemaVersion":1,"workspace":{"root":"."},"image":{"standard":true},"agents":{"default":"codex","allowed":["codex"]}%s}`
+
+	valid := []struct {
+		name      string
+		extra     string
+		mode      string
+		directory string
+	}{
+		{name: "absent"},
+		{name: "empty defaults to none", extra: `,"aws":{}`},
+		{name: "none", extra: `,"aws":{"mode":"none"}`, mode: "none"},
+		{
+			name:      "host default",
+			extra:     `,"aws":{"mode":"host-default","directory":"/Users/example/.aws"}`,
+			mode:      "host-default",
+			directory: "/Users/example/.aws",
+		},
+	}
+	for _, test := range valid {
+		test := test
+		t.Run("valid "+test.name, func(t *testing.T) {
+			t.Parallel()
+			validated, diagnostics := ParseBytes(test.name+".jsonc", []byte(fmt.Sprintf(base, test.extra)))
+			if len(diagnostics) != 0 {
+				t.Fatalf("ParseBytes() diagnostics = %#v", diagnostics)
+			}
+			if validated.Document.AWS.Mode != test.mode || validated.Document.AWS.Directory != test.directory {
+				t.Fatalf("AWS config = %#v, want mode %q and directory %q", validated.Document.AWS, test.mode, test.directory)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name    string
+		extra   string
+		code    string
+		pointer string
+	}{
+		{name: "directory without mode", extra: `,"aws":{"directory":"/Users/example/.aws"}`, code: "semantic", pointer: "/aws/directory"},
+		{name: "none with directory", extra: `,"aws":{"mode":"none","directory":"/Users/example/.aws"}`, code: "semantic", pointer: "/aws/directory"},
+		{name: "none with empty directory", extra: `,"aws":{"mode":"none","directory":""}`, code: "schema", pointer: "/aws/directory"},
+		{name: "host default without directory", extra: `,"aws":{"mode":"host-default"}`, code: "semantic", pointer: "/aws/directory"},
+		{name: "host default with relative directory", extra: `,"aws":{"mode":"host-default","directory":".aws"}`, code: "semantic", pointer: "/aws/directory"},
+		{name: "host default with noncanonical directory", extra: `,"aws":{"mode":"host-default","directory":"/Users/example/../example/.aws"}`, code: "semantic", pointer: "/aws/directory"},
+		{name: "legacy leapp mode", extra: `,"aws":{"mode":"leapp","directory":"/Users/example/.aws"}`, code: "schema", pointer: "/aws/mode"},
+		{name: "legacy profile", extra: `,"aws":{"mode":"host-default","directory":"/Users/example/.aws","profile":"default"}`, code: "schema", pointer: "/aws/profile"},
+		{name: "unknown field", extra: `,"aws":{"mode":"none","credentialFile":"credentials"}`, code: "schema", pointer: "/aws/credentialFile"},
+		{name: "duplicate mode", extra: `,"aws":{"mode":"none","mode":"host-default","directory":"/Users/example/.aws"}`, code: "duplicate", pointer: "/aws/mode"},
+	}
+	for _, test := range invalid {
+		test := test
+		t.Run("invalid "+test.name, func(t *testing.T) {
+			t.Parallel()
+			_, diagnostics := ParseBytes(test.name+".jsonc", []byte(fmt.Sprintf(base, test.extra)))
+			assertDiagnostic(t, diagnostics, test.code, test.pointer, true)
+		})
+	}
+}
+
 func TestDuplicateLocations(t *testing.T) {
 	t.Parallel()
 	_, diagnostics := ParseBytes("invalid-duplicate.jsonc", fixture(t, "invalid-duplicate.jsonc"))

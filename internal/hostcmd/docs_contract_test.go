@@ -21,12 +21,17 @@ func TestDocumentedCommandHelpContract(t *testing.T) {
 		want string
 	}{
 		{name: "global", args: []string{"help"}, want: "dsx workspace create NAME"},
+		{name: "global aws", args: []string{"help"}, want: "dsx aws status WORKSPACE"},
 		{name: "init", args: []string{"init", "--help"}, want: "Usage: dsx init [--root PATH]"},
 		{name: "inspect", args: []string{"inspect", "--help"}, want: "Usage: dsx inspect [--format text|json] [--root PATH]"},
 		{name: "doctor", args: []string{"doctor", "--help"}, want: "Usage: dsx doctor [--format text|json] [--require-builder]"},
 		{name: "workspace", args: []string{"workspace", "--help"}, want: "dsx workspace restart NAME"},
 		{name: "agent", args: []string{"agent", "--help"}, want: "Usage: dsx agent WORKSPACE"},
 		{name: "auth", args: []string{"auth", "--help"}, want: "dsx auth purge --agent"},
+		{name: "aws", args: []string{"aws", "--help"}, want: "dsx aws enable WORKSPACE"},
+		{name: "aws enable", args: []string{"aws", "enable", "--help"}, want: "Usage: dsx aws enable WORKSPACE"},
+		{name: "aws disable", args: []string{"aws", "disable", "--help"}, want: "Usage: dsx aws disable WORKSPACE"},
+		{name: "aws status", args: []string{"aws", "status", "--help"}, want: "Usage: dsx aws status WORKSPACE"},
 		{name: "git", args: []string{"git", "--help"}, want: "dsx git apply WORKSPACE"},
 		{name: "version", args: []string{"version", "--help"}, want: "Usage: dsx version [--json]"},
 	}

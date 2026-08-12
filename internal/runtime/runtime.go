@@ -128,17 +128,20 @@ type NetworkSpec struct {
 type WorkspaceSpec struct {
 	Name          string
 	CanonicalRoot HostPath
-	Image         Image
-	Entrypoint    []string
-	Env           []string
-	WorkingDir    GuestPath
-	User          string
-	Mounts        []Mount
-	Networks      []string
-	Ports         []PortRequest
-	Labels        []Label
-	CPUs          int
-	MemoryBytes   int64
+	// HostAWSMirrorSource is the exact app-authorized stable publication channel.
+	// It is empty when the workspace has no host AWS capability.
+	HostAWSMirrorSource HostPath
+	Image               Image
+	Entrypoint          []string
+	Env                 []string
+	WorkingDir          GuestPath
+	User                string
+	Mounts              []Mount
+	Networks            []string
+	Ports               []PortRequest
+	Labels              []Label
+	CPUs                int
+	MemoryBytes         int64
 }
 
 // BrowserSpec deliberately excludes mounts, volumes, host paths, users, and
@@ -186,10 +189,10 @@ type AuthLoginVolumeSpec struct {
 type MountAuthority string
 
 const (
-	MountAuthorityGuestHelper  MountAuthority = "guest-helper"
-	MountAuthorityLeappMirror  MountAuthority = "leapp-mirror"
-	MountAuthorityReviewedHost MountAuthority = "reviewed-host"
-	MountAuthorityVolume       MountAuthority = "volume"
+	MountAuthorityGuestHelper   MountAuthority = "guest-helper"
+	MountAuthorityHostAWSMirror MountAuthority = "host-aws-mirror"
+	MountAuthorityReviewedHost  MountAuthority = "reviewed-host"
+	MountAuthorityVolume        MountAuthority = "volume"
 )
 
 type Mount struct {

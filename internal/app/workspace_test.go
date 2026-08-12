@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srimajji/dsx/internal/bridge"
 	"github.com/srimajji/dsx/internal/gitx"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
@@ -66,6 +68,57 @@ func TestWorkspaceCreatePersistsIntentBeforeMutationAndNeverMountsHostSource(t *
 	}
 	if got := spec.Entrypoint; len(got) < 2 || got[0] != DefaultGuestHelperPath || got[1] != "serve" {
 		t.Fatalf("workspace entrypoint = %#v", got)
+	}
+}
+
+func TestWorkspaceCreateHostDefaultPlansPrivateDisabledChannelMount(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	manager := newRecordingHostAWSManager()
+	configureHostDefaultAWS(t, fixture, manager)
+	createAWSWorkspace(t, fixture, "aws-channel")
+
+	manifest := fixture.manifest("aws-channel")
+	if manifest.AWSGrant == nil || manifest.AWSGrant.Enabled {
+		t.Fatalf("new host-default grant = %#v", manifest.AWSGrant)
+	}
+	if !slices.Equal(manager.events, []string{"prepare:aws-channel"}) {
+		t.Fatalf("channel preparation events = %v", manager.events)
+	}
+	spec := fixture.runtime.workspaceSpecs["aws-channel"]
+	if spec.HostAWSMirrorSource == "" {
+		t.Fatal("workspace spec omitted stable AWS mirror source")
+	}
+	var channelMount *runtime.Mount
+	for index := range spec.Mounts {
+		if spec.Mounts[index].Target == plan.AWSGuestDestination {
+			channelMount = &spec.Mounts[index]
+			break
+		}
+	}
+	if channelMount == nil || channelMount.Source != string(spec.HostAWSMirrorSource) || channelMount.Type != "bind" || !channelMount.ReadOnly || channelMount.Authority != runtime.MountAuthorityHostAWSMirror {
+		t.Fatalf("host AWS channel mount = %#v, source = %q", channelMount, spec.HostAWSMirrorSource)
+	}
+}
+
+func TestWorkspaceCreateRollbackRemovesExactAWSChannel(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	manager := newRecordingHostAWSManager()
+	configureHostDefaultAWS(t, fixture, manager)
+	fixture.runtime.failCreateKind = runtime.ResourceWorkspace
+	manager.onRemove = func(identity bridge.LeaseIdentity) {
+		manifest := fixture.manifest(identity.Workspace)
+		if manifest.AWSGrant == nil || manifest.AWSGrant.Enabled {
+			t.Fatalf("rollback channel removal manifest = %#v", manifest)
+		}
+	}
+	if _, err := fixture.service.Create(context.Background(), WorkspaceCreateRequest{Root: fixture.root, Workspace: "aws-rollback"}); err == nil {
+		t.Fatal("host-default creation failure was accepted")
+	}
+	if !slices.Equal(manager.events, []string{"prepare:aws-rollback", "remove:aws-rollback"}) {
+		t.Fatalf("rollback channel events = %v", manager.events)
+	}
+	if manifests, _ := fixture.manifests.ListProjectManifests(context.Background(), fixture.projectID); len(manifests) != 0 {
+		t.Fatalf("rollback retained manifest: %#v", manifests)
 	}
 }
 
@@ -176,10 +229,7 @@ func TestWorkspaceRemovalProtectsUnfetchedAndLegacyCleanupFailsClosed(t *testing
 
 func TestWorkspaceCreateLowersOnlyReviewedHostMounts(t *testing.T) {
 	fixture := newWorkspaceFixture(t)
-	source, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	source := canonicalTemporaryDirectory(t)
 	authority, err := resolveHostMount(source)
 	if err != nil {
 		t.Fatal(err)
@@ -452,10 +502,7 @@ type workspaceFixture struct {
 
 func newWorkspaceFixture(t *testing.T) *workspaceFixture {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := canonicalTemporaryDirectory(t)
 	if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +570,7 @@ func manifestKey(project model.ProjectID, workspace model.WorkspaceName, run mod
 func (repository *memoryWorkspaceManifests) put(manifest state.Manifest) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
-	repository.values[manifestKey(manifest.ProjectID, manifest.Workspace, manifest.RunID)] = manifest
+	repository.values[manifestKey(manifest.ProjectID, manifest.Workspace, manifest.RunID)] = cloneWorkspaceTestManifest(manifest)
 }
 func (repository *memoryWorkspaceManifests) CreateIntent(_ context.Context, manifest state.Manifest) error {
 	if err := state.ValidateManifest(manifest); err != nil {
@@ -535,14 +582,14 @@ func (repository *memoryWorkspaceManifests) CreateIntent(_ context.Context, mani
 	if _, ok := repository.values[key]; ok {
 		return errors.New("duplicate")
 	}
-	repository.values[key] = manifest
+	repository.values[key] = cloneWorkspaceTestManifest(manifest)
 	return nil
 }
 func (repository *memoryWorkspaceManifests) LoadManifest(_ context.Context, p model.ProjectID, w model.WorkspaceName, r model.RunID) (state.Manifest, bool, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	value, ok := repository.values[manifestKey(p, w, r)]
-	return value, ok, nil
+	return cloneWorkspaceTestManifest(value), ok, nil
 }
 func (repository *memoryWorkspaceManifests) ReplaceManifest(_ context.Context, manifest state.Manifest, expected uint64) error {
 	repository.mu.Lock()
@@ -556,7 +603,7 @@ func (repository *memoryWorkspaceManifests) ReplaceManifest(_ context.Context, m
 		return err
 	}
 	manifest.Generation = expected + 1
-	repository.values[key] = manifest
+	repository.values[key] = cloneWorkspaceTestManifest(manifest)
 	return nil
 }
 func (repository *memoryWorkspaceManifests) ListProjectManifests(_ context.Context, p model.ProjectID) ([]state.Manifest, error) {
@@ -565,7 +612,7 @@ func (repository *memoryWorkspaceManifests) ListProjectManifests(_ context.Conte
 	values := make([]state.Manifest, 0)
 	for _, value := range repository.values {
 		if value.ProjectID == p {
-			values = append(values, value)
+			values = append(values, cloneWorkspaceTestManifest(value))
 		}
 	}
 	sort.Slice(values, func(i, j int) bool { return values[i].Workspace < values[j].Workspace })
@@ -576,7 +623,7 @@ func (repository *memoryWorkspaceManifests) ListAllManifests(context.Context) ([
 	defer repository.mu.Unlock()
 	values := make([]state.Manifest, 0, len(repository.values))
 	for _, value := range repository.values {
-		values = append(values, value)
+		values = append(values, cloneWorkspaceTestManifest(value))
 	}
 	return values, nil
 }
@@ -851,5 +898,70 @@ func TestWorkspaceCreateRejectsDisplayedSourceRevisionChangeBeforeMutation(t *te
 	}
 	if len(manifests) != 0 {
 		t.Fatalf("manifest created before source identity check: %#v", manifests)
+	}
+}
+
+func TestWorkspaceRemoveRevokesAWSBeforePublicationAndResourceCleanup(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	manager := newRecordingHostAWSManager()
+	configureHostDefaultAWS(t, fixture, manager)
+	createAWSWorkspace(t, fixture, "remove-aws")
+	if _, err := fixture.service.EnableAWS(context.Background(), AWSWorkspaceRequest{Root: fixture.root, Workspace: "remove-aws"}); err != nil {
+		t.Fatal(err)
+	}
+	manager.onRemove = func(identity bridge.LeaseIdentity) {
+		manifest := fixture.manifest(identity.Workspace)
+		if manifest.AWSGrant == nil || manifest.AWSGrant.Enabled {
+			t.Fatalf("manifest at publication removal = %#v", manifest)
+		}
+		if fixture.runtime.deleteCalls != 0 {
+			t.Fatalf("runtime cleanup preceded AWS removal: %d deletes", fixture.runtime.deleteCalls)
+		}
+	}
+	result, err := fixture.service.Remove(context.Background(), WorkspaceRemoveRequest{
+		Root: fixture.root, Workspace: "remove-aws", Confirmed: true, DiscardUnfetched: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.DeletedManifest || manager.state("remove-aws").State != "" {
+		t.Fatalf("remove result=%#v mirror=%#v", result, manager.state("remove-aws"))
+	}
+}
+
+func TestWorkspaceInternalGitTemporaryStartKeepsAWSUnpublished(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	manager := newRecordingHostAWSManager()
+	configureHostDefaultAWS(t, fixture, manager)
+	createAWSWorkspace(t, fixture, "git-aws")
+	if _, err := fixture.service.Stop(context.Background(), WorkspaceStopRequest{Root: fixture.root, Workspace: "git-aws"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.EnableAWS(context.Background(), AWSWorkspaceRequest{Root: fixture.root, Workspace: "git-aws"}); err != nil {
+		t.Fatal(err)
+	}
+	manager.events = nil
+	fixture.runtime.startHook = func() {
+		if !slices.Equal(manager.events, []string{"disable:git-aws"}) || manager.state("git-aws").State != AWSMirrorDisabled {
+			t.Fatalf("temporary start exposed AWS: events=%v state=%#v", manager.events, manager.state("git-aws"))
+		}
+	}
+	access, unlock, finish, err := fixture.service.workspaceGitAccess(context.Background(), fixture.root, "git-aws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.workspaceCommand(context.Background(), access.Workspace, []string{"/usr/bin/true"}, "/workspace", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.runtime.execs) == 0 {
+		t.Fatal("internal command was not executed")
+	}
+	for _, environment := range fixture.runtime.execs[len(fixture.runtime.execs)-1].Env {
+		if strings.HasPrefix(environment, "AWS_") {
+			t.Fatalf("internal Git command received AWS environment: %v", fixture.runtime.execs[len(fixture.runtime.execs)-1].Env)
+		}
+	}
+	if err := errors.Join(finish(false), unlock()); err != nil {
+		t.Fatal(err)
 	}
 }

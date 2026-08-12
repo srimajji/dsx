@@ -24,11 +24,6 @@ func (pureResolver) Resolve(_ context.Context, input ResolveInput) (ExecutionPla
 	if err != nil {
 		return resolved, nil, err
 	}
-	for _, grant := range resolved.Bridges {
-		if grant.Kind == "aws" {
-			return resolved, []config.Diagnostic{{Severity: "warning", Code: "aws_all_profiles_readable", Path: "/aws", Message: "AWS/Leapp access exposes every profile in the approved directory; AWS_PROFILE selects a default but is not credential isolation"}}, nil
-		}
-	}
 	return resolved, nil, nil
 }
 
@@ -69,6 +64,7 @@ func ResolvePlan(input ResolveInput) (ExecutionPlan, error) {
 		Volumes:         make([]ResolvedVolume, 0),
 		Auth:            AuthPlan{Imports: make([]string, 0)},
 		Ports:           make([]PortRequest, 0),
+		AWS:             AWSCapability{Mode: AWSModeNone},
 		Bridges:         make([]BridgeGrant, 0),
 		Provenance:      make(config.Provenance),
 	}
@@ -96,6 +92,10 @@ func ResolvePlan(input ResolveInput) (ExecutionPlan, error) {
 		return ExecutionPlan{}, err
 	}
 	plan.Browser, err = resolveBrowser(input, plan.Provenance)
+	if err != nil {
+		return ExecutionPlan{}, err
+	}
+	plan.AWS, err = resolveAWSCapability(input, plan.Provenance)
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
@@ -654,6 +654,52 @@ func resolveBrowser(input ResolveInput, provenance config.Provenance) (*BrowserP
 	return &BrowserPlan{ImageReference: input.Authority.BrowserImageReference, ImageDigest: digest}, nil
 }
 
+func resolveAWSCapability(input ResolveInput, provenance config.Provenance) (AWSCapability, error) {
+	mode := input.Config.Document.AWS.Mode
+	if mode == "" {
+		mode = AWSModeNone
+	}
+	switch mode {
+	case AWSModeNone:
+		if input.Authority.HostDefaultAWSDirectory != nil {
+			return AWSCapability{}, fmt.Errorf("host default AWS directory authority exists while AWS capability is disabled")
+		}
+		putSource(provenance, "/aws/mode", standardSource)
+		if input.Config.Document.AWS.Mode != "" {
+			putSource(provenance, "/aws/mode", projectSource(input.Config, "/aws/mode"))
+		}
+		return AWSCapability{Mode: AWSModeNone}, nil
+	case AWSModeHostDefault:
+		authority := input.Authority.HostDefaultAWSDirectory
+		if authority == nil || authority.DeclaredPath == "" || authority.CanonicalPath == "" || authority.Identity == "" {
+			return AWSCapability{}, fmt.Errorf("host default AWS directory authority is incomplete")
+		}
+		if authority.DeclaredPath != input.Config.Document.AWS.Directory {
+			return AWSCapability{}, fmt.Errorf("host default AWS directory authority does not match configured directory")
+		}
+		putSource(provenance, "/aws/mode", projectSource(input.Config, "/aws/mode"))
+		putSource(provenance, "/aws/source_directory", projectSource(input.Config, "/aws/directory"))
+		putSource(provenance, "/aws/source_identity", detectedSource)
+		putSource(provenance, "/aws/destination", standardSource)
+		putSource(provenance, "/aws/read_only", standardSource)
+		putSource(provenance, "/aws/eligible_profile", standardSource)
+		putSource(provenance, "/aws/workspace_default_enabled", standardSource)
+		putSource(provenance, "/aws/authority_model", standardSource)
+		return AWSCapability{
+			Mode:                    AWSModeHostDefault,
+			SourceDirectory:         authority.CanonicalPath,
+			SourceIdentity:          authority.Identity,
+			Destination:             AWSGuestDestination,
+			ReadOnly:                true,
+			EligibleProfile:         AWSDefaultProfile,
+			WorkspaceDefaultEnabled: false,
+			AuthorityModel:          AWSAuthorityDynamicHostDefault,
+		}, nil
+	default:
+		return AWSCapability{}, fmt.Errorf("unsupported AWS capability mode %q", mode)
+	}
+}
+
 func resolveBridges(input ResolveInput, imports importedLayer, provenance config.Provenance) ([]BridgeGrant, error) {
 	var internet selected[bool]
 	internet.choose(input.Defaults.Internet, standardSource, PriorityDefault)
@@ -676,20 +722,6 @@ func resolveBridges(input ResolveInput, imports importedLayer, provenance config
 		bridges = append(bridges, sourcedBridge{grant: BridgeGrant{Kind: "host", Name: grant.Name, Destination: grant.Destination, Port: grant.Port}, source: map[string]config.SourceRef{
 			"kind": projectSource(input.Config, prefix), "name": projectSource(input.Config, prefix+"/name"), "destination": projectSource(input.Config, prefix+"/destination"), "port": projectSource(input.Config, prefix+"/port"), "read_only": standardSource,
 		}})
-	}
-	if input.Config.Document.AWS.Mode == "leapp" {
-		authority := input.Authority.LeappDirectory
-		if authority == nil || authority.DeclaredPath == "" || authority.CanonicalPath == "" || authority.Identity == "" {
-			return nil, fmt.Errorf("Leapp directory authority is incomplete")
-		}
-		if authority.DeclaredPath != input.Config.Document.AWS.Directory {
-			return nil, fmt.Errorf("Leapp directory authority does not match configured directory")
-		}
-		bridges = append(bridges, sourcedBridge{grant: BridgeGrant{Kind: "aws", Name: input.Config.Document.AWS.Profile, Destination: authority.CanonicalPath, SourceIdentity: authority.Identity, ReadOnly: true}, source: map[string]config.SourceRef{
-			"kind": projectSource(input.Config, "/aws/mode"), "name": projectSource(input.Config, "/aws/profile"), "destination": projectSource(input.Config, "/aws/directory"), "source_identity": detectedSource, "read_only": projectSource(input.Config, "/aws/mode"),
-		}})
-	} else if input.Authority.LeappDirectory != nil {
-		return nil, fmt.Errorf("Leapp directory authority exists without an AWS grant")
 	}
 	sort.Slice(bridges, func(i, j int) bool {
 		if bridges[i].grant.Kind != bridges[j].grant.Kind {

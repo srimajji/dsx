@@ -22,6 +22,115 @@ const authHelp = `Usage:
   dsx auth purge --agent omp|codex|claude|opencode [--root PATH] [--force]
 `
 
+const awsHelp = `Usage:
+  dsx aws enable WORKSPACE [--root PATH]
+  dsx aws disable WORKSPACE [--root PATH]
+  dsx aws status WORKSPACE [--root PATH] [--format text|json]
+`
+
+const awsEnableHelp = `Usage: dsx aws enable WORKSPACE [--root PATH]
+`
+
+const awsDisableHelp = `Usage: dsx aws disable WORKSPACE [--root PATH]
+`
+
+const awsStatusHelp = `Usage: dsx aws status WORKSPACE [--root PATH] [--format text|json]
+`
+
+func (dispatcher *Dispatcher) executeAWS(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return usageError(stderr, "dsx aws", "aws requires enable, disable, or status")
+	}
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		if len(args) != 1 {
+			return usageError(stderr, "dsx aws", "aws help does not accept arguments")
+		}
+		if _, err := io.WriteString(stdout, awsHelp); err != nil {
+			return reportError(stderr, "dsx aws", model.Wrap(model.CodeInternal, "write help", err))
+		}
+		return 0
+	}
+	switch args[0] {
+	case "enable", "disable", "status":
+		return dispatcher.executeAWSWorkspace(ctx, args[0], args[1:], stdout, stderr)
+	default:
+		return usageError(stderr, "dsx aws", fmt.Sprintf("unknown aws command %q", args[0]))
+	}
+}
+
+func (dispatcher *Dispatcher) executeAWSWorkspace(ctx context.Context, operation string, args []string, stdout, stderr io.Writer) int {
+	command := "dsx aws " + operation
+	var operationHelp string
+	switch operation {
+	case "enable":
+		operationHelp = awsEnableHelp
+	case "disable":
+		operationHelp = awsDisableHelp
+	case "status":
+		operationHelp = awsStatusHelp
+	default:
+		return reportError(stderr, command, model.NewError(model.CodeInternal, "unreachable AWS workspace operation", nil))
+	}
+	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
+		if _, err := io.WriteString(stdout, operationHelp); err != nil {
+			return reportError(stderr, command, model.Wrap(model.CodeInternal, "write help", err))
+		}
+		return 0
+	}
+	if len(args) == 0 {
+		return usageError(stderr, command, operation+" requires a workspace name")
+	}
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		return usageError(stderr, command, "help does not accept arguments")
+	}
+	workspace, err := model.ParseWorkspaceName(args[0])
+	if err != nil {
+		return usageError(stderr, command, err.Error())
+	}
+	flags := newFlagSet("aws " + operation)
+	root := flags.String("root", ".", "project root")
+	format := "text"
+	if operation == "status" {
+		flags.StringVar(&format, "format", "text", "output format: text or json")
+	}
+	if exit, done := parseFlags(flags, args[1:], stdout, stderr, operationHelp); done {
+		return exit
+	}
+	if flags.NArg() != 0 {
+		return usageError(stderr, command, operation+" does not accept extra arguments")
+	}
+	if err := validateRoot(*root); err != nil {
+		return reportError(stderr, command, err)
+	}
+	if operation == "status" {
+		if err := validateFormat(format); err != nil {
+			return reportError(stderr, command, err)
+		}
+	}
+	if dispatcher == nil || dispatcher.dependencies.AWS == nil {
+		return reportError(stderr, command, model.NewError(model.CodeUnavailable, "AWS workspace service is unavailable", nil))
+	}
+	request := AWSWorkspaceRequest{Root: *root, Workspace: workspace}
+	var result AWSWorkspaceResult
+	switch operation {
+	case "enable":
+		result, err = dispatcher.dependencies.AWS.Enable(ctx, request)
+	case "disable":
+		result, err = dispatcher.dependencies.AWS.Disable(ctx, request)
+	case "status":
+		result, err = dispatcher.dependencies.AWS.Status(ctx, request)
+	default:
+		return reportError(stderr, command, model.NewError(model.CodeInternal, "unreachable AWS workspace operation", nil))
+	}
+	if err != nil {
+		return reportError(stderr, command, err)
+	}
+	if err := renderAWSWorkspaceResult(stdout, result, format); err != nil {
+		return reportError(stderr, command, err)
+	}
+	return 0
+}
+
 func (dispatcher *Dispatcher) executeAuth(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		return usageError(stderr, "dsx auth", "auth requires status, import, login, refresh, or purge")

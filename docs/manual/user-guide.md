@@ -113,6 +113,10 @@ A representative configuration is:
   "auth": {
     "imports": ["omp", "codex", "opencode"]
   },
+  "aws": {
+    "mode": "host-default",
+    "directory": "/Users/example/.aws"
+  },
   "network": { "internet": true, "hostGrants": [] },
   "ports": [
     {
@@ -147,8 +151,8 @@ With a terminal, bare `dsx` opens setup for an unconfigured project or the dashb
 
 Setup is a three-step flow:
 
-1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default agent, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI.
-2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews scroll without truncation and cannot be approved before the complete content has been viewed.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default agent, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI. Setup also asks whether the project may allow selected workspaces to follow the host AWS `default`; this authorizes only the capability, never a workspace grant.
+2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. For `host-default`, it also shows the approved canonical source and identity, reserved read-only guest destination, eligible profile `default`, new-workspace default **Disabled**, and dynamic identity warning. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews scroll without truncation and cannot be approved before the complete content has been viewed.
 3. Verify Apple Container, persist configuration and approval, prepare DSX Standard when required, and open the dashboard.
 
 Authentication import remains a separate explicit approval. Setup does not silently import credentials. No configuration, approval, credential, or runtime resource is persisted before final confirmation. A post-confirmation Apple runtime preflight must succeed before project mutation.
@@ -165,7 +169,8 @@ The dashboard shows:
 - source branch and revision;
 - workspace default and project-allowed agents;
 - final URLs and published ports;
-- unfetched or unresolved-work warnings; and
+- unfetched or unresolved-work warnings;
+- AWS grant and non-secret availability state; and
 - `Legacy — cleanup only` resources.
 
 Actions for the selected workspace are state-aware:
@@ -181,6 +186,8 @@ Actions for the selected workspace are state-aware:
 | **g** | Review Git status or diff. |
 | **d** | Remove. |
 | **q** | Quit. |
+
+The dashboard also exposes **Enable AWS** or **Disable AWS** for the selected workspace. These TUI actions record intent and use the same workspace lifecycle path as the CLI.
 
 Update and restart are disabled while another lifecycle mutation is active. A workspace needing conflict resolution remains openable.
 
@@ -217,6 +224,9 @@ Before handing the terminal to an interactive workspace shell or agent, the TUI 
 | `dsx auth login --agent AGENT` | Perform an explicit DSX-scoped login. |
 | `dsx auth refresh --agent AGENT` | Refresh canonical project credentials through the harness adapter. |
 | `dsx auth purge --agent AGENT` | Confirm removal of canonical credentials and inactive copies. |
+| `dsx aws status WORKSPACE` | Report that workspace's grant and non-secret host-default availability or failure state. |
+| `dsx aws enable WORKSPACE` | Grant one workspace access to the current and continuously refreshed host default. |
+| `dsx aws disable WORKSPACE` | Revoke one workspace and remove its private AWS mirror. |
 | `dsx git status WORKSPACE [--repo MEMBER]` | Show source, result, dirty, rebase, fingerprint, and fetch state. |
 | `dsx git diff WORKSPACE [--repo MEMBER]` | Render bounded, terminal-safe changes. |
 | `dsx git fetch WORKSPACE [--repo MEMBER]` | Import verified committed history into the named host ref. |
@@ -461,11 +471,35 @@ Workspace create, start, and restart do not implicitly restore long-running proj
 
 Sibling workspace networks are not bridged. A browser connects only to the selected workspace network.
 
-### 10.3 AWS and Leapp
+### 10.3 Default-only host AWS
 
-`aws.mode: "leapp"` is opt-in. The reviewed source directory must resolve to the canonical physical directory containing the required standard AWS files. DSX copies a stable paired generation into private state and exposes only that mirror read-only. Optional `aws.profile` sets standard `AWS_PROFILE`; it is convenience, not credential isolation, because every profile in the approved files may be readable.
+The project configuration has only two AWS modes:
 
-Browser VMs never receive AWS state. DSX never prints credential values.
+- `aws.mode: "none"` (the default) authorizes no host AWS access; and
+- `aws.mode: "host-default"` authorizes the project capability to offer selected workspaces the standard host AWS `default` from the approved canonical `aws.directory`.
+
+No profile name is configurable in this increment. `host-default` extracts only `[default]` from the standard credentials and config files, does not set `AWS_PROFILE`, and ignores all named sections. Named profiles, `--profile` switching, and identity pinning are future work.
+
+Project setup does not enable AWS in any workspace. Every new workspace starts with AWS access disabled. The approval must say that the capability is for selected workspaces only; new workspaces remain disabled; Leapp Desktop (or a compatible provider) must keep one complete temporary `default` active for enablement and rotation; switching the host default changes every AWS-enabled running workspace without another DSX approval or workspace restart; and named profiles are unavailable. The approved canonical source directory and identity, reserved guest destination `/run/dsx/aws`, read-only mode, eligible profile `default`, default-off state, and `dynamic-host-default` authority model are executable authority covered by the project approval hash. Host availability and credential bytes are not.
+
+DSX integrates only with the provider's standard-file output. It never starts, stops, logs into, or otherwise controls Leapp or another provider. Enabling requires a valid complete temporary host `default`:
+
+```console
+$ dsx aws status feature-a
+$ dsx aws enable feature-a
+$ dsx aws status feature-a
+$ dsx aws disable feature-a
+```
+
+`status` exposes the durable workspace grant plus only `available`, `unavailable`, or a stable non-secret failure code. It never emits credential values. The dashboard's selected-workspace **Enable AWS** and **Disable AWS** actions are equivalent to the CLI routes; the TUI records intent and uses the same lifecycle path.
+
+An enabled running workspace owns a private mirror helper. It takes bounded stable snapshots, filters `default`, and atomically publishes complete config-and-credentials generations read-only at `/run/dsx/aws`. A stable replacement of the host default propagates continuously to every AWS-enabled running workspace without a DSX command, reapproval, or restart. This is deliberately dynamic authority: the effective account or role may change when the provider switches `default`.
+
+The workspace grant persists across stop and restart. Stop terminates the helper and live publication while preserving the non-secret grant. Start and restart perform a fresh complete sync before exposing a shell or agent. Disable records revocation before terminating the helper and deleting that workspace's exact mirror. Remove cleans up the exact grant, helper, and mirror along with the proven workspace resources. A stable removal of host `default` revokes published credentials rather than retaining stale bytes.
+
+An AWS-disabled workspace has no AWS files, AWS environment, mirror helper, or host-source access. Siblings do not share mirror state, and enabling or disabling one leaves the others' grants unchanged. Browser VMs never receive AWS files, environment, or mirror access, even for an agent session attached to an AWS-enabled workspace.
+
+If enable, start, or restart reports that the host default is unavailable, start or renew one temporary `default` session in Leapp Desktop (or a compatible provider), then run `dsx aws status WORKSPACE`. For a source-identity failure, restore the reviewed canonical directory; changing it requires project reapproval. For an unexpected AWS identity, inspect the provider's active `default` and disable affected workspaces—the first increment intentionally follows that dynamic alias.
 
 ### 10.4 Published ports
 

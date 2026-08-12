@@ -704,6 +704,9 @@ func selectedCapabilities(resolved plan.ExecutionPlan) []string {
 	if len(resolved.Auth.Imports) > 0 {
 		capabilities = append(capabilities, "credentials")
 	}
+	if resolved.AWS.Mode == plan.AWSModeHostDefault {
+		capabilities = append(capabilities, "aws")
+	}
 	if resolved.Browser != nil {
 		capabilities = append(capabilities, "browser")
 	}

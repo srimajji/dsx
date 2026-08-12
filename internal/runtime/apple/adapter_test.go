@@ -880,6 +880,96 @@ func TestWorkspaceAllowsOnlyPinnedRootGuestSupervisor(t *testing.T) {
 		t.Fatal("modified root supervisor authority was accepted")
 	}
 }
+func TestWorkspaceHostAWSMirrorMountRequiresExactCapability(t *testing.T) {
+	helperRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(helperRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(helperRoot, "dsx-guest"), []byte("helper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity := oi(t, runtime.ResourceWorkspace, "workspace")
+	spec := runtime.WorkspaceSpec{
+		Name: identity.Name(), Image: runtime.Image{Reference: "image:tag", Digest: "sha256:" + strings.Repeat("a", 64)},
+		Entrypoint: []string{
+			"/usr/local/libexec/dsx/dsx-guest", "serve",
+			"--socket", "/run/dsx/control.sock",
+			"--child-uid", "501", "--child-gid", "20",
+			"--initialize-workspace", "/workspace",
+		},
+		WorkingDir: "/workspace", User: "0:0", Labels: identity.Labels(),
+		Networks: []string{oi(t, runtime.ResourceNetwork, "network").Name()},
+		Mounts: []runtime.Mount{
+			{Source: helperRoot, Target: "/usr/local/libexec/dsx", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityGuestHelper},
+			{Source: "dsx-owned-workspace", Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume},
+		},
+	}
+	if _, err := validWorkspace(spec); err != nil {
+		t.Fatalf("AWS-none workspace rejected: %v", err)
+	}
+	for _, mount := range spec.Mounts {
+		if mount.Authority == runtime.MountAuthorityHostAWSMirror {
+			t.Fatal("AWS-none workspace received a host AWS publication mount")
+		}
+	}
+
+	stateRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableChannel := filepath.Join(stateRoot, "host-aws-workspaces", "aaaaaaaaaaaaaaaaaaaa", "main", "01890f5c-7b00-7000-8000-000000000001", "publication")
+	if err := os.MkdirAll(stableChannel, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec.HostAWSMirrorSource = runtime.HostPath(stableChannel)
+	spec.Mounts = append(spec.Mounts, runtime.Mount{
+		Source: stableChannel, Target: "/run/dsx/aws", Type: "bind", ReadOnly: true,
+		Authority: runtime.MountAuthorityHostAWSMirror,
+	})
+	if _, err := validWorkspace(spec); err != nil {
+		t.Fatalf("disabled host-default workspace rejected: %v", err)
+	}
+	if len(spec.Env) != 0 {
+		t.Fatalf("disabled host-default workspace received AWS environment: %#v", spec.Env)
+	}
+	if argument, err := mountArg(spec.Mounts[len(spec.Mounts)-1]); err != nil ||
+		argument != "type=bind,source="+stableChannel+",target=/run/dsx/aws,readonly" {
+		t.Fatalf("host AWS publication serialization = %q, %v", argument, err)
+	}
+
+	missing := spec
+	missing.Mounts = missing.Mounts[:len(missing.Mounts)-1]
+	if _, err := validWorkspace(missing); err == nil {
+		t.Fatal("host-default capability without its exact publication mount was accepted")
+	}
+	ungranted := spec
+	ungranted.HostAWSMirrorSource = ""
+	if _, err := validWorkspace(ungranted); err == nil {
+		t.Fatal("host AWS publication mount without a workspace capability was accepted")
+	}
+	replaced := spec
+	replaced.Mounts = append([]runtime.Mount(nil), spec.Mounts...)
+	replaced.Mounts[len(replaced.Mounts)-1].Source = filepath.Join(stateRoot, "host-source")
+	if _, err := validWorkspace(replaced); err == nil {
+		t.Fatal("host AWS source replacement was accepted")
+	}
+	for name, mutate := range map[string]func(*runtime.Mount){
+		"writable":     func(mount *runtime.Mount) { mount.ReadOnly = false },
+		"wrong target": func(mount *runtime.Mount) { mount.Target = "/run/dsx/aws-other" },
+		"wrong type":   func(mount *runtime.Mount) { mount.Type = "volume" },
+	} {
+		mutated := spec
+		mutated.Mounts = append([]runtime.Mount(nil), spec.Mounts...)
+		mutate(&mutated.Mounts[len(mutated.Mounts)-1])
+		if _, err := validWorkspace(mutated); err == nil {
+			t.Errorf("%s host AWS publication mount was accepted", name)
+		}
+	}
+}
+
 func TestWorkspaceAllowsOnlyNarrowReviewedHostMountOutsideSourceAndHome(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

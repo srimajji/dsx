@@ -258,6 +258,7 @@ Project onboarding configures reusable defaults for:
 - Browser capability and policy.
 - Network trust grants.
 - Supported host authentication imports.
+- Default-only host AWS capability; workspace grants remain separate runtime state.
 
 Setup writes the project contract to:
 
@@ -307,6 +308,164 @@ The approval review must show:
 
 The approval completed during onboarding authorizes the immediately following create action when the executable plan is unchanged. Port changes and other executable changes require review and approval under the same rules.
 
+#### Default-only host AWS capability and per-workspace grants
+
+AWS access is a two-level authority. Project setup may authorize the ability to follow the host's standard AWS `default` profile, but that approval does not grant AWS access to any workspace. Every workspace starts AWS-disabled, and a durable workspace-specific grant selects the workspaces that may use the approved capability.
+
+The JSONC contract accepts only:
+
+```jsonc
+{
+  "aws": {
+    "mode": "host-default",
+    "directory": "/Users/example/.aws"
+  }
+}
+```
+
+`none` is the default. `host-default` is explicit. The former `leapp` mode and `profile` field are invalid; there is no compatibility alias. Leapp is only the first proven provider of temporary credentials in standard AWS files. DSX does not integrate with the Leapp executable, database, private configuration, session commands, Google credentials, cookies, SAML assertions, MFA responses, or browser state.
+
+The resolved project plan carries a secret-free `plan.AWSCapability` directly on `plan.ExecutionPlan`; AWS is not a `BridgeGrant`. Network bridge grants remain transport authorities and cannot express credential authority. The capability has exactly these approval-relevant authority fields:
+
+```text
+AWSCapability
+  mode                       none | host-default
+  source_directory           approved canonical physical directory
+  source_identity            approved directory device/inode/owner identity
+  guest_destination          /run/dsx/aws
+  read_only                  true
+  eligible_profile           default
+  workspace_default_enabled  false
+  authority_model            dynamic-host-default
+```
+
+`none` resolves to the zero, disabled `AWSCapability`, with no source authority or guest publication authority. `host-default` requires every field above and fails closed if the source cannot be canonicalized and bound to its physical identity. The executable projection and configuration hash include every authority field, including the reserved destination, `read_only`, eligible profile, workspace default, and authority model. Host availability, file contents, credential values, timestamps, expiry values, helper health, and workspace grant state are runtime observations and never enter the reusable project plan or hash.
+
+The complete project approval must render every authority field and say:
+
+```text
+AWS host default
+  Mode                        host-default
+  Source directory            <approved canonical physical directory>
+  Source identity             <approved device/inode/owner identity>
+  Guest destination           /run/dsx/aws
+  Access                      Read-only
+  Eligible profile            default only
+  Default for new workspaces  Disabled
+  Authority model             dynamic-host-default
+
+Scope
+  Available to selected workspaces only.
+  New workspaces start with AWS access disabled.
+
+Host requirement
+  Leapp Desktop or a compatible provider must keep a temporary default
+  session active for enablement and credential rotation.
+
+Warning
+  Switching the host default changes AWS authority in every AWS-enabled
+  running workspace without another DSX approval or workspace restart.
+  Named profiles are unavailable.
+```
+
+This is intentionally a `dynamic-host-default` authority, not identity pinning. A stable replacement of `default` may change the account or role used by all AWS-enabled running workspaces. DSX does not attempt to classify that replacement as same-role rotation versus a role or account switch.
+
+Each workspace has a separate, durable, non-secret AWS grant stored in its ownership-scoped workspace state. The grant records the project ID, workspace name, desired enabled state, and state generation needed for atomic compare-and-replace. It is not an input to the project executable projection or approval hash. It persists across stop and restart, is deleted with exact proven workspace ownership during removal, and never contains paths to credential files, credential values, source snapshots, account IDs, role names, or expiry values. Project `host-default` mode makes a grant eligible; it never changes the default disabled state or silently enables an existing workspace.
+
+The user intents are:
+
+```console
+dsx aws enable WORKSPACE
+dsx aws disable WORKSPACE
+```
+
+The workspace TUI exposes **Enable AWS** and **Disable AWS** for the selected workspace. The TUI remains intent-only: it may render non-secret capability, availability, grant, and helper status and return an enable or disable intent, but it must not write manifests, inspect credential bytes, start helpers, or mutate runtime resources. `hostcmd` dispatches the intent through an application-facing AWS workspace command port; `app` owns workspace mutation locking, write-ahead grant persistence, source validation, helper coordination, process-environment composition, rollback, and reconciliation.
+
+The composition root keeps those responsibilities behind narrow ports:
+
+- An AWS workspace command port used by CLI and TUI dispatch for enable, disable, and non-secret status.
+- A durable AWS grant repository owned by `app`, using the same atomic, generation-checked, ownership-scoped state rules as other workspace mutations.
+- A descriptor-bound source and default-profile parser in the host bridge boundary.
+- A workspace mirror-manager port that ensures, observes, and stops exactly one independently owned helper and publication root.
+- A workspace process-composition port that decides whether a newly launched shell, agent, setup command, or managed process receives AWS file environment.
+- The runtime adapter's create-time mount port, which accepts only the reserved DSX AWS publication authority described below and never accepts the approved host AWS directory as a workspace mount.
+
+The application service is the only layer allowed to compose these ports into a mutation. A TUI model, renderer, or command parser never receives the grant repository, mirror manager, or runtime mutator directly.
+
+##### Descriptor-bound default-only source parsing
+
+The approved source is one canonical physical directory containing bounded regular `config` and `credentials` files owned by the current user. Each synchronization opens the approved directory descriptor without following symlinks, verifies the approved device/inode/owner identity, opens both files relative to that descriptor, and rejects symlinks, non-regular files, ownership changes, replacements, duplicates, malformed input, oversized input, and unstable paired reads.
+
+DSX parses both complete files structurally and emits only `[default]` from each. Named sections are ignored and never serialized. The credentials section must contain the complete temporary STS set:
+
+```text
+aws_access_key_id
+aws_secret_access_key
+aws_session_token
+```
+
+A missing session token or key makes the profile unavailable. Long-lived key-only credentials, `credential_process`, `credential_source`, `source_profile`, `web_identity_token_file`, SSO references or caches, role chains, external files or processes, duplicate sections, duplicate keys, and unknown authority-bearing references fail closed. The config `default` section may retain bounded profile-local, non-secret settings such as `region` and `output`.
+
+Credential bytes stay inside the descriptor-bound read and the selected workspace's private publication path. They never appear in configuration, plans, hashes, manifests, helper ledgers, status, logs, errors, approval rendering, TUI output, or browser VMs. Status is limited to `available`, `unavailable`, or a stable non-secret failure code.
+
+##### Static runtime publication channel and atomic mirrors
+
+Apple workspace mounts are fixed when the workspace VM is created. DSX therefore does not attempt to add or replace an AWS mount during enablement. To make post-create enable and disable possible without recreating the VM, an approved `host-default` capability causes every workspace created under that plan to receive an independently owned, private, initially empty DSX publication directory bind-mounted read-only at the reserved guest destination:
+
+```text
+/run/dsx/aws
+```
+
+The host-side source of that bind is a DSX-owned workspace publication channel under private DSX state, never the approved host AWS directory. The channel is labeled and recorded as an exact workspace-owned resource, is not shared with siblings, and is mounted with the reserved runtime AWS-publication authority. The runtime adapter rejects a writable mount, another destination, an unowned source, or the host AWS source. A disabled workspace can observe at most the empty DSX-owned directory: it receives no AWS files, AWS environment, helper, credential generation, or access to the approved source.
+
+The empty channel is reserved plumbing, not an AWS credential mirror: while the grant is disabled or the workspace is stopped it contains no `config`, `credentials`, `current` generation, or provider material.
+
+For an AWS-enabled running workspace, its helper writes new private generation directories with mode `0700` and files with mode `0400`, then atomically switches `current` only after both filtered files are complete. The guest reads:
+
+```text
+/run/dsx/aws/current/config
+/run/dsx/aws/current/credentials
+```
+
+No workspace can observe a mixed config/credentials generation. A transient unstable or unreadable source may retain the prior complete generation temporarily while reporting degraded non-secret status; temporary STS credentials still expire naturally. A stable snapshot without a complete valid `default` is authoritative revocation: the helper atomically publishes an empty generation and removes the prior credential bytes. A stable valid replacement is published independently to every AWS-enabled running workspace.
+
+The helper is continuous only while both the durable grant is enabled and the workspace is running. Each enabled running workspace has its own helper, control artifacts, mirror generations, and failure state. Disabled workspaces never read the source or run a helper. Stopping an enabled workspace stops its helper and empties its publication channel while preserving only the non-secret grant. Starting or restarting an enabled workspace must complete a fresh valid sync and start the helper before DSX exposes any shell, agent, or managed process. Starting a disabled workspace leaves the channel empty and starts no AWS helper. Removal stops the exact helper and deletes only the proven grant, generations, and publication root; ambiguous evidence is preserved and reported.
+
+The runtime container environment is not used as a grant because it is also fixed at creation. Instead, every DSX process-launch path composes environment at launch time from the current durable grant and helper readiness. Only enabled workspaces receive:
+
+```text
+AWS_CONFIG_FILE=/run/dsx/aws/current/config
+AWS_SHARED_CREDENTIALS_FILE=/run/dsx/aws/current/credentials
+```
+
+`AWS_PROFILE` is never set; normal AWS default-profile resolution applies. A disabled workspace's newly launched shells, agents, setup commands, and managed processes receive none of these variables. Disabling also empties the publication channel, so a process that retained old environment variable names cannot open prior credentials. DSX cannot retract credential bytes a process already read into its own memory, but it never preserves those bytes in the publication channel after revocation.
+
+##### Write-ahead workspace lifecycle
+
+Enable and disable are serialized with other mutations for the selected workspace and are idempotent.
+
+Enable ordering is:
+
+1. Resolve the approved project capability and verify a stable, complete temporary host `default` without mutating the grant, helper, channel, or runtime.
+2. Atomically persist the enabled workspace grant before starting a helper or publishing credential files.
+3. If the workspace is running, start its independently owned helper, publish the validated initial generation through the existing empty channel, and require ready status before reporting success or launching an AWS-enabled process.
+4. If the workspace is stopped, leave the channel empty and defer helper creation and a fresh sync to start.
+
+An unavailable or unsafe initial host default fails step 1 without changing durable grant or runtime state. A failure after the write-ahead grant is committed remains an enabled but degraded, reconcilable state; it must not be reported as disabled or expose a partial generation.
+
+Disable ordering is:
+
+1. Atomically persist revocation before any helper or publication cleanup.
+2. Immediately block AWS environment from every new process composition.
+3. Stop the exact workspace helper and atomically replace the channel with an empty generation before deleting prior files.
+4. Remove only exact proven helper and mirror artifacts and report non-secret degraded cleanup state if ownership is ambiguous.
+
+After step 1, recovery always converges toward no helper and an empty channel; it must never restart or repopulate from a stale enabled record. Disabling one workspace leaves every sibling unchanged. Stop, restart, remove, interrupted mutation recovery, and cleanup use the same desired-grant-first ordering.
+
+Browser VMs are categorically outside this capability. They receive no AWS publication channel, AWS environment, AWS files, workspace grant, source descriptor, helper, or AWS status detail, even when their owning workspace is AWS-enabled.
+
+This decision supersedes the former all-profile Leapp directory-mount architecture. DSX never mounts host `~/.aws` or `.Leapp`, never exposes named profiles, never sets a selected `AWS_PROFILE`, and never invokes provider lifecycle commands.
+
 ### 8. Restrict host authentication imports to approved portable artifacts
 
 Authentication import is always explicit. DSX must never import credentials silently or copy a complete harness directory.
@@ -349,8 +508,8 @@ Additional rules:
 - Credentials are never baked into an OCI image.
 - Credential values are never logged or rendered in the TUI.
 - Reviewed reusable non-secret skills and configuration may be mounted read-only.
-- Cloud or network integrations such as an explicitly approved Leapp or host-network grant are separate from harness-auth import and do not expand the allowed harness artifact list.
-- Leapp integration remains explicit and read-only at the filesystem boundary; any mounted profile is readable by processes in the workspace and must be reviewed accordingly.
+- Host AWS access uses the separately approved default-only capability and per-workspace grant above; it does not expand the harness-auth artifact list.
+- No host AWS directory or named profile is mounted into a workspace. Under `host-default`, every workspace has only its independently owned publication channel mounted read-only; the channel remains empty unless that workspace is both granted and running. `none` creates no AWS publication mount authority.
 
 Canonical credential operations are:
 
@@ -1216,6 +1375,7 @@ Subprocess overhead is expected to be insignificant compared with VM boot, image
 - Docker Compose and Testcontainers projects remain unsupported until a compatibility backend exists.
 - The TUI adds terminal-state, resizing, accessibility, and interaction tests to the first vertical slice.
 - Per-session browser isolation requires an additional VM for each browser-enabled agent session.
+- The dynamic host `default` authority may change the account or role available to every AWS-enabled running workspace without another DSX approval or restart.
 
 ## Security considerations
 
@@ -1272,6 +1432,10 @@ Subprocess overhead is expected to be insignificant compared with VM boot, image
 - Never log credential values.
 - Treat OAuth tokens stored in host-resident DSX or VM volume data as sensitive plaintext at rest.
 - Keep OMP provider credentials in OMP format and do not translate them into Codex CLI credentials.
+- Treat host AWS as a separate default-only project capability plus durable per-workspace grant, never as a harness-auth import or network `BridgeGrant`.
+- Bind and revalidate the approved canonical AWS source directory by descriptor and physical identity; parse only a complete temporary STS `default`.
+- Never mount the host AWS source. Publish filtered generations through independent private workspace channels mounted read-only at `/run/dsx/aws`.
+- Start mirror helpers and inject AWS file environment only for enabled running workspaces; revocation is durable before helper and mirror cleanup.
 
 ### Browser
 
@@ -1378,7 +1542,7 @@ This outline describes required implementation work and does not assert that the
 - Implement private-network-only Playwright MCP readiness and injection.
 - Implement deletion on normal completion, cancellation, failure, and workspace stop.
 - Implement macOS URL opening and temporary OAuth callback forwarding.
-- Implement explicit Leapp and host-network or Tailscale proxy grants.
+- Implement the default-only host AWS capability, durable per-workspace enable/disable grants, descriptor-bound parsing, independent continuous mirrors, static read-only publication channels, and dynamic-authority warning; keep host-network and Tailscale proxy grants separate.
 - Verify that browser VMs receive no source, provider credentials, AWS credentials, host home, or host runtime access.
 - Verify that no browser control port is published to the host.
 
@@ -1432,6 +1596,17 @@ The redesign is accepted for release only when all of the following are validate
 - Every workspace receives an independent writable credential copy for the selected harness.
 - Concurrent workspaces never share one writable authentication or session volume.
 - OMP’s Codex provider identity is not translated into Codex CLI credentials.
+
+### AWS capability
+
+- `ExecutionPlan` contains a secret-free `AWSCapability`, not an AWS `BridgeGrant`, and every authority field is covered by executable approval and hashing.
+- `none` is disabled; `host-default` is the only opt-in mode; former `leapp` mode and named-profile configuration fail closed.
+- Every new workspace starts AWS-disabled, and durable per-workspace grant state remains outside the project executable hash.
+- Only complete temporary STS `default` credentials are filtered from descriptor-bound standard files; named profiles and external authority references are absent.
+- No workspace mounts the host AWS source. Under `host-default`, a disabled workspace has only an empty private DSX publication channel and receives no AWS files, environment, helper, or source access; `none` creates no AWS publication mount authority.
+- Enable and disable persist desired grant state before helper or publication mutation; disable removes the selected workspace's credential bytes without changing siblings.
+- Enabled running workspaces continuously and atomically follow stable host `default` replacements; enabled stopped workspaces fresh-sync before any shell or agent after start.
+- Browser VMs receive no AWS channel, files, environment, source access, helper, or status detail.
 
 ### Lifecycle and processes
 

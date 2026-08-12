@@ -116,7 +116,6 @@ type AuthConfig struct {
 type AWSConfig struct {
 	Mode      string `json:"mode,omitempty"`
 	Directory string `json:"directory,omitempty"`
-	Profile   string `json:"profile,omitempty"`
 }
 
 type NetworkConfig struct {
