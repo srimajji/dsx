@@ -495,12 +495,12 @@ func (service *WorkspaceService) workspaceGitExecutor(snapshot runtime.ResourceS
 		argv := []string{"/usr/bin/git", "--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"}
 		argv = append(argv, arguments...)
 		env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=cat", "LC_ALL=C"}
-		return service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, Env: env, WorkingDir: runtime.GuestPath(directory), User: service.user()}, runtime.ExecIO{Stdout: stdout, Stderr: stderr})
+		return service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, Env: env, WorkingDir: runtime.GuestPath(directory), User: standardWorkspaceUser}, runtime.ExecIO{Stdout: stdout, Stderr: stderr})
 	}
 }
 
 func (service *WorkspaceService) workspaceCommand(ctx context.Context, snapshot runtime.ResourceSnapshot, argv []string, directory string, stdout, stderr io.Writer) error {
-	exit, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, WorkingDir: runtime.GuestPath(directory), User: service.user()}, runtime.ExecIO{Stdout: stdout, Stderr: stderr})
+	exit, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, WorkingDir: runtime.GuestPath(directory), User: standardWorkspaceUser}, runtime.ExecIO{Stdout: stdout, Stderr: stderr})
 	if err != nil {
 		return err
 	}
@@ -617,7 +617,7 @@ func (service *WorkspaceService) copyWorkspaceResult(
 	}
 	copyCapture := &hardLimitWriter{writer: file, remaining: int(gitx.MaxResultBundleBytes)}
 	exit, copyErr := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{
-		Argv: []string{"/bin/cat", "--", guest}, WorkingDir: "/workspace", User: service.user(),
+		Argv: []string{"/bin/cat", "--", guest}, WorkingDir: "/workspace", User: standardWorkspaceUser,
 	}, runtime.ExecIO{Stdout: copyCapture, Stderr: io.Discard})
 	syncErr := file.Sync()
 	closeErr := file.Close()

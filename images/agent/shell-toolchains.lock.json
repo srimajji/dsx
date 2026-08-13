@@ -2,32 +2,126 @@
   "schemaVersion": 1,
   "platform": "linux/arm64",
   "base": {
-    "reference": "docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9"
+    "reference": "docker.io/library/ubuntu@sha256:3fe5b610f5c41eeeb56c2995bd4afb4990ac5b80dc980e33f9251eaaa8013615",
+    "release": "26.04"
   },
   "apt": {
     "bootstrap": {
       "repository": "http://ports.ubuntu.com/ubuntu-ports",
       "package": "ca-certificates",
-      "version": "20260601~24.04.1",
+      "version": "20260601~26.04.1",
       "trust": "apt-signed-index"
     },
     "snapshot": "https://snapshot.ubuntu.com/ubuntu/20260811T000000Z/",
     "packages": [
-      { "name": "curl", "version": "8.5.0-2ubuntu10.11" },
-      { "name": "git", "version": "1:2.43.0-1ubuntu7.3" },
-      { "name": "openssh-client", "version": "1:9.6p1-3ubuntu13.18" },
-      { "name": "zsh", "version": "5.9-6ubuntu2" },
-      { "name": "ripgrep", "version": "14.1.0-1" },
-      { "name": "bat", "version": "0.24.0-1build1" },
-      { "name": "jq", "version": "1.7.1-3ubuntu0.24.04.2" },
-      { "name": "less", "version": "590-2ubuntu2.1" },
-      { "name": "tmux", "version": "3.4-1ubuntu0.1" },
-      { "name": "zip", "version": "3.0-13ubuntu0.2" },
-      { "name": "unzip", "version": "6.0-28ubuntu4.1" },
-      { "name": "build-essential", "version": "12.10ubuntu1" },
-      { "name": "python3", "version": "3.12.3-0ubuntu2.1" },
-      { "name": "python3-pip", "version": "24.0+dfsg-1ubuntu1.3" },
-      { "name": "python3-venv", "version": "3.12.3-0ubuntu2.1" }
+      {
+        "name": "curl",
+        "version": "8.18.0-1ubuntu2.3"
+      },
+      {
+        "name": "git",
+        "version": "1:2.53.0-1ubuntu1"
+      },
+      {
+        "name": "openssh-client",
+        "version": "1:10.2p1-2ubuntu3.5"
+      },
+      {
+        "name": "zsh",
+        "version": "5.9-8ubuntu3"
+      },
+      {
+        "name": "ripgrep",
+        "version": "15.1.0-1ubuntu1"
+      },
+      {
+        "name": "bat",
+        "version": "0.25.0-5ubuntu1"
+      },
+      {
+        "name": "jq",
+        "version": "1.8.1-4ubuntu2"
+      },
+      {
+        "name": "less",
+        "version": "668-1build1"
+      },
+      {
+        "name": "tmux",
+        "version": "3.6a-2ubuntu0.1"
+      },
+      {
+        "name": "zip",
+        "version": "3.0-15ubuntu3"
+      },
+      {
+        "name": "unzip",
+        "version": "6.0-29ubuntu1"
+      },
+      {
+        "name": "build-essential",
+        "version": "12.12ubuntu2.26.04.2"
+      },
+      {
+        "name": "python3",
+        "version": "3.14.3-0ubuntu2"
+      },
+      {
+        "name": "python3-pip",
+        "version": "25.1.1+dfsg-1ubuntu2"
+      },
+      {
+        "name": "python3-venv",
+        "version": "3.14.3-0ubuntu2"
+      },
+      {
+        "name": "sudo",
+        "version": "1.9.17p2-1ubuntu3"
+      },
+      {
+        "name": "groff",
+        "version": "1.23.0-10"
+      },
+      {
+        "name": "libatomic1",
+        "version": "16-20260322-1ubuntu1"
+      },
+      {
+        "name": "libc6",
+        "version": "2.43-2ubuntu2.3"
+      },
+      {
+        "name": "libgcc-s1",
+        "version": "16-20260322-1ubuntu1"
+      },
+      {
+        "name": "libgssapi-krb5-2",
+        "version": "1.22.1-2ubuntu4.1"
+      },
+      {
+        "name": "libicu78",
+        "version": "78.2-2ubuntu1"
+      },
+      {
+        "name": "libssl3t64",
+        "version": "3.5.5-1ubuntu3.3"
+      },
+      {
+        "name": "libstdc++6",
+        "version": "16-20260322-1ubuntu1"
+      },
+      {
+        "name": "tzdata",
+        "version": "2026c-0ubuntu0.26.04.1"
+      },
+      {
+        "name": "tzdata-legacy",
+        "version": "2026c-0ubuntu0.26.04.1"
+      },
+      {
+        "name": "zlib1g",
+        "version": "1:1.3.dfsg+really1.3.1-1ubuntu3"
+      }
     ]
   },
   "artifacts": [
@@ -79,6 +173,38 @@
       "source": "https://github.com/direnv/direnv/releases/download/v2.37.1/direnv.linux-arm64",
       "sha256": "2a9cef8d73521d6a3ec3f2871c4b747b8c4cc038628c1b57a7efa42b393a2d82",
       "installRoot": "/usr/local/bin"
+    },
+    {
+      "name": "aws-cli-v2",
+      "version": "2.36.22",
+      "source": "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.36.22.zip",
+      "sha256": "ae16f237b595264fa2c321770c7245088e921ad14536425d9c719e92aced78c8",
+      "installRoot": "/opt/aws-cli",
+      "signature": "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.36.22.zip.sig",
+      "signingKeyFingerprint": "FB5DB77FD5C118B80511ADA8A6310ACC4672475C"
+    },
+    {
+      "name": "uv",
+      "version": "0.12.3",
+      "source": "https://github.com/astral-sh/uv/releases/download/0.12.3/uv-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e",
+      "installRoot": "/usr/local/bin"
+    },
+    {
+      "name": "dotnet-sdk",
+      "version": "10.0.400",
+      "source": "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.400/dotnet-sdk-10.0.400-linux-arm64.tar.gz",
+      "sha256": "13c219bfd1ff00a886c1523a9c7027c4f24c1e730e653376d2b81f1435da5a59",
+      "installRoot": "/opt/dotnet",
+      "upstreamDigestAlgorithm": "sha512",
+      "upstreamDigest": "a1b45da58e5591fff909a6126ac6bfc1ef9c12bc72c0625f7815e83a82be1a902317ee96926cbbf81324a45c6abf2ed8102a216d0507879cc166159af78d1b77"
+    },
+    {
+      "name": "kotlin",
+      "version": "2.4.10",
+      "source": "https://github.com/JetBrains/kotlin/releases/download/v2.4.10/kotlin-compiler-2.4.10.zip",
+      "sha256": "473dd66c7a3ef4b182065b3da670466c1bf2773a9dbb0ed8b33a39fe9d4f876d",
+      "installRoot": "/opt/kotlin"
     }
   ],
   "plugins": {
@@ -133,39 +259,219 @@
     ]
   },
   "tools": [
-    { "name": "zsh", "version": "5.9-6ubuntu2", "provider": "zsh", "executable": "/bin/zsh" },
-    { "name": "curl", "version": "8.5.0-2ubuntu10.11", "provider": "curl", "executable": "/usr/bin/curl" },
-    { "name": "git", "version": "1:2.43.0-1ubuntu7.3", "provider": "git", "executable": "/usr/bin/git" },
-    { "name": "ssh", "version": "1:9.6p1-3ubuntu13.18", "provider": "openssh-client", "executable": "/usr/bin/ssh" },
-    { "name": "cc", "version": "12.10ubuntu1", "provider": "build-essential", "executable": "/usr/bin/cc" },
-    { "name": "c++", "version": "12.10ubuntu1", "provider": "build-essential", "executable": "/usr/bin/c++" },
-    { "name": "make", "version": "12.10ubuntu1", "provider": "build-essential", "executable": "/usr/bin/make" },
-    { "name": "starship", "version": "1.26.0", "provider": "starship", "executable": "/usr/local/bin/starship" },
-    { "name": "fzf", "version": "0.74.2", "provider": "fzf", "executable": "/usr/local/bin/fzf" },
-    { "name": "direnv", "version": "2.37.1", "provider": "direnv", "executable": "/usr/local/bin/direnv" },
-    { "name": "rg", "version": "14.1.0-1", "provider": "ripgrep", "executable": "/usr/bin/rg" },
-    { "name": "bat", "version": "0.24.0-1build1", "provider": "bat", "executable": "/usr/local/bin/bat" },
-    { "name": "jq", "version": "1.7.1-3ubuntu0.24.04.2", "provider": "jq", "executable": "/usr/bin/jq" },
-    { "name": "less", "version": "590-2ubuntu2.1", "provider": "less", "executable": "/usr/bin/less" },
-    { "name": "tmux", "version": "3.4-1ubuntu0.1", "provider": "tmux", "executable": "/usr/bin/tmux" },
-    { "name": "zip", "version": "3.0-13ubuntu0.2", "provider": "zip", "executable": "/usr/bin/zip" },
-    { "name": "unzip", "version": "6.0-28ubuntu4.1", "provider": "unzip", "executable": "/usr/bin/unzip" },
-    { "name": "python3", "version": "3.12.3", "provider": "python3", "executable": "/usr/bin/python3" },
-    { "name": "python", "version": "3.12.3", "provider": "python3", "executable": "/usr/local/bin/python" },
-    { "name": "pip", "version": "24.0", "provider": "python3-pip", "executable": "/usr/local/bin/pip" },
-    { "name": "node", "version": "24.19.0", "provider": "node", "executable": "/opt/node/bin/node" },
-    { "name": "npm", "version": "11.17.0", "provider": "node", "executable": "/opt/node/bin/npm" },
-    { "name": "pnpm", "version": "11.21.0", "provider": "pnpm", "executable": "/usr/local/bin/pnpm" },
-    { "name": "go", "version": "1.26.5", "provider": "go", "executable": "/opt/go/bin/go" },
-    { "name": "java", "version": "25.0.4+7-LTS", "provider": "temurin-jdk", "executable": "/opt/java/bin/java" },
-    { "name": "javac", "version": "25.0.4+7-LTS", "provider": "temurin-jdk", "executable": "/opt/java/bin/javac" }
+    {
+      "name": "zsh",
+      "version": "5.9-8ubuntu3",
+      "provider": "zsh",
+      "executable": "/bin/zsh"
+    },
+    {
+      "name": "curl",
+      "version": "8.18.0-1ubuntu2.3",
+      "provider": "curl",
+      "executable": "/usr/bin/curl"
+    },
+    {
+      "name": "git",
+      "version": "1:2.53.0-1ubuntu1",
+      "provider": "git",
+      "executable": "/usr/bin/git"
+    },
+    {
+      "name": "ssh",
+      "version": "1:10.2p1-2ubuntu3.5",
+      "provider": "openssh-client",
+      "executable": "/usr/bin/ssh"
+    },
+    {
+      "name": "cc",
+      "version": "12.12ubuntu2.26.04.2",
+      "provider": "build-essential",
+      "executable": "/usr/bin/cc"
+    },
+    {
+      "name": "c++",
+      "version": "12.12ubuntu2.26.04.2",
+      "provider": "build-essential",
+      "executable": "/usr/bin/c++"
+    },
+    {
+      "name": "make",
+      "version": "12.12ubuntu2.26.04.2",
+      "provider": "build-essential",
+      "executable": "/usr/bin/make"
+    },
+    {
+      "name": "starship",
+      "version": "1.26.0",
+      "provider": "starship",
+      "executable": "/usr/local/bin/starship"
+    },
+    {
+      "name": "fzf",
+      "version": "0.74.2",
+      "provider": "fzf",
+      "executable": "/usr/local/bin/fzf"
+    },
+    {
+      "name": "direnv",
+      "version": "2.37.1",
+      "provider": "direnv",
+      "executable": "/usr/local/bin/direnv"
+    },
+    {
+      "name": "rg",
+      "version": "15.1.0-1ubuntu1",
+      "provider": "ripgrep",
+      "executable": "/usr/bin/rg"
+    },
+    {
+      "name": "bat",
+      "version": "0.25.0-5ubuntu1",
+      "provider": "bat",
+      "executable": "/usr/local/bin/bat"
+    },
+    {
+      "name": "jq",
+      "version": "1.8.1-4ubuntu2",
+      "provider": "jq",
+      "executable": "/usr/bin/jq"
+    },
+    {
+      "name": "less",
+      "version": "668-1build1",
+      "provider": "less",
+      "executable": "/usr/bin/less"
+    },
+    {
+      "name": "tmux",
+      "version": "3.6a-2ubuntu0.1",
+      "provider": "tmux",
+      "executable": "/usr/bin/tmux"
+    },
+    {
+      "name": "zip",
+      "version": "3.0-15ubuntu3",
+      "provider": "zip",
+      "executable": "/usr/bin/zip"
+    },
+    {
+      "name": "unzip",
+      "version": "6.0-29ubuntu1",
+      "provider": "unzip",
+      "executable": "/usr/bin/unzip"
+    },
+    {
+      "name": "python3",
+      "version": "3.14.3",
+      "provider": "python3",
+      "executable": "/usr/bin/python3"
+    },
+    {
+      "name": "python",
+      "version": "3.14.3",
+      "provider": "python3",
+      "executable": "/usr/local/bin/python"
+    },
+    {
+      "name": "pip",
+      "version": "25.1.1",
+      "provider": "python3-pip",
+      "executable": "/usr/local/bin/pip"
+    },
+    {
+      "name": "node",
+      "version": "24.19.0",
+      "provider": "node",
+      "executable": "/opt/node/bin/node"
+    },
+    {
+      "name": "npm",
+      "version": "11.17.0",
+      "provider": "node",
+      "executable": "/opt/node/bin/npm"
+    },
+    {
+      "name": "pnpm",
+      "version": "11.21.0",
+      "provider": "pnpm",
+      "executable": "/usr/local/bin/pnpm"
+    },
+    {
+      "name": "go",
+      "version": "1.26.5",
+      "provider": "go",
+      "executable": "/opt/go/bin/go"
+    },
+    {
+      "name": "java",
+      "version": "25.0.4+7-LTS",
+      "provider": "temurin-jdk",
+      "executable": "/opt/java/bin/java"
+    },
+    {
+      "name": "javac",
+      "version": "25.0.4+7-LTS",
+      "provider": "temurin-jdk",
+      "executable": "/opt/java/bin/javac"
+    },
+    {
+      "name": "aws",
+      "version": "2.36.22",
+      "provider": "aws-cli-v2",
+      "executable": "/usr/local/bin/aws"
+    },
+    {
+      "name": "aws_completer",
+      "version": "2.36.22",
+      "provider": "aws-cli-v2",
+      "executable": "/usr/local/bin/aws_completer"
+    },
+    {
+      "name": "uv",
+      "version": "0.12.3",
+      "provider": "uv",
+      "executable": "/usr/local/bin/uv"
+    },
+    {
+      "name": "uvx",
+      "version": "0.12.3",
+      "provider": "uv",
+      "executable": "/usr/local/bin/uvx"
+    },
+    {
+      "name": "dotnet",
+      "version": "10.0.400",
+      "provider": "dotnet-sdk",
+      "executable": "/opt/dotnet/dotnet"
+    },
+    {
+      "name": "dnx",
+      "version": "10.0.400",
+      "provider": "dotnet-sdk",
+      "executable": "/opt/dotnet/dnx"
+    },
+    {
+      "name": "kotlin",
+      "version": "2.4.10",
+      "provider": "kotlin",
+      "executable": "/opt/kotlin/bin/kotlin"
+    },
+    {
+      "name": "kotlinc",
+      "version": "2.4.10",
+      "provider": "kotlin",
+      "executable": "/opt/kotlin/bin/kotlinc"
+    }
   ],
   "environment": {
     "shell": "/bin/zsh",
     "zdotdir": "/usr/local/share/dsx/shell",
-    "path": "/opt/node/bin:/opt/go/bin:/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "path": "/opt/dotnet:/opt/dotnet/tools:/opt/kotlin/bin:/opt/node/bin:/opt/go/bin:/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "javaHome": "/opt/java",
-    "starshipConfig": "/usr/local/share/dsx/shell/starship.toml"
+    "starshipConfig": "/usr/local/share/dsx/shell/starship.toml",
+    "dotnetRoot": "/opt/dotnet",
+    "kotlinHome": "/opt/kotlin"
   },
   "generated": {
     "pluginsPre": "/usr/local/share/dsx/shell/plugins-pre.zsh",

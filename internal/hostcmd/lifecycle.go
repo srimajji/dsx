@@ -432,6 +432,7 @@ func (dispatcher *Dispatcher) executeTUIWorkspaceCreate(ctx context.Context, req
 		return reportError(stderr, "dsx workspace create", err)
 	}
 	if !intent.Open {
+		_, _ = io.WriteString(stdout, "Run dsx, select the running workspace, and press v to attach with VS Code.\n")
 		return 0
 	}
 	opened, err := dispatcher.dependencies.Workspaces.Open(ctx, app.WorkspaceOpenRequest{
@@ -445,7 +446,23 @@ func (dispatcher *Dispatcher) executeTUIWorkspaceCreate(ctx context.Context, req
 	if err != nil {
 		return reportError(stderr, "dsx workspace open", err)
 	}
+	if exit == 0 {
+		_, _ = io.WriteString(stdout, "Run dsx, select the running workspace, and press v to attach with VS Code.\n")
+	}
 	return exit
+}
+
+type systemVSCodeLauncher struct{}
+
+func NewVSCodeLauncher() VSCodeLauncher { return systemVSCodeLauncher{} }
+
+func (systemVSCodeLauncher) OpenSettings(ctx context.Context) error {
+	return exec.CommandContext(ctx, "/usr/bin/open", "vscode://settings/dev.containers.experimentalAppleContainerSupport").Run()
+}
+
+func vscodeAttachGuidance(container string) string {
+	name := terminal.SanitizeLine(container)
+	return fmt.Sprintf("VS Code Apple-container attachment is experimental. Verified with Dev Containers 0.467.0+ and Apple container 1.2.2.\\n1. Ensure extension ms-vscode-remote.remote-containers is installed.\\n2. Enable Dev › Containers: Experimental Apple Container Support.\\n3. Run Dev Containers: Attach to Running Apple Container...\\n4. Choose %q.\\n5. Open /workspace.\\n", name)
 }
 
 func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Intent, stdout, stderr io.Writer) int {
@@ -491,6 +508,22 @@ func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Inte
 		}
 		if err := renderWorkspaceResult(stdout, result); err != nil {
 			return reportError(stderr, "dsx workspace create", err)
+		}
+	case "vscode-attach":
+		info, infoErr := dispatcher.dependencies.Workspaces.AttachInfo(ctx, app.WorkspaceAttachInfoRequest{Root: root, Workspace: workspace})
+		if infoErr != nil {
+			return reportError(stderr, "dsx vscode-attach", infoErr)
+		}
+		launcher := dispatcher.dependencies.VSCode
+		if launcher == nil {
+			launcher = systemVSCodeLauncher{}
+		}
+		guidance := vscodeAttachGuidance(info.Container)
+		if launchErr := launcher.OpenSettings(ctx); launchErr != nil {
+			return reportError(stderr, "dsx vscode-attach", model.Wrap(model.CodeUnavailable, strings.TrimSpace(guidance), launchErr))
+		}
+		if _, writeErr := io.WriteString(stdout, guidance); writeErr != nil {
+			return reportError(stderr, "dsx vscode-attach", writeErr)
 		}
 	case "workspace-open":
 		return dispatcher.executeNamedWorkspace(ctx, "open", []string{string(workspace), "--root", root}, stdout, stderr)

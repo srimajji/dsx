@@ -513,7 +513,7 @@ func (service *AgentService) shellWithSecretEnvironment(ctx context.Context, sna
 		stage := runtime.ExecSpec{
 			Argv:       []string{DefaultGuestHelperPath, "stage-env", "--path", string(secretPath)},
 			WorkingDir: workspaceGuestRoot,
-			User:       service.workspaces.user(),
+			User:       standardWorkspaceUser,
 		}
 		stageExit, stageErr := service.workspaces.execWorkspace(ctx, snapshot, stage, runtime.ExecIO{Stdin: bytes.NewReader(contents)})
 		if stageErr != nil || !successfulGuestCommand(stageExit) {
@@ -540,7 +540,7 @@ func (service *AgentService) shellWithSecretEnvironment(ctx context.Context, sna
 	arguments = append(arguments, argv...)
 	spec := runtime.ExecSpec{
 		Argv: arguments, Env: harnessEnvironment(ordinary), WorkingDir: workspaceGuestRoot,
-		User: service.workspaces.user(), Terminal: terminalMode,
+		User: standardWorkspaceUser, Terminal: terminalMode,
 	}
 	if !terminalMode {
 		return service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stdin: stdin, Stdout: stdout, Stderr: stderr})
@@ -564,7 +564,7 @@ func (service *AgentService) cleanupAgentSecretEnvironment(ctx context.Context, 
 	}
 	spec := runtime.ExecSpec{
 		Argv:       []string{DefaultGuestHelperPath, "exec", "--", "/bin/rm", "-rf", "--", string(name)},
-		WorkingDir: workspaceGuestRoot, User: service.workspaces.user(),
+		WorkingDir: workspaceGuestRoot, User: standardWorkspaceUser,
 	}
 	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{})
 	if err != nil {
@@ -703,7 +703,7 @@ func (service *AgentService) exportGuestFile(ctx context.Context, snapshot runti
 				"--max-bytes", strconv.FormatInt(maximumBytes, 10), "--path", guestPath,
 			},
 			WorkingDir: "/workspace",
-			User:       service.workspaces.user(),
+			User:       standardWorkspaceUser,
 		}
 		exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stdout: output, Stderr: io.Discard})
 		if err != nil {
@@ -747,7 +747,7 @@ func (service *AgentService) produceGuestFile(ctx context.Context, snapshot runt
 		Argv:       arguments,
 		Env:        append([]string(nil), command.Env...),
 		WorkingDir: "/workspace",
-		User:       service.workspaces.user(),
+		User:       standardWorkspaceUser,
 	}
 	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stderr: &stderr})
 	if err != nil {
@@ -767,7 +767,7 @@ func (service *AgentService) removeGuestExportFile(ctx context.Context, snapshot
 	spec := runtime.ExecSpec{
 		Argv:       []string{DefaultGuestHelperPath, "remove-export-file", "--path", guestPath},
 		WorkingDir: "/workspace",
-		User:       service.workspaces.user(),
+		User:       standardWorkspaceUser,
 	}
 	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stderr: io.Discard})
 	if err != nil {
@@ -801,7 +801,7 @@ func (service *AgentService) mkdirGuest(ctx context.Context, snapshot runtime.Re
 	spec := runtime.ExecSpec{
 		Argv:       []string{DefaultGuestHelperPath, "ensure-dir", "--path", directory},
 		WorkingDir: "/workspace",
-		User:       service.workspaces.user(),
+		User:       standardWorkspaceUser,
 	}
 	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{})
 	if err != nil {
@@ -820,7 +820,7 @@ func (service *AgentService) stageGuestFile(ctx context.Context, snapshot runtim
 	spec := runtime.ExecSpec{
 		Argv:       []string{DefaultGuestHelperPath, "stage-file", "--max-bytes", strconv.FormatInt(maximumBytes, 10), "--path", destination},
 		WorkingDir: "/workspace",
-		User:       service.workspaces.user(),
+		User:       standardWorkspaceUser,
 	}
 	exit, err := service.workspaces.execWorkspace(ctx, snapshot, spec, runtime.ExecIO{Stdin: input})
 	if err != nil {
@@ -836,7 +836,7 @@ func (service *AgentService) stageReadOnlyGuestFile(ctx context.Context, snapsho
 	if input == nil || maximumBytes < 1 || !allowedReadOnlyGuestStagingPath(destination) {
 		return model.NewError(model.CodeInvalidInput, "unsafe read-only guest config staging path", nil)
 	}
-	uid, gid, found := strings.Cut(service.workspaces.user(), ":")
+	uid, gid, found := strings.Cut(standardWorkspaceUser, ":")
 	numericUID, uidErr := strconv.ParseUint(uid, 10, 32)
 	numericGID, gidErr := strconv.ParseUint(gid, 10, 32)
 	if !found || uidErr != nil || gidErr != nil || numericUID == 0 || numericGID == 0 {

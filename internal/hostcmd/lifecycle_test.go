@@ -22,21 +22,23 @@ import (
 )
 
 type workspaceStub struct {
-	creates      []app.WorkspaceCreateRequest
-	opens        []app.WorkspaceOpenRequest
-	starts       []app.WorkspaceStartRequest
-	stops        []app.WorkspaceStopRequest
-	restarts     []app.WorkspaceRestartRequest
-	removes      []app.WorkspaceRemoveRequest
-	lists        []app.WorkspaceListRequest
-	result       app.WorkspaceResult
-	openResult   app.WorkspaceOpenResult
-	listResult   app.WorkspaceListResult
-	removeResult app.WorkspaceRemoveResult
-	err          error
-	createErr    error
-	openErr      error
-	events       *[]string
+	creates        []app.WorkspaceCreateRequest
+	opens          []app.WorkspaceOpenRequest
+	starts         []app.WorkspaceStartRequest
+	stops          []app.WorkspaceStopRequest
+	restarts       []app.WorkspaceRestartRequest
+	removes        []app.WorkspaceRemoveRequest
+	lists          []app.WorkspaceListRequest
+	attachRequests []app.WorkspaceAttachInfoRequest
+	result         app.WorkspaceResult
+	openResult     app.WorkspaceOpenResult
+	listResult     app.WorkspaceListResult
+	attachResult   app.WorkspaceAttachInfo
+	removeResult   app.WorkspaceRemoveResult
+	err            error
+	createErr      error
+	openErr        error
+	events         *[]string
 }
 
 func (stub *workspaceStub) Create(_ context.Context, request app.WorkspaceCreateRequest) (app.WorkspaceResult, error) {
@@ -79,8 +81,27 @@ func (stub *workspaceStub) List(_ context.Context, request app.WorkspaceListRequ
 	stub.lists = append(stub.lists, request)
 	return stub.listResult, stub.err
 }
+func (stub *workspaceStub) AttachInfo(_ context.Context, request app.WorkspaceAttachInfoRequest) (app.WorkspaceAttachInfo, error) {
+	stub.attachRequests = append(stub.attachRequests, request)
+	if stub.events != nil {
+		*stub.events = append(*stub.events, "attach-info")
+	}
+	return stub.attachResult, stub.err
+}
 func (stub *workspaceStub) calls() int {
-	return len(stub.creates) + len(stub.opens) + len(stub.starts) + len(stub.stops) + len(stub.restarts) + len(stub.removes) + len(stub.lists)
+	return len(stub.creates) + len(stub.opens) + len(stub.starts) + len(stub.stops) + len(stub.restarts) + len(stub.removes) + len(stub.lists) + len(stub.attachRequests)
+}
+
+type vscodeLauncherStub struct {
+	events *[]string
+	err    error
+}
+
+func (stub vscodeLauncherStub) OpenSettings(context.Context) error {
+	if stub.events != nil {
+		*stub.events = append(*stub.events, "open-settings")
+	}
+	return stub.err
 }
 
 type awsWorkspaceStub struct {
@@ -290,8 +311,8 @@ func TestTUICreateAndOpenKeepsProgressUntilInteractiveHandoff(t *testing.T) {
 	if len(workspaces.opens) != 1 || !workspaces.opens[0].Terminal || workspaces.opens[0].RunInteractive == nil {
 		t.Fatalf("open request = %#v", workspaces.opens)
 	}
-	if stdout.Len() != 0 {
-		t.Fatalf("TUI create-and-open rendered lifecycle summary before handoff: %q", stdout.String())
+	if stdout.String() != "Run dsx, select the running workspace, and press v to attach with VS Code.\n" {
+		t.Fatalf("post-shell VS Code guidance = %q", stdout.String())
 	}
 	if len(runner.progress) != 1 || strings.Join(runner.progressEvents, ",") != "validate,workspace,ready" {
 		t.Fatalf("progress requests = %#v events = %#v", runner.progress, runner.progressEvents)
@@ -599,6 +620,7 @@ func TestExecuteAWSDashboardIntentsUseApplicationServiceAndRenderStatus(t *testi
 	}
 	dispatcher := NewDispatcher(Dependencies{AWS: aws})
 	for _, action := range []string{"aws-enable", "aws-disable"} {
+
 		var stdout, stderr bytes.Buffer
 		exit := dispatcher.executeIntent(context.Background(), tui.Intent{Action: action, Root: "/tmp/project", Workspace: "feature-a"}, &stdout, &stderr)
 		if exit != 0 || stderr.Len() != 0 {
@@ -618,5 +640,39 @@ func TestExecuteAWSDashboardIntentsUseApplicationServiceAndRenderStatus(t *testi
 	var stdout, stderr bytes.Buffer
 	if exit := dispatcher.executeIntent(context.Background(), tui.Intent{Action: "aws-enable", Root: "/tmp/project", Workspace: "feature-a"}, &stdout, &stderr); exit == 0 || !strings.Contains(stderr.String(), "safe unavailable") {
 		t.Fatalf("AWS application error exit/output = %d, %q", exit, stderr.String())
+	}
+}
+func TestVSCodeAttachVerifiesOwnershipBeforeOpeningSettings(t *testing.T) {
+	events := []string{}
+	workspaces := &workspaceStub{
+		events:       &events,
+		attachResult: app.WorkspaceAttachInfo{Workspace: "feature-a", Container: "dsx-owned-container"},
+	}
+	dispatcher := NewDispatcher(Dependencies{Workspaces: workspaces, VSCode: vscodeLauncherStub{events: &events}})
+	var stdout, stderr bytes.Buffer
+	exit := dispatcher.executeIntent(context.Background(), tui.Intent{Action: "vscode-attach", Root: "/tmp/project", Workspace: "feature-a"}, &stdout, &stderr)
+	if exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("attach exit = %d, stderr = %q", exit, stderr.String())
+	}
+	if got := strings.Join(events, ","); got != "attach-info,open-settings" {
+		t.Fatalf("attach events = %q", got)
+	}
+	for _, expected := range []string{"dsx-owned-container", "ms-vscode-remote.remote-containers", "Attach to Running Apple Container...", "/workspace"} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("guidance omitted %q: %q", expected, stdout.String())
+		}
+	}
+}
+
+func TestVSCodeAttachLaunchFailureReturnsSanitizedGuidance(t *testing.T) {
+	workspaces := &workspaceStub{attachResult: app.WorkspaceAttachInfo{Workspace: "feature-a", Container: "owned\x1b]8;;hostile\a"}}
+	dispatcher := NewDispatcher(Dependencies{Workspaces: workspaces, VSCode: vscodeLauncherStub{err: errors.New("open failed")}})
+	var stdout, stderr bytes.Buffer
+	exit := dispatcher.executeIntent(context.Background(), tui.Intent{Action: "vscode-attach", Root: "/tmp/project", Workspace: "feature-a"}, &stdout, &stderr)
+	if exit == 0 || stdout.Len() != 0 {
+		t.Fatalf("launch failure exit/stdout = %d, %q", exit, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Attach to Running Apple Container...") || strings.ContainsAny(stderr.String(), "\x1b\a") {
+		t.Fatalf("launch failure guidance unsafe or incomplete: %q", stderr.String())
 	}
 }

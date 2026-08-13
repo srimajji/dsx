@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9 AS artifacts
+FROM docker.io/library/ubuntu@sha256:3fe5b610f5c41eeeb56c2995bd4afb4990ac5b80dc980e33f9251eaaa8013615 AS artifacts
 
 ADD --checksum=sha256:f176edf8174db252abe1aa6e84df284e1b83b8dd7ef34ac7faf7884a5e172a4c https://github.com/can1357/oh-my-pi/releases/download/v17.2.12/omp-linux-arm64 /artifacts/omp
 ADD --checksum=sha256:89cbf79bd5ae6f9c58da47e8079f311c84219350c9c43c070d42f3e9b2a81401 https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-package-aarch64-unknown-linux-musl.tar.gz /artifacts/codex.tar.gz
@@ -18,8 +18,12 @@ ADD --checksum=sha256:67ee2bb60be09b6054b6b149549bb5e341be7d0ecf374f327f2d43e234
 ADD --checksum=sha256:823ea186446669fb024b839b117122d03ee0b3b20e199c95e09e85695bd30b0f https://codeload.github.com/zsh-users/zsh-history-substring-search/tar.gz/14c8d2e0ffaee98f2df9850b19944f32546fdea5 /artifacts/zsh-history-substring-search.tar.gz
 ADD --checksum=sha256:20665e469e720e674964a66854d5534b9af78cdfd438512746ecd1ade8e819ce https://codeload.github.com/zsh-users/zsh-autosuggestions/tar.gz/85919cd1ffa7d2d5412f6d3fe437ebdbeeec4fc5 /artifacts/zsh-autosuggestions.tar.gz
 ADD --checksum=sha256:3d26244d87547bd3755cf4b5739c643c76198559c2ae6267dcfc7825fa789ff5 https://codeload.github.com/zsh-users/zsh-syntax-highlighting/tar.gz/c4d95591843d49838b7ad30081e7aba3135a6703 /artifacts/zsh-syntax-highlighting.tar.gz
+ADD --checksum=sha256:ae16f237b595264fa2c321770c7245088e921ad14536425d9c719e92aced78c8 https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.36.22.zip /artifacts/aws-cli.zip
+ADD --checksum=sha256:fa513fca1eb2913334c944fe9adbdd410274a1cbe8dd05d03699a9eb85311d4e https://github.com/astral-sh/uv/releases/download/0.12.3/uv-aarch64-unknown-linux-musl.tar.gz /artifacts/uv.tar.gz
+ADD --checksum=sha256:13c219bfd1ff00a886c1523a9c7027c4f24c1e730e653376d2b81f1435da5a59 https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.400/dotnet-sdk-10.0.400-linux-arm64.tar.gz /artifacts/dotnet.tar.gz
+ADD --checksum=sha256:473dd66c7a3ef4b182065b3da670466c1bf2773a9dbb0ed8b33a39fe9d4f876d https://github.com/JetBrains/kotlin/releases/download/v2.4.10/kotlin-compiler-2.4.10.zip /artifacts/kotlin.zip
 
-RUN mkdir -p /opt/codex /opt/claude /opt/opencode /opt/node /opt/pnpm /opt/go /opt/java \
+RUN mkdir -p /opt/codex /opt/claude /opt/opencode /opt/node /opt/pnpm /opt/go /opt/java /opt/dotnet /opt/uv \
         /opt/shell-src/antidote /opt/shell-src/plugins/zsh-completions \
         /opt/shell-src/plugins/fzf-tab /opt/shell-src/plugins/zsh-history-substring-search \
         /opt/shell-src/plugins/zsh-autosuggestions /opt/shell-src/plugins/zsh-syntax-highlighting \
@@ -30,6 +34,14 @@ RUN mkdir -p /opt/codex /opt/claude /opt/opencode /opt/node /opt/pnpm /opt/go /o
     && tar -xzf /artifacts/pnpm.tar.gz -C /opt/pnpm --strip-components=1 \
     && tar -xzf /artifacts/go.tar.gz -C /opt/go --strip-components=1 \
     && tar -xzf /artifacts/java.tar.gz -C /opt/java --strip-components=1 \
+    && tar -xzf /artifacts/dotnet.tar.gz -C /opt/dotnet \
+    && tar -xzf /artifacts/uv.tar.gz -C /opt/uv --strip-components=1 \
+    && mkdir -p /opt/kotlin-extract \
+    && cd /opt/kotlin-extract \
+    && /opt/java/bin/jar xf /artifacts/kotlin.zip \
+    && mv kotlinc /opt/kotlin \
+    && chmod 0755 /opt/kotlin/bin/* \
+    && cd / \
     && tar -xzf /artifacts/starship.tar.gz -C /artifacts \
     && tar -xzf /artifacts/fzf.tar.gz -C /artifacts \
     && tar -xzf /artifacts/antidote.tar.gz -C /opt/shell-src/antidote --strip-components=1 \
@@ -45,40 +57,61 @@ RUN mkdir -p /opt/codex /opt/claude /opt/opencode /opt/node /opt/pnpm /opt/go /o
     && install -m 0755 /artifacts/starship /usr/local/bin/starship \
     && install -m 0755 /artifacts/fzf /usr/local/bin/fzf \
     && install -m 0755 /artifacts/direnv /usr/local/bin/direnv \
+    && install -m 0755 /opt/uv/uv /usr/local/bin/uv \
+    && install -m 0755 /opt/uv/uvx /usr/local/bin/uvx \
     && ln -s /opt/codex/bin/codex /usr/local/bin/codex
 
-FROM docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9
+FROM docker.io/library/ubuntu@sha256:3fe5b610f5c41eeeb56c2995bd4afb4990ac5b80dc980e33f9251eaaa8013615
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates=20260601~24.04.1 \
+    && apt-get install -y --no-install-recommends ca-certificates=20260601~26.04.1 \
     && rm -rf /var/lib/apt/lists/* \
     && sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|https://snapshot.ubuntu.com/ubuntu/20260811T000000Z/|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        curl=8.5.0-2ubuntu10.11 \
-        git=1:2.43.0-1ubuntu7.3 \
-        openssh-client=1:9.6p1-3ubuntu13.18 \
-        zsh=5.9-6ubuntu2 \
-        ripgrep=14.1.0-1 \
-        bat=0.24.0-1build1 \
-        jq=1.7.1-3ubuntu0.24.04.2 \
-        less=590-2ubuntu2.1 \
-        tmux=3.4-1ubuntu0.1 \
-        zip=3.0-13ubuntu0.2 \
-        unzip=6.0-28ubuntu4.1 \
-        build-essential=12.10ubuntu1 \
-        python3=3.12.3-0ubuntu2.1 \
-        python3-pip=24.0+dfsg-1ubuntu1.3 \
-        python3-venv=3.12.3-0ubuntu2.1 \
+        curl=8.18.0-1ubuntu2.3 \
+        git=1:2.53.0-1ubuntu1 \
+        openssh-client=1:10.2p1-2ubuntu3.5 \
+        zsh=5.9-8ubuntu3 \
+        ripgrep=15.1.0-1ubuntu1 \
+        bat=0.25.0-5ubuntu1 \
+        jq=1.8.1-4ubuntu2 \
+        less=668-1build1 \
+        tmux=3.6a-2ubuntu0.1 \
+        zip=3.0-15ubuntu3 \
+        unzip=6.0-29ubuntu1 \
+        build-essential=12.12ubuntu2.26.04.2 \
+        python3=3.14.3-0ubuntu2 \
+        python3-pip=25.1.1+dfsg-1ubuntu2 \
+        python3-venv=3.14.3-0ubuntu2 \
+        sudo=1.9.17p2-1ubuntu3 \
+        groff=1.23.0-10 \
+        libatomic1=16-20260322-1ubuntu1 \
+        libc6=2.43-2ubuntu2.3 \
+        libgcc-s1=16-20260322-1ubuntu1 \
+        libgssapi-krb5-2=1.22.1-2ubuntu4.1 \
+        libicu78=78.2-2ubuntu1 \
+        libssl3t64=3.5.5-1ubuntu3.3 \
+        libstdc++6=16-20260322-1ubuntu1 \
+        tzdata=2026c-0ubuntu0.26.04.1 \
+        tzdata-legacy=2026c-0ubuntu0.26.04.1 \
+        zlib1g=1:1.3.dfsg+really1.3.1-1ubuntu3 \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 501 --gid 20 --create-home --shell /bin/zsh dsx
+    && userdel --remove ubuntu \
+    && groupadd --gid 1000 dsx \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/zsh dsx
 
-ENV SHELL=/bin/zsh \
+ENV HOME=/home/dsx \
+    USER=dsx \
+    LOGNAME=dsx \
+    SHELL=/bin/zsh \
     ZDOTDIR=/usr/local/share/dsx/shell \
     JAVA_HOME=/opt/java \
+    DOTNET_ROOT=/opt/dotnet \
+    KOTLIN_HOME=/opt/kotlin \
     STARSHIP_CONFIG=/usr/local/share/dsx/shell/starship.toml \
-    PATH=/opt/node/bin:/opt/go/bin:/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/opt/dotnet:/opt/dotnet/tools:/opt/kotlin/bin:/opt/node/bin:/opt/go/bin:/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 COPY --from=artifacts /usr/local/bin/omp /usr/local/bin/omp
 COPY --from=artifacts /usr/local/bin/claude /usr/local/bin/claude
@@ -87,15 +120,24 @@ COPY --from=artifacts /usr/local/bin/codex /usr/local/bin/codex
 COPY --from=artifacts /usr/local/bin/starship /usr/local/bin/starship
 COPY --from=artifacts /usr/local/bin/fzf /usr/local/bin/fzf
 COPY --from=artifacts /usr/local/bin/direnv /usr/local/bin/direnv
+COPY --from=artifacts /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=artifacts /usr/local/bin/uvx /usr/local/bin/uvx
 COPY --from=artifacts /opt/codex /opt/codex
 COPY --from=artifacts /opt/node /opt/node
 COPY --from=artifacts /opt/pnpm /opt/pnpm
 COPY --from=artifacts /opt/go /opt/go
 COPY --from=artifacts /opt/java /opt/java
+COPY --from=artifacts /opt/dotnet /opt/dotnet
+COPY --from=artifacts /artifacts/aws-cli.zip /tmp/aws-cli.zip
+COPY --from=artifacts /opt/kotlin /opt/kotlin
 COPY --from=artifacts /opt/shell-src/antidote /opt/antidote
 COPY --from=artifacts /opt/shell-src/plugins /usr/local/share/dsx/shell/plugins
 
 RUN install -d -m 0755 /usr/local/share/dsx/shell \
+    && install -d -o 1000 -g 1000 -m 0700 /run/dsx /workspace /home/dsx/.dsx/auth /home/dsx/.local/state/dsx /home/dsx/.cache /var/lib/dsx \
+    && unzip -q /tmp/aws-cli.zip -d /tmp/aws-cli \
+    && /tmp/aws-cli/aws/install --install-dir /opt/aws-cli --bin-dir /usr/local/bin \
+    && rm -rf /tmp/aws-cli /tmp/aws-cli.zip \
     && ln -s /opt/pnpm/bin/pnpm.mjs /usr/local/bin/pnpm \
     && ln -s /opt/pnpm/bin/pnpx.mjs /usr/local/bin/pnpx \
     && ln -s /usr/bin/python3 /usr/local/bin/python \
@@ -105,9 +147,12 @@ COPY --chmod=0444 harnesses.lock.json /usr/local/share/dsx/harnesses.lock.json
 COPY --chmod=0444 shell-toolchains.lock.json /usr/local/share/dsx/shell-toolchains.lock.json
 COPY --chmod=0555 shell/dsx.zsh /usr/local/share/dsx/shell/dsx.zsh
 COPY --chmod=0444 shell/zsh_plugins.txt shell/starship.toml /usr/local/share/dsx/shell/
+COPY --chmod=0440 sudoers-dsx /etc/sudoers.d/dsx
 
 RUN printf '%s\n' 'source /usr/local/share/dsx/shell/dsx.zsh' > /usr/local/share/dsx/shell/.zshrc \
     && chmod 0444 /usr/local/share/dsx/shell/.zshrc
+
+RUN visudo -cf /etc/sudoers.d/dsx
 
 RUN printf '%s\n' '/usr/local/share/dsx/shell/plugins/zsh-completions path:src kind:fpath' \
         | zsh -c 'source /opt/antidote/antidote.zsh; antidote bundle' \
@@ -132,8 +177,8 @@ RUN printf '%s\n' '/usr/local/share/dsx/shell/plugins/zsh-completions path:src k
         /usr/local/share/dsx/shell/direnv-init.zsh \
         /usr/local/share/dsx/shell/starship-init.zsh
 
-LABEL io.dsx.harness-lock.sha256="219209eda5f77b364f8270de14e6c5deffe1573f63edcf02b46dd16c00bdbda6"
+LABEL io.dsx.harness-lock.sha256="0dbd480a8a9c325430c4237476e9feac7556857ef76c6432f965f3459a7b2650"
 
-USER 501:20
+USER 1000:1000
 WORKDIR /workspace
 ENTRYPOINT ["/bin/sh", "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"]

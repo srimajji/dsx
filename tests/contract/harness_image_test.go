@@ -17,6 +17,7 @@ type harnessImageLock struct {
 	Platform      string `json:"platform"`
 	Base          struct {
 		Reference string `json:"reference"`
+		Release   string `json:"release"`
 	} `json:"base"`
 	Harnesses []struct {
 		Name           string `json:"name"`
@@ -33,6 +34,7 @@ type shellToolchainsLock struct {
 	Platform      string `json:"platform"`
 	Base          struct {
 		Reference string `json:"reference"`
+		Release   string `json:"release"`
 	} `json:"base"`
 	APT struct {
 		Snapshot  string `json:"snapshot"`
@@ -48,11 +50,15 @@ type shellToolchainsLock struct {
 		} `json:"packages"`
 	} `json:"apt"`
 	Artifacts []struct {
-		Name        string `json:"name"`
-		Version     string `json:"version"`
-		Source      string `json:"source"`
-		SHA256      string `json:"sha256"`
-		InstallRoot string `json:"installRoot"`
+		Name                    string `json:"name"`
+		Version                 string `json:"version"`
+		Source                  string `json:"source"`
+		SHA256                  string `json:"sha256"`
+		InstallRoot             string `json:"installRoot"`
+		UpstreamDigestAlgorithm string `json:"upstreamDigestAlgorithm"`
+		UpstreamDigest          string `json:"upstreamDigest"`
+		Signature               string `json:"signature"`
+		SigningKeyFingerprint   string `json:"signingKeyFingerprint"`
 	} `json:"artifacts"`
 	Plugins struct {
 		Manager struct {
@@ -81,6 +87,8 @@ type shellToolchainsLock struct {
 		Shell          string `json:"shell"`
 		Path           string `json:"path"`
 		JavaHome       string `json:"javaHome"`
+		DotnetRoot     string `json:"dotnetRoot"`
+		KotlinHome     string `json:"kotlinHome"`
 		StarshipConfig string `json:"starshipConfig"`
 		ZDOTDir        string `json:"zdotdir"`
 	} `json:"environment"`
@@ -110,7 +118,8 @@ func TestHarnessImageLockMatchesAdaptersAndBuildRecipe(t *testing.T) {
 	if err := decoder.Decode(&lock); err != nil {
 		t.Fatal(err)
 	}
-	if lock.SchemaVersion != 1 || lock.Platform != "linux/arm64" || !strings.Contains(lock.Base.Reference, "@sha256:") {
+	if lock.SchemaVersion != 1 || lock.Platform != "linux/arm64" || lock.Base.Release != "26.04" ||
+		lock.Base.Reference != "docker.io/library/ubuntu@sha256:3fe5b610f5c41eeeb56c2995bd4afb4990ac5b80dc980e33f9251eaaa8013615" {
 		t.Fatalf("invalid harness image lock header: %#v", lock)
 	}
 	byName := make(map[harness.Name]harness.PinnedArtifact)
@@ -158,7 +167,8 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 	if err := decoder.Decode(&lock); err != nil {
 		t.Fatal(err)
 	}
-	if lock.SchemaVersion != 1 || lock.Platform != "linux/arm64" || !strings.Contains(lock.Base.Reference, "@sha256:") {
+	if lock.SchemaVersion != 1 || lock.Platform != "linux/arm64" || lock.Base.Release != "26.04" ||
+		lock.Base.Reference != "docker.io/library/ubuntu@sha256:3fe5b610f5c41eeeb56c2995bd4afb4990ac5b80dc980e33f9251eaaa8013615" {
 		t.Fatalf("invalid shell toolchains lock header: %#v", lock)
 	}
 
@@ -176,7 +186,7 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 	bootstrap := lock.APT.Bootstrap
 	if bootstrap.Repository != "http://ports.ubuntu.com/ubuntu-ports" ||
 		bootstrap.Package != "ca-certificates" ||
-		bootstrap.Version != "20260601~24.04.1" ||
+		bootstrap.Version != "20260601~26.04.1" ||
 		bootstrap.Trust != "apt-signed-index" {
 		t.Fatalf("invalid apt bootstrap contract: %#v", bootstrap)
 	}
@@ -214,7 +224,7 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 		}
 	}
 	sort.Strings(packageNames)
-	const expectedPackages = "bat,build-essential,curl,git,jq,less,openssh-client,python3,python3-pip,python3-venv,ripgrep,tmux,unzip,zip,zsh"
+	const expectedPackages = "bat,build-essential,curl,git,groff,jq,less,libatomic1,libc6,libgcc-s1,libgssapi-krb5-2,libicu78,libssl3t64,libstdc++6,openssh-client,python3,python3-pip,python3-venv,ripgrep,sudo,tmux,tzdata,tzdata-legacy,unzip,zip,zlib1g,zsh"
 	if strings.Join(packageNames, ",") != expectedPackages {
 		t.Fatalf("locked apt packages = %v", packageNames)
 	}
@@ -231,11 +241,27 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 		if !strings.Contains(recipe, artifact.InstallRoot) {
 			t.Fatalf("Containerfile does not contain install root %q for %q", artifact.InstallRoot, artifact.Name)
 		}
+		switch artifact.Name {
+		case "dotnet-sdk":
+			if artifact.UpstreamDigestAlgorithm != "sha512" || !isLowerHex(artifact.UpstreamDigest, 128) ||
+				artifact.Signature != "" || artifact.SigningKeyFingerprint != "" {
+				t.Fatalf("invalid .NET publisher provenance: %#v", artifact)
+			}
+		case "aws-cli-v2":
+			if artifact.Signature != artifact.Source+".sig" || !isLowerHex(strings.ToLower(artifact.SigningKeyFingerprint), 40) ||
+				artifact.UpstreamDigestAlgorithm != "" || artifact.UpstreamDigest != "" {
+				t.Fatalf("invalid AWS publisher provenance: %#v", artifact)
+			}
+		default:
+			if artifact.UpstreamDigestAlgorithm != "" || artifact.UpstreamDigest != "" || artifact.Signature != "" || artifact.SigningKeyFingerprint != "" {
+				t.Fatalf("unexpected publisher provenance on %q", artifact.Name)
+			}
+		}
 		providerVersions[artifact.Name] = artifact.Version
 		artifactNames = append(artifactNames, artifact.Name)
 	}
 	sort.Strings(artifactNames)
-	if strings.Join(artifactNames, ",") != "direnv,fzf,go,node,pnpm,starship,temurin-jdk" {
+	if strings.Join(artifactNames, ",") != "aws-cli-v2,direnv,dotnet-sdk,fzf,go,kotlin,node,pnpm,starship,temurin-jdk,uv" {
 		t.Fatalf("locked artifacts = %v", artifactNames)
 	}
 
@@ -294,38 +320,46 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 	}
 
 	expectedExecutables := map[string]string{
-		"bat":      "/usr/local/bin/bat",
-		"c++":      "/usr/bin/c++",
-		"cc":       "/usr/bin/cc",
-		"curl":     "/usr/bin/curl",
-		"direnv":   "/usr/local/bin/direnv",
-		"fzf":      "/usr/local/bin/fzf",
-		"git":      "/usr/bin/git",
-		"go":       "/opt/go/bin/go",
-		"java":     "/opt/java/bin/java",
-		"javac":    "/opt/java/bin/javac",
-		"jq":       "/usr/bin/jq",
-		"less":     "/usr/bin/less",
-		"make":     "/usr/bin/make",
-		"node":     "/opt/node/bin/node",
-		"npm":      "/opt/node/bin/npm",
-		"pip":      "/usr/local/bin/pip",
-		"pnpm":     "/usr/local/bin/pnpm",
-		"python":   "/usr/local/bin/python",
-		"python3":  "/usr/bin/python3",
-		"rg":       "/usr/bin/rg",
-		"ssh":      "/usr/bin/ssh",
-		"starship": "/usr/local/bin/starship",
-		"tmux":     "/usr/bin/tmux",
-		"unzip":    "/usr/bin/unzip",
-		"zip":      "/usr/bin/zip",
-		"zsh":      "/bin/zsh",
+		"aws":           "/usr/local/bin/aws",
+		"aws_completer": "/usr/local/bin/aws_completer",
+		"bat":           "/usr/local/bin/bat",
+		"c++":           "/usr/bin/c++",
+		"cc":            "/usr/bin/cc",
+		"curl":          "/usr/bin/curl",
+		"direnv":        "/usr/local/bin/direnv",
+		"dnx":           "/opt/dotnet/dnx",
+		"dotnet":        "/opt/dotnet/dotnet",
+		"fzf":           "/usr/local/bin/fzf",
+		"git":           "/usr/bin/git",
+		"go":            "/opt/go/bin/go",
+		"java":          "/opt/java/bin/java",
+		"javac":         "/opt/java/bin/javac",
+		"jq":            "/usr/bin/jq",
+		"kotlin":        "/opt/kotlin/bin/kotlin",
+		"kotlinc":       "/opt/kotlin/bin/kotlinc",
+		"less":          "/usr/bin/less",
+		"make":          "/usr/bin/make",
+		"node":          "/opt/node/bin/node",
+		"npm":           "/opt/node/bin/npm",
+		"pip":           "/usr/local/bin/pip",
+		"pnpm":          "/usr/local/bin/pnpm",
+		"python":        "/usr/local/bin/python",
+		"python3":       "/usr/bin/python3",
+		"rg":            "/usr/bin/rg",
+		"ssh":           "/usr/bin/ssh",
+		"starship":      "/usr/local/bin/starship",
+		"tmux":          "/usr/bin/tmux",
+		"unzip":         "/usr/bin/unzip",
+		"uv":            "/usr/local/bin/uv",
+		"uvx":           "/usr/local/bin/uvx",
+		"zip":           "/usr/bin/zip",
+		"zsh":           "/bin/zsh",
 	}
 	versionOverrides := map[string]string{
 		"npm":     "11.17.0",
-		"pip":     "24.0",
-		"python":  "3.12.3",
-		"python3": "3.12.3",
+		"pip":     "25.1.1",
+		"python":  "3.14.3",
+		"python3": "3.14.3",
 	}
 	toolNames := make([]string, 0, len(lock.Tools))
 	for _, tool := range lock.Tools {
@@ -346,26 +380,38 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 		toolNames = append(toolNames, tool.Name)
 	}
 	sort.Strings(toolNames)
-	const expectedTools = "bat,c++,cc,curl,direnv,fzf,git,go,java,javac,jq,less,make,node,npm,pip,pnpm,python,python3,rg,ssh,starship,tmux,unzip,zip,zsh"
+	const expectedTools = "aws,aws_completer,bat,c++,cc,curl,direnv,dnx,dotnet,fzf,git,go,java,javac,jq,kotlin,kotlinc,less,make,node,npm,pip,pnpm,python,python3,rg,ssh,starship,tmux,unzip,uv,uvx,zip,zsh"
 	if strings.Join(toolNames, ",") != expectedTools {
 		t.Fatalf("locked tools = %v", toolNames)
 	}
 
-	const expectedPath = "/opt/node/bin:/opt/go/bin:/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	const expectedPath = "/opt/dotnet:/opt/dotnet/tools:/opt/kotlin/bin:/opt/node/bin:/opt/go/bin:/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	if lock.Environment.Shell != "/bin/zsh" ||
 		lock.Environment.ZDOTDir != "/usr/local/share/dsx/shell" ||
 		lock.Environment.Path != expectedPath ||
 		lock.Environment.JavaHome != "/opt/java" ||
+		lock.Environment.DotnetRoot != "/opt/dotnet" ||
+		lock.Environment.KotlinHome != "/opt/kotlin" ||
 		lock.Environment.StarshipConfig != "/usr/local/share/dsx/shell/starship.toml" {
 		t.Fatalf("invalid image environment contract: %#v", lock.Environment)
 	}
 	for _, fragment := range []string{
-		"ENV SHELL=" + lock.Environment.Shell,
+		"ENV HOME=/home/dsx",
+		"USER=dsx",
+		"LOGNAME=dsx",
+		"SHELL=/bin/zsh",
 		"ZDOTDIR=" + lock.Environment.ZDOTDir,
 		"JAVA_HOME=" + lock.Environment.JavaHome,
+		"DOTNET_ROOT=" + lock.Environment.DotnetRoot,
+		"KOTLIN_HOME=" + lock.Environment.KotlinHome,
 		"STARSHIP_CONFIG=" + lock.Environment.StarshipConfig,
 		"PATH=" + lock.Environment.Path,
-		"useradd --uid 501 --gid 20 --create-home --shell /bin/zsh dsx",
+		"groupadd --gid 1000 dsx",
+		"useradd --uid 1000 --gid 1000 --create-home --shell /bin/zsh dsx",
+		"userdel --remove ubuntu",
+		"install -d -o 1000 -g 1000 -m 0700 /run/dsx /workspace /home/dsx/.dsx/auth /home/dsx/.local/state/dsx /home/dsx/.cache /var/lib/dsx",
+		"COPY --chmod=0440 sudoers-dsx /etc/sudoers.d/dsx",
+		"visudo -cf /etc/sudoers.d/dsx",
 		"ln -s /opt/pnpm/bin/pnpm.mjs /usr/local/bin/pnpm",
 		"ln -s /usr/bin/python3 /usr/local/bin/python",
 		"ln -s /usr/bin/pip3 /usr/local/bin/pip",
@@ -402,7 +448,7 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 			chmodBlock = recipe[chmodAt : chmodAt+chmodEnd]
 		}
 	}
-	userAt := strings.Index(recipe, "USER 501:20")
+	userAt := strings.Index(recipe, "USER 1000:1000")
 	if chmodBlock == "" || userAt < chmodAt || !strings.Contains(chmodBlock, lock.Generated.DirenvInit) {
 		t.Fatal("build must make the root-generated static direnv init read-only before switching users")
 	}
@@ -438,9 +484,9 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 		}
 	}
 
-	for _, forbidden := range []string{"curl -fsSL", "curl -sSL", "| sh", "| bash", "antidote update", "git clone"} {
-		if strings.Contains(recipe, forbidden) {
-			t.Fatalf("Containerfile contains unpinned or runtime-regenerating command %q", forbidden)
+	for _, forbidden := range []string{"curl -fsSL", "curl -sSL", "| sh", "| bash", "antidote update", "git clone", "apt-get install awscli", "pip install awscli", "dotnet-install.sh", "apt-get install dotnet-sdk", "gradle", "maven", "kotlin-native"} {
+		if strings.Contains(strings.ToLower(recipe), forbidden) {
+			t.Fatalf("Containerfile contains unpinned or forbidden command %q", forbidden)
 		}
 	}
 	normalizedRecipe := strings.NewReplacer(" ", "", "\t", "", `"`, "", "'", "").Replace(strings.ToLower(recipe))
@@ -476,7 +522,7 @@ func TestShellToolchainsLockMatchesBuildRecipe(t *testing.T) {
 	if strings.Contains(recipe, "rm -rf /opt/antidote") {
 		t.Fatal("Containerfile removes pinned Antidote required by managed Zsh")
 	}
-	if strings.Count(recipe, "LABEL io.dsx.harness-lock.sha256=\"219209eda5f77b364f8270de14e6c5deffe1573f63edcf02b46dd16c00bdbda6\"") != 1 {
+	if strings.Count(recipe, "LABEL io.dsx.harness-lock.sha256=\"0dbd480a8a9c325430c4237476e9feac7556857ef76c6432f965f3459a7b2650\"") != 1 {
 		t.Fatalf("harness attestation label changed: %q", recipe)
 	}
 }

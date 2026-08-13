@@ -77,6 +77,7 @@ func TestMaterializeWritesEveryEmbeddedAsset(t *testing.T) {
 		"shell/starship.toml",
 		"shell/zsh_plugins.txt",
 		"shell-toolchains.lock.json",
+		"sudoers-dsx",
 	}
 	slices.Sort(gotPaths)
 	slices.Sort(wantPaths)
@@ -130,6 +131,7 @@ func TestInputDigestCoversAuthoritativeAssetList(t *testing.T) {
 		"shell/starship.toml",
 		"shell/zsh_plugins.txt",
 		"shell-toolchains.lock.json",
+		"sudoers-dsx",
 	}
 	if !slices.Equal(standardImageAssetNames[:], wantNames) {
 		t.Fatalf("standardImageAssetNames = %q, want %q", standardImageAssetNames, wantNames)

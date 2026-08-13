@@ -69,6 +69,16 @@ func TestWorkspaceCreatePersistsIntentBeforeMutationAndNeverMountsHostSource(t *
 	if got := spec.Entrypoint; len(got) < 2 || got[0] != DefaultGuestHelperPath || got[1] != "serve" {
 		t.Fatalf("workspace entrypoint = %#v", got)
 	}
+	if spec.User != standardWorkspaceUser {
+		t.Fatalf("workspace user = %q, want %q", spec.User, standardWorkspaceUser)
+	}
+	if slices.Contains(spec.Entrypoint, "--initialize-workspace") {
+		t.Fatalf("workspace entrypoint retains root initialization: %#v", spec.Entrypoint)
+	}
+	if len(fixture.runtime.execs) == 0 || !reflect.DeepEqual(fixture.runtime.execs[0].Argv, workspaceInitializationArgv) ||
+		fixture.runtime.execs[0].User != "0:0" || fixture.runtime.execs[0].WorkingDir != "/workspace" {
+		t.Fatalf("first workspace exec is not exact volume initialization: %#v", fixture.runtime.execs)
+	}
 }
 
 func TestWorkspaceCreateHostDefaultPlansPrivateDisabledChannelMount(t *testing.T) {

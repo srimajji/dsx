@@ -175,7 +175,13 @@ $ dsx workspace restart feature-a
 
 It terminates and does not restore agents, development servers, watchers, manually started databases, background commands, application processes, or browsers. Only `dsx-guest` is restored. Restarting one workspace cannot affect its siblings.
 
-With the managed DSX Standard image, `workspace open` enters login interactive Zsh with the image-owned Starship and pinned offline plugins. DSX does not read, copy, mount, or execute host shell dotfiles. Custom images must provide their own shell and toolchain expectations.
+With the managed DSX Standard image, `workspace open` enters login interactive Zsh as `dsx` (`UID 1000`, `GID 1000`) with home `/home/dsx`, image-owned Starship, and pinned offline plugins. DSX Standard uses Ubuntu 26.04 LTS ARM64. Direct shells and VS Code attachment may run `sudo -n COMMAND` without a password inside the workspace VM; DSX creates no root password or direct-root-login workflow. Elevation can control the VM and mounted workspace resources, but it grants no host runtime, host-home, or host-source authority. DSX does not read, copy, mount, or execute host shell dotfiles. Custom images must provide compatible account, shell, and toolchain expectations; passwordless sudo is a Standard-image guarantee.
+
+The image-level baseline includes AWS CLI v2 2.36.22 (`aws`, `aws_completer`), uv 0.12.3 (`uv`, `uvx`), .NET 10 LTS SDK 10.0.400 with .NET/ASP.NET Core runtimes 10.0.11 (`dotnet`, `dnx`), and standalone Kotlin compiler 2.4.10 (`kotlin`, `kotlinc`) on the managed JDK. Installing `aws` grants no credentials: only an explicit per-workspace AWS grant exposes the host default profile, and disabled workspaces receive no AWS authority. uv and `dnx` may download dependencies only when invoked. Kotlin does not include Gradle, Maven, Kotlin/Native, or runtime dependency resolution.
+
+For a running workspace, select it in the dashboard and press `v` for **Attach with VS Code (experimental)**. Install Dev Containers 0.467.0 or later, enable **Dev › Containers: Experimental Apple Container Support**, run **Dev Containers: Attach to Running Apple Container...**, choose the exact container name DSX prints, and open `/workspace`. Apple `container` 1.2.2 with Dev Containers 0.467.0+ is the verified combination. DSX neither starts stopped workspaces nor reads `.devcontainer`, and VS Code attachment does not replace explicit DSX loopback port publication.
+
+Existing workspaces retain the image and user contract with which they were created. To adopt this Standard-image revision, first fetch/apply or otherwise preserve work, remove the old workspace with ownership-safe `dsx workspace remove NAME`, approve the changed Standard-image hash, and recreate it. DSX does not silently replace or recursively chown existing persistent resources.
 
 ## Run an agent in an existing workspace
 

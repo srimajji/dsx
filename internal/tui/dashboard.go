@@ -177,6 +177,10 @@ func (model *DashboardModel) updateHome(pressed string) (tea.Model, tea.Cmd) {
 		if workspace := model.selectedWorkspace(); workspace != nil && canOpen(*workspace) {
 			return model.emit("workspace-open", *workspace)
 		}
+	case "v":
+		if workspace := model.selectedWorkspace(); workspace != nil && workspace.State == "running" && !workspace.MutationActive {
+			return model.emit("vscode-attach", *workspace)
+		}
 	case "a":
 		if workspace := model.selectedWorkspace(); workspace != nil && canAgent(*workspace) && len(model.data.AllowedAgents) != 0 {
 			model.screen, model.focus, model.browser = dashboardAgent, 0, false
@@ -488,6 +492,9 @@ func (model *DashboardModel) renderActions(theme visualTheme) string {
 	if workspace != nil {
 		if canOpen(*workspace) {
 			actions = append(actions, "[Enter] Open")
+		}
+		if workspace.State == "running" && !workspace.MutationActive {
+			actions = append(actions, "[v] Attach with VS Code (experimental)")
 		}
 		if canAgent(*workspace) && len(model.data.AllowedAgents) != 0 {
 			actions = append(actions, "[a] Open agent")

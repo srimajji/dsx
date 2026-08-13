@@ -128,6 +128,7 @@ func main() {
 		Auth:          authentication,
 		AWS:           aws,
 		Inventory:     workspaceInventory,
+		VSCode:        hostcmd.NewVSCodeLauncher(),
 		TUI:           runner,
 		Stdin:         os.Stdin,
 		TerminalState: terminal.NewRawState(os.Stdin),

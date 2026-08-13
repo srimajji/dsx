@@ -37,22 +37,49 @@ func (runner *Runner) Run(ctx context.Context, request RunRequest) (Intent, bool
 	if runner == nil || runner.Application == nil {
 		return Intent{}, false, fmt.Errorf("TUI application service is unavailable")
 	}
-	state := app.BareState{Screen: app.BareSetup}
-	var err error
-	if !request.ForceSetup {
-		state, err = runner.Application.BareState(ctx, app.BareStateRequest{Root: request.Root})
-		if err != nil {
-			return Intent{}, false, err
-		}
+	state, err := runner.Application.BareState(ctx, app.BareStateRequest{Root: request.Root})
+	if err != nil {
+		return Intent{}, false, err
 	}
-	var model tea.Model
-	switch state.Screen {
-	case app.BareSetup:
-		preview, previewErr := runner.Application.PreviewSetup(ctx, app.SetupPreviewRequest{Root: request.Root})
+	var (
+		model tea.Model
+		setup *SetupModel
+	)
+	if request.ForceSetup && state.ConfigExists {
+		preview, previewErr := runner.Application.PreviewExisting(ctx, app.BareStateRequest{Root: request.Root})
 		if previewErr != nil {
 			return Intent{}, false, previewErr
 		}
-		setup := NewSetupModel(ctx, runner.Application, request.Root, preview, request.Accessible)
+		setup = NewExistingApprovalModel(ctx, runner.Application, request.Root, preview, request.Accessible)
+	} else {
+		if request.ForceSetup {
+			state.Screen = app.BareSetup
+		}
+		switch state.Screen {
+		case app.BareSetup:
+			preview, previewErr := runner.Application.PreviewSetup(ctx, app.SetupPreviewRequest{Root: request.Root})
+			if previewErr != nil {
+				return Intent{}, false, previewErr
+			}
+			setup = NewSetupModel(ctx, runner.Application, request.Root, preview, request.Accessible)
+		case app.BareDashboard:
+			if request.LoadDashboard != nil {
+				request.Dashboard, err = request.LoadDashboard(ctx, request.Root)
+				if err != nil {
+					return Intent{}, false, err
+				}
+			}
+			if request.Dashboard.Root == "" {
+				request.Dashboard.Root = request.Root
+			}
+			action := NewDashboardModel(request.Dashboard)
+			action.accessible = request.Accessible
+			model = action
+		default:
+			return Intent{}, false, fmt.Errorf("unknown bare-command screen %q", state.Screen)
+		}
+	}
+	if setup != nil {
 		if request.Accessible {
 			if _, _, err := runner.runAccessibleSetup(ctx, setup); err != nil {
 				return Intent{}, false, err
@@ -63,21 +90,6 @@ func (runner *Runner) Run(ctx context.Context, request RunRequest) (Intent, bool
 			return Intent{}, false, nil
 		}
 		model = setup
-	case app.BareDashboard:
-		if request.LoadDashboard != nil {
-			request.Dashboard, err = request.LoadDashboard(ctx, request.Root)
-			if err != nil {
-				return Intent{}, false, err
-			}
-		}
-		if request.Dashboard.Root == "" {
-			request.Dashboard.Root = request.Root
-		}
-		action := NewDashboardModel(request.Dashboard)
-		action.accessible = request.Accessible
-		model = action
-	default:
-		return Intent{}, false, fmt.Errorf("unknown bare-command screen %q", state.Screen)
 	}
 	var final tea.Model
 	if action, ok := model.(*DashboardModel); ok && request.Accessible {

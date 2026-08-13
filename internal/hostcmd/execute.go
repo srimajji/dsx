@@ -66,6 +66,7 @@ type WorkspaceLifecycle interface {
 	Restart(context.Context, app.WorkspaceRestartRequest) (app.WorkspaceResult, error)
 	Remove(context.Context, app.WorkspaceRemoveRequest) (app.WorkspaceRemoveResult, error)
 	List(context.Context, app.WorkspaceListRequest) (app.WorkspaceListResult, error)
+	AttachInfo(context.Context, app.WorkspaceAttachInfoRequest) (app.WorkspaceAttachInfo, error)
 }
 
 type WorkspaceGit interface {
@@ -97,6 +98,10 @@ type WorkspaceInventory interface {
 	ListAllManifests(context.Context) ([]state.Manifest, error)
 }
 
+type VSCodeLauncher interface {
+	OpenSettings(context.Context) error
+}
+
 type Dependencies struct {
 	Inspector     Inspector
 	Doctor        Doctor
@@ -107,6 +112,7 @@ type Dependencies struct {
 	AWS           AWSWorkspaceManager
 	Inventory     WorkspaceInventory
 	TUI           TUIRunner
+	VSCode        VSCodeLauncher
 	Stdin         io.Reader
 	IsTTY         func(io.Reader, io.Writer) bool
 	TerminalState terminal.TerminalState

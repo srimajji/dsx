@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1339,12 +1340,28 @@ func validExec(s runtime.ExecSpec) error {
 		}
 	}
 	if s.User != "" {
-		if err := nonroot(s.User); err != nil && !validRootReadOnlyStaging(s) && !validRootReadOnlyCleanup(s) {
+		if err := nonroot(s.User); err != nil && !validRootReadOnlyStaging(s) && !validRootReadOnlyCleanup(s) && !validRootWorkspaceInitialization(s) {
 			return err
 		}
 	}
 	return nil
 }
+func validRootWorkspaceInitialization(spec runtime.ExecSpec) bool {
+	if spec.User != "0:0" || spec.WorkingDir != "/workspace" || len(spec.Env) != 0 {
+		return false
+	}
+	want := []string{
+		"/usr/local/libexec/dsx/dsx-guest", "initialize-workspace",
+		"--child-uid", "1000", "--child-gid", "1000",
+		"--path", "/workspace",
+		"--path", "/home/dsx/.dsx/auth",
+		"--path", "/home/dsx/.local/state/dsx",
+		"--path", "/home/dsx/.cache",
+		"--path", "/var/lib/dsx",
+	}
+	return slices.Equal(spec.Argv, want)
+}
+
 func validRootReadOnlyStaging(spec runtime.ExecSpec) bool {
 	if spec.User != "0:0" || spec.WorkingDir != "/workspace" || len(spec.Env) != 0 || len(spec.Argv) != 9 {
 		return false
@@ -1606,7 +1623,7 @@ func validRootSupervisor(spec runtime.WorkspaceSpec) bool {
 		"--socket", "/run/dsx/control.sock",
 		"--child-uid", "", "--child-gid", "",
 	}
-	if len(spec.Entrypoint) != len(want) && len(spec.Entrypoint) != len(want)+2 {
+	if len(spec.Entrypoint) != len(want) {
 		return false
 	}
 	for index := range want {
@@ -1619,28 +1636,18 @@ func validRootSupervisor(spec runtime.WorkspaceSpec) bool {
 	if uidErr != nil || gidErr != nil || uid == 0 || gid == 0 {
 		return false
 	}
-	initializeWorkspace := len(spec.Entrypoint) == len(want)+2
-	if initializeWorkspace && (spec.Entrypoint[8] != "--initialize-workspace" || spec.Entrypoint[9] != "/workspace") {
-		return false
-	}
 	helperMounts := 0
-	workspaceVolumes := 0
 	for _, mount := range spec.Mounts {
-		switch mount.Target {
-		case "/usr/local/libexec/dsx":
+		if mount.Target == "/workspace" {
+			return false
+		}
+		if mount.Target == "/usr/local/libexec/dsx" {
 			helperMounts++
 			if mount.Type != "bind" || mount.Authority != runtime.MountAuthorityGuestHelper || !mount.ReadOnly ||
 				hostPath(runtime.HostPath(mount.Source)) != nil || validGuestHelperHostDirectory(mount.Source) != nil {
 				return false
 			}
-		case "/workspace":
-			if mount.Type == "volume" && mount.Authority == runtime.MountAuthorityVolume && !mount.ReadOnly {
-				workspaceVolumes++
-			}
 		}
-	}
-	if initializeWorkspace {
-		return helperMounts == 1 && workspaceVolumes == 1
 	}
 	return helperMounts == 1
 }

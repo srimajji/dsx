@@ -822,7 +822,39 @@ func TestExecAllowsOnlyExactRootReadOnlyCleanup(t *testing.T) {
 	}
 }
 
-func TestWorkspaceAllowsOnlyPinnedRootGuestSupervisor(t *testing.T) {
+func TestExecAllowsOnlyExactRootWorkspaceInitialization(t *testing.T) {
+	spec := runtime.ExecSpec{
+		Argv: []string{
+			"/usr/local/libexec/dsx/dsx-guest", "initialize-workspace",
+			"--child-uid", "1000", "--child-gid", "1000",
+			"--path", "/workspace",
+			"--path", "/home/dsx/.dsx/auth",
+			"--path", "/home/dsx/.local/state/dsx",
+			"--path", "/home/dsx/.cache",
+			"--path", "/var/lib/dsx",
+		},
+		WorkingDir: "/workspace",
+		User:       "0:0",
+	}
+	if err := validExec(spec); err != nil {
+		t.Fatalf("exact initializer rejected: %v", err)
+	}
+	for index := range spec.Argv {
+		mutated := spec
+		mutated.Argv = append([]string(nil), spec.Argv...)
+		mutated.Argv[index] += "-changed"
+		if err := validExec(mutated); err == nil {
+			t.Fatalf("mutated initializer argument %d accepted", index)
+		}
+	}
+	mutated := spec
+	mutated.Env = []string{"X=1"}
+	if err := validExec(mutated); err == nil {
+		t.Fatal("initializer environment accepted")
+	}
+}
+
+func TestWorkspaceUsesPinnedNonRootGuestSupervisor(t *testing.T) {
 	helperRoot, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -836,48 +868,24 @@ func TestWorkspaceAllowsOnlyPinnedRootGuestSupervisor(t *testing.T) {
 	identity := oi(t, runtime.ResourceWorkspace, "workspace")
 	spec := runtime.WorkspaceSpec{
 		Name: identity.Name(), Image: runtime.Image{Reference: "image:tag", Digest: "sha256:" + strings.Repeat("a", 64)},
-		Entrypoint: []string{"/bin/true"}, WorkingDir: "/workspace", User: "0:0", Labels: identity.Labels(),
+		Entrypoint: []string{
+			"/usr/local/libexec/dsx/dsx-guest", "serve",
+			"--socket", "/run/dsx/control.sock",
+			"--child-uid", "1000", "--child-gid", "1000",
+		},
+		WorkingDir: "/workspace", User: "1000:1000", Labels: identity.Labels(),
 		Networks: []string{oi(t, runtime.ResourceNetwork, "network").Name()},
+		Mounts: []runtime.Mount{
+			{Source: helperRoot, Target: "/usr/local/libexec/dsx", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityGuestHelper},
+			{Source: "dsx-owned-workspace", Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume},
+		},
+	}
+	if _, err := validWorkspace(spec); err != nil {
+		t.Fatalf("pinned non-root supervisor rejected: %v", err)
 	}
 	spec.User = "0:0"
 	if _, err := validWorkspace(spec); err == nil {
-		t.Fatal("arbitrary root workspace was accepted")
-	}
-	spec.Entrypoint = []string{
-		"/usr/local/libexec/dsx/dsx-guest", "serve",
-		"--socket", "/run/dsx/control.sock",
-		"--child-uid", "501", "--child-gid", "20",
-	}
-	spec.Mounts = []runtime.Mount{
-		{Source: helperRoot, Target: "/usr/local/libexec/dsx", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityGuestHelper},
-		{Source: "dsx-owned-workspace", Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume},
-	}
-	if _, err := validWorkspace(spec); err != nil {
-		t.Fatalf("pinned root supervisor rejected: %v", err)
-	}
-	if argument, err := mountArg(spec.Mounts[0]); err != nil ||
-		argument != "type=bind,source="+helperRoot+",target=/usr/local/libexec/dsx,readonly" {
-		t.Fatalf("guest helper serialization = %q, %v", argument, err)
-	}
-	spec.Entrypoint = append(spec.Entrypoint, "--initialize-workspace", "/workspace")
-	if _, err := validWorkspace(spec); err != nil {
-		t.Fatalf("owned-volume root supervisor rejected: %v", err)
-	}
-	spec.Mounts[len(spec.Mounts)-1] = runtime.Mount{Source: "/tmp/project", Target: "/workspace", Type: "bind", Authority: runtime.MountAuthorityVolume}
-	if _, err := validWorkspace(spec); err == nil {
-		t.Fatal("host-mounted workspace initialization was accepted")
-	}
-	spec.Mounts[len(spec.Mounts)-1] = runtime.Mount{Source: "dsx-owned-workspace", Target: "/workspace", Type: "volume", Authority: runtime.MountAuthorityVolume}
-	spec.Entrypoint = spec.Entrypoint[:8]
-	spec.Mounts = append(spec.Mounts, runtime.Mount{Source: "/tmp/hostile", Target: "/usr/local/libexec/dsx/dsx-guest", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityVolume})
-	if _, err := validWorkspace(spec); err == nil {
-		t.Fatal("nested helper replacement mount was accepted")
-	}
-
-	spec.Mounts = spec.Mounts[:2]
-	spec.Entrypoint[2] = "--other"
-	if _, err := validWorkspace(spec); err == nil {
-		t.Fatal("modified root supervisor authority was accepted")
+		t.Fatal("ordinary root workspace was accepted")
 	}
 }
 func TestWorkspaceHostAWSMirrorMountRequiresExactCapability(t *testing.T) {
@@ -897,10 +905,9 @@ func TestWorkspaceHostAWSMirrorMountRequiresExactCapability(t *testing.T) {
 		Entrypoint: []string{
 			"/usr/local/libexec/dsx/dsx-guest", "serve",
 			"--socket", "/run/dsx/control.sock",
-			"--child-uid", "501", "--child-gid", "20",
-			"--initialize-workspace", "/workspace",
+			"--child-uid", "1000", "--child-gid", "1000",
 		},
-		WorkingDir: "/workspace", User: "0:0", Labels: identity.Labels(),
+		WorkingDir: "/workspace", User: "1000:1000", Labels: identity.Labels(),
 		Networks: []string{oi(t, runtime.ResourceNetwork, "network").Name()},
 		Mounts: []runtime.Mount{
 			{Source: helperRoot, Target: "/usr/local/libexec/dsx", Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityGuestHelper},

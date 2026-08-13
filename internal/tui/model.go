@@ -32,6 +32,7 @@ var errSetupReviewTooLarge = errors.New("complete setup review exceeds the safe 
 type Application interface {
 	BareState(context.Context, app.BareStateRequest) (app.BareState, error)
 	PreviewSetup(context.Context, app.SetupPreviewRequest) (app.SetupPreview, error)
+	PreviewExisting(context.Context, app.BareStateRequest) (app.SetupPreview, error)
 	Initialize(context.Context, app.InitializeRequest) (app.InitializeResult, error)
 	ApproveExisting(context.Context, app.InitializeRequest) (app.InitializeResult, error)
 	UpdateExisting(context.Context, app.InitializeRequest) (app.InitializeResult, error)
@@ -484,24 +485,39 @@ func (model *SetupModel) View() tea.View {
 				title = "Applying approved setup"
 				body = model.spinner.View() + " Setting up this project\n\n" +
 					"[ ] Verify Apple container system\n[ ] Save configuration and approval"
-				if model.preview.Plan.Image.Standard {
+				if model.approveOnly {
+					title = "Saving configuration approval"
+					body = model.spinner.View() + " Verifying and saving the reviewed approval"
+				} else if model.updateOnly {
+					title = "Updating published ports"
+					body = model.spinner.View() + " Verifying and saving the reviewed configuration"
+				} else if model.preview.Plan.Image.Standard {
 					title = "Building DSX Standard"
 					body = model.spinner.View() + " building and verifying the approved image\n\n" +
 						"[ ] Verify Apple container system\n[ ] Save configuration and approval\n[ ] Build and verify DSX Standard"
 				}
-				body += "\n[ ] Open project workspace screen"
+				if !model.approveOnly && !model.updateOnly {
+					body += "\n[ ] Open project workspace screen"
+				}
 			}
 			content = header + "\n\n" + theme.stepper(step, model.width) + "\n\n" +
 				theme.panel(title, body, model.width, true)
 		case setupDone:
 			step = 2
-			body := theme.success.Render("✓ Workspace configuration saved") +
-				"\n\nConfiguration\n" + terminal.SanitizeLine(model.result.ConfigPath) +
-				"\n\nApproval\n" + terminal.SanitizeLine(model.result.Hash)
+			status := "✓ Workspace configuration saved"
 			title := "Ready to build"
-			if model.preview.Plan.Image.Standard {
+			if model.approveOnly {
+				status = "✓ Existing workspace configuration approved"
+				title = "Approval saved"
+			} else if model.updateOnly {
+				status = "✓ Published-port configuration saved"
+				title = "Ports updated"
+			} else if model.preview.Plan.Image.Standard {
 				title = "Ready to use"
 			}
+			body := theme.success.Render(status) +
+				"\n\nConfiguration\n" + terminal.SanitizeLine(model.result.ConfigPath) +
+				"\n\nApproval\n" + terminal.SanitizeLine(model.result.Hash)
 			content = header + "\n\n" + theme.stepper(step, model.width) + "\n\n" +
 				theme.panel(title, body, model.width, true)
 		default:

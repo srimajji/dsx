@@ -25,15 +25,16 @@ import (
 )
 
 type setupApplicationStub struct {
-	initializes   int
-	previews      int
-	approvals     int
-	request       app.InitializeRequest
-	setupRequest  app.SetupPreviewRequest
-	preview       app.SetupPreview
-	bareState     app.BareState
-	previewErr    error
-	initializeErr error
+	initializes      int
+	previews         int
+	existingPreviews int
+	approvals        int
+	request          app.InitializeRequest
+	setupRequest     app.SetupPreviewRequest
+	preview          app.SetupPreview
+	bareState        app.BareState
+	previewErr       error
+	initializeErr    error
 }
 
 func (stub *setupApplicationStub) BareState(context.Context, app.BareStateRequest) (app.BareState, error) {
@@ -46,6 +47,11 @@ func (stub *setupApplicationStub) BareState(context.Context, app.BareStateReques
 func (stub *setupApplicationStub) PreviewSetup(_ context.Context, request app.SetupPreviewRequest) (app.SetupPreview, error) {
 	stub.previews++
 	stub.setupRequest = request
+	return stub.preview, stub.previewErr
+}
+
+func (stub *setupApplicationStub) PreviewExisting(context.Context, app.BareStateRequest) (app.SetupPreview, error) {
+	stub.existingPreviews++
 	return stub.preview, stub.previewErr
 }
 

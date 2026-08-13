@@ -123,7 +123,7 @@ func (runner *RuntimeAuthSessionRunner) Login(ctx context.Context, request AuthS
 	if err != nil {
 		return result, err
 	}
-	uid, gid, err := guestUserIdentity(runner.workspaces.user())
+	uid, gid, err := guestUserIdentity(standardWorkspaceUser)
 	if err != nil {
 		return result, err
 	}
@@ -212,7 +212,7 @@ func (runner *RuntimeAuthSessionRunner) Login(ctx context.Context, request AuthS
 	defer cancel()
 	process, err := runner.workspaces.runtime.PrepareExec(loginCtx, snapshot, runtime.ExecSpec{
 		Argv: flow.Exec.Argv, Env: harnessEnvironment(flow.Exec.Env), WorkingDir: runtime.GuestPath(flow.Exec.Cwd),
-		User: runner.workspaces.user(), Terminal: true,
+		User: standardWorkspaceUser, Terminal: true,
 	})
 	if err != nil {
 		return result, model.NewError(model.CodeUnavailable, "prepare interactive authentication login", err)
@@ -303,7 +303,7 @@ func (runner *RuntimeAuthSessionRunner) copyCredentialsFromGuest(ctx context.Con
 	}
 	for index, artifact := range layout.CredentialArtifacts {
 		guestPath := path.Join(guestRoot, artifact)
-		exit, err := runner.workspaces.runtime.Exec(ctx, snapshot, runtime.ExecSpec{Argv: []string{"/usr/bin/test", "-f", guestPath}, WorkingDir: "/tmp", User: runner.workspaces.user()}, runtime.ExecIO{})
+		exit, err := runner.workspaces.runtime.Exec(ctx, snapshot, runtime.ExecSpec{Argv: []string{"/usr/bin/test", "-f", guestPath}, WorkingDir: "/tmp", User: standardWorkspaceUser}, runtime.ExecIO{})
 		if err != nil {
 			return err
 		}

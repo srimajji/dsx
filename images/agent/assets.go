@@ -28,9 +28,10 @@ var standardImageAssetNames = [...]string{
 	"shell/starship.toml",
 	"shell/zsh_plugins.txt",
 	"shell-toolchains.lock.json",
+	"sudoers-dsx",
 }
 
-//go:embed Containerfile harnesses.lock.json shell-toolchains.lock.json shell/dsx.zsh shell/zsh_plugins.txt shell/starship.toml
+//go:embed Containerfile harnesses.lock.json shell-toolchains.lock.json sudoers-dsx shell/dsx.zsh shell/zsh_plugins.txt shell/starship.toml
 var assets embed.FS
 
 // InputDigest returns the authority digest for the exact context Materialize writes.

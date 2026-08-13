@@ -933,7 +933,7 @@ Legacy DSX-owned resources must be safely recognized but are cleanup-only:
 The OCI image model is:
 
 ```text
-Pinned Ubuntu base
+Pinned Ubuntu 26.04 LTS ARM64 base by immutable digest
   → common DSX development layer
   → project toolchain/system dependency layer
   → selected project image
@@ -1006,14 +1006,22 @@ The managed standard image installs:
 - Python 3 with pip and venv plus a `python` command.
 - Go 1.26.5.
 - A supported LTS JDK with `java` and `javac`.
+- AWS CLI v2 2.36.22 with `aws` and `aws_completer`.
+- uv 0.12.3 with `uv` and `uvx`.
+- .NET 10 LTS SDK 10.0.400 with .NET and ASP.NET Core runtimes 10.0.11, `dotnet`, and `dnx`.
+- Standalone Kotlin compiler 2.4.10 with `kotlin` and `kotlinc` on the managed JDK.
 
-Tool artifacts and installers must be immutable and checksum-pinned.
+Tool artifacts and installers must be immutable and checksum-pinned. AWS CLI installation grants no AWS capability; the per-workspace grant remains authoritative and Python `awscli` v1 is excluded. Kotlin does not imply Gradle, Maven, Kotlin/Native, or runtime dependency resolution.
+
+The standard identity is `dsx`, UID and GID 1000, home `/home/dsx`, and shell `/bin/zsh`. Apple records the container default user as `1000:1000`. The unprivileged `dsx-guest serve` supervisor runs normal children with that identity. Immediately after each container start, the host may invoke one exact root-only `dsx-guest initialize-workspace` command to initialize the five owned volume roots. The operation is descriptor-safe, bounded, and non-recursive.
+
+Managed guest processes keep `PR_SET_NO_NEW_PRIVS`. Direct `container exec` shells and supported IDE attachment may use the Standard image's passwordless sudo policy. DSX creates no root password and exposes no direct-root-login workflow. Elevation controls the workspace VM and mounted resources, never host runtime, host home, or host source authority.
 
 The toolchain `PATH` is published through the image environment, not only through Zsh startup. Structured commands are passed as exact argv to the runtime exec path. `dsx-guest` starts configured argv processes without a shell. Neither path depends on shell startup files; only an explicitly configured shell command invokes a shell.
 
 DSX must never read, copy, mount, import, or execute host dotfiles. The complete managed shell experience is image-owned and does not weaken host-home isolation.
 
-This contract applies only when the approved plan selects the DSX-managed standard image. Custom images remain the project’s explicit responsibility. DSX does not inject the managed shell or toolchain layer or alter a custom image’s shell expectations. Runtime injection of the read-only `dsx-guest` remains authoritative.
+This contract applies only when the approved plan selects the DSX-managed standard image. Custom images remain the project's explicit responsibility. DSX does not inject the managed shell or toolchain layer or alter a custom image's shell expectations. Custom images must provide compatible `1000:1000` account metadata; sudo remains a Standard-image guarantee. Runtime injection of the read-only `dsx-guest` remains authoritative.
 
 #### Image integrity and caching
 
@@ -1042,6 +1050,12 @@ dsx.local/standard:<input-digest-prefix>
 Harness attestation accepts this path only when the plan selects the managed standard image and its input digest matches the embedded authority. Project and custom builds remain outside that trust path.
 
 `dsx-guest` is still mounted at runtime so host and guest versions stay aligned. Project setup state is reusable only while its declared inputs and configuration hash remain unchanged.
+
+#### External IDE attachment
+
+The dashboard may expose `[v] Attach with VS Code (experimental)` only after ownership re-inspection proves the selected workspace container is running and no lifecycle mutation is active. DSX opens the documented `dev.containers.experimentalAppleContainerSupport` VS Code setting and prints the supported **Dev Containers: Attach to Running Apple Container...** picker flow plus the exact inspected container name.
+
+This integration starts no stopped workspace or remote server, records no DSX agent session, parses no `.devcontainer/**` declaration, emits no private `apple-container+...` authority, and does not change `dsx workspace open NAME` from a shell operation.
 
 ### 19. Preserve network and port isolation
 
@@ -1406,9 +1420,10 @@ Subprocess overhead is expected to be insignificant compared with VM boot, image
 
 ### Guest boundary
 
-- Run as a non-root user by default.
-- Guest elevation grants control over the workspace VM and every mounted resource but must not grant host runtime control.
-- Apply CPU, memory, and workspace-concurrency limits.
+- Record and run ordinary workspace operations as the fixed non-root identity `dsx` (`1000:1000`).
+- Allow one exact root-only workspace-volume initializer after start; reject every other ordinary root execution.
+- Keep `PR_SET_NO_NEW_PRIVS` on managed processes. Direct Standard-image shells and supported IDE attachment may use passwordless sudo inside the VM.
+- Guest elevation grants control over the workspace VM and every mounted resource but must not grant host runtime, host-home, or host-source authority.
 - Use separate writable volumes for each workspace’s dependencies, service data, authentication, and sessions.
 - Do not share Git metadata or object storage between workspaces.
 - The integrated topology intentionally does not isolate MySQL, Redis, applications, and agents inside one workspace.

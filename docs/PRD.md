@@ -568,7 +568,7 @@ Removal must be idempotent and must not affect sibling workspaces or unrelated p
 
 ### R5. Images, dependencies, toolchain, and shell
 
-- DSX must provide a versioned standard Linux ARM64 image containing common development tools and the supported agent harnesses.
+- DSX must provide a versioned standard Linux ARM64 image based on Ubuntu 26.04 LTS ARM64 and containing common development tools and the supported agent harnesses.
 - Release builds must pull the standard image by published digest.
 - Development builds may build the exact embedded, approved recipe locally.
 - A locally built standard image must be keyed by the complete embedded build-input digest and reused only under that key.
@@ -577,22 +577,33 @@ Removal must be idempotent and must not affect sibling workspaces or unrelated p
 - Setup commands may run only when declared by `.dsx/config.jsonc` or imported from an approved supported field.
 - Changed configuration or image input must invalidate the relevant cached setup state.
 - The managed standard image must provide:
-  - Node.js active LTS.
-  - npm.
+  - Node.js active LTS and npm.
   - A compatible stable pnpm.
-  - Python 3 with pip and venv.
-  - The `python` command.
+  - Python 3 with pip and venv, plus the `python` command.
   - Go.
-  - A supported LTS JDK.
-  - `java` and `javac`.
-- The managed standard image must support configured Node, Python, Java, PHP, and polyglot project workflows; project-specific tools not included in the standard image remain explicit project-image or setup responsibilities.
+  - A supported LTS JDK with `java` and `javac`.
+  - AWS CLI v2 2.36.22 with `aws` and `aws_completer`.
+  - uv 0.12.3 with `uv` and `uvx`.
+  - .NET 10 LTS SDK 10.0.400, .NET and ASP.NET Core runtimes 10.0.11, and `dotnet` and `dnx`.
+  - Standalone Kotlin compiler 2.4.10 with `kotlin` and `kotlinc`, using the managed JDK.
+- Installing AWS CLI grants no AWS capability. Per-workspace AWS grants remain authoritative, and Python `awscli` v1 must not be installed.
+- uv and `dnx` may resolve project dependencies only when explicitly invoked. Kotlin does not imply Gradle, Maven, Kotlin/Native, or runtime dependency resolution.
+- The managed standard image must support configured Node, Python, Java, PHP, .NET, Kotlin, and polyglot project workflows; project-specific tools not included in the standard image remain explicit project-image or setup responsibilities.
+- Its development identity must be exactly `dsx`, UID 1000, GID 1000, home `/home/dsx`, and login shell `/bin/zsh`.
 - An interactive `dsx workspace open NAME` session using the managed standard image must open login interactive Zsh with one DSX-owned authored shell-defaults file.
+- Direct user shells and supported IDE attachment may use passwordless `sudo` inside the workspace VM. DSX provides no root password or direct-root-login workflow.
 - The managed standard image must install immutable, pinned Antidote plugin content.
 - The managed standard image must pre-generate Starship initialization at image-build time.
 - Interactive startup must require neither network access nor plugin fetching or regeneration.
 - The managed standard image must publish its development-tool `PATH` at image level so interactive shells, direct commands, setup, agents, and managed processes resolve the same baseline tools without depending on shell rc files.
 - These guarantees apply only to the DSX-managed standard image.
-- A custom image remains an explicit project responsibility. DSX must not inject the managed shell stack or assume a custom image supplies the standard toolchain.
+- A custom image remains an explicit project responsibility. DSX must not inject the managed shell stack or assume a custom image supplies the standard toolchain, account metadata, or sudo policy.
+
+#### R5.1 External IDE attachment
+
+- The dashboard action `[v] Attach with VS Code (experimental)` must be available only for a definitely running, ownership-verified workspace with no active lifecycle mutation.
+- The action must open the documented VS Code setting and print the exact documented Command Palette picker steps plus the inspected DSX container name.
+- DSX must not start a stopped workspace, create or manage a VS Code remote server, parse `.devcontainer/**`, publish a private `apple-container+...` remote authority, or change `dsx workspace open NAME` from a shell operation.
 
 ### R6. Guest processes and services
 
@@ -998,9 +1009,10 @@ Existing DSX-owned resources from the prior resource model:
 
 ### 8.2 Required controls
 
-- Run the workspace as a non-root user by default.
-- Guest elevation, if enabled, grants authority only inside the workspace VM.
-- Drop unnecessary capabilities.
+- Run the workspace as the fixed non-root identity `dsx` (`1000:1000`) by default.
+- Direct shells and supported IDE attachment may use image-provided passwordless sudo. Managed guest processes retain no-new-privileges and cannot elevate.
+- Guest elevation grants authority over the workspace VM and mounted workspace resources only. It must not grant host runtime, host-home, or host-source authority.
+- DSX provides no root password or direct-root-login workflow.
 - Do not expose host runtime control to a workspace.
 - Do not mount host source or host home directories.
 - Pass process arguments as structured arrays.

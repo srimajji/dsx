@@ -178,6 +178,7 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 				t.Fatalf("create form omitted %q:\n%s", expected, view)
 			}
 		}
+
 		for _, forbidden := range []string{"Authentication", "Prompt", "Browser", "Workspace mode", "Live", "Clone"} {
 			if strings.Contains(strings.ToLower(view), strings.ToLower(forbidden)) {
 				t.Fatalf("create form included forbidden %q:\n%s", forbidden, view)
@@ -200,6 +201,23 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 		if command == nil || !found || intent != want {
 			t.Fatalf("create intent = %#v, found=%t, command=%v; want %#v", intent, found, command, want)
 		}
+	}
+}
+func TestDashboardVSCodeAttachOnlyForRunningWorkspace(t *testing.T) {
+	data := dashboardFixture("running")
+	data.Workspaces = []DashboardWorkspace{{Name: "running", State: "running"}, {Name: "stopped", State: "stopped"}}
+	model := NewDashboardModel(data)
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "[v] Attach with VS Code (experimental)") {
+		t.Fatalf("running actions omit VS Code attach: %s", view)
+	}
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
+	if updated.(*DashboardModel).intent == nil || updated.(*DashboardModel).intent.Action != "vscode-attach" || cmd == nil {
+		t.Fatalf("running v intent = %#v", updated.(*DashboardModel).intent)
+	}
+	model = NewDashboardModel(data)
+	model.selected = 1
+	if view := ansi.Strip(model.View().Content); strings.Contains(view, "[v] Attach with VS Code (experimental)") {
+		t.Fatalf("stopped actions expose VS Code attach: %s", view)
 	}
 }
 
@@ -463,6 +481,48 @@ func TestRunnerLoadsFreshDashboardAndAccessibleModeRestoresWithoutIntent(t *test
 		t.Fatalf("accessible dashboard output = %q", output.String())
 	}
 	assertTerminalSafe(t, output.String())
+}
+
+func TestRunnerForceSetupApprovesExistingConfiguration(t *testing.T) {
+	preview := app.SetupPreview{
+		Hash:                strings.Repeat("a", 64),
+		ConfigContentDigest: strings.Repeat("b", 64),
+		ProjectState:        strings.Repeat("c", 64),
+	}
+	application := &setupApplicationStub{
+		bareState: app.BareState{Screen: app.BareDashboard, ConfigExists: true},
+		preview:   preview,
+	}
+	var output bytes.Buffer
+	probe := NewExistingApprovalModel(context.Background(), application, "/tmp/project", preview, true)
+	pageCount := len(reviewPages(probe.review, outputWidth(&output), 24))
+	input := strings.NewReader(strings.Repeat("\n", pageCount-1) + "y\nq\n")
+	runner := &Runner{Application: application, Input: input, Output: &output}
+
+	intent, found, err := runner.Run(context.Background(), RunRequest{
+		Root: "/tmp/project", ForceSetup: true, Accessible: true,
+		LoadDashboard: func(context.Context, string) (DashboardData, error) {
+			return dashboardFixture("running"), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found || intent != (Intent{}) {
+		t.Fatalf("reapproval returned intent %#v, found=%t", intent, found)
+	}
+	if application.existingPreviews != 1 || application.previews != 0 {
+		t.Fatalf("preview calls = existing %d, setup %d", application.existingPreviews, application.previews)
+	}
+	if application.approvals != 1 || application.initializes != 0 {
+		t.Fatalf("approval calls = %d, setup calls = %d", application.approvals, application.initializes)
+	}
+	if !application.request.Confirmed || application.request.ExpectedHash != preview.Hash {
+		t.Fatalf("approval request = %#v", application.request)
+	}
+	if !strings.Contains(output.String(), "DSX configuration approval") || !strings.Contains(output.String(), "Local checkout") {
+		t.Fatalf("reapproval output = %q", output.String())
+	}
 }
 
 func TestAccessibleCreateFormEmitsReviewedWorkspaceIntent(t *testing.T) {

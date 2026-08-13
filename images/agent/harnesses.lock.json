@@ -2,7 +2,8 @@
   "schemaVersion": 1,
   "platform": "linux/arm64",
   "base": {
-    "reference": "docker.io/library/ubuntu@sha256:b17516cd982bf06bdd5d5600253d12a8de017b9eb831cc052b532a0363d294f9"
+    "reference": "docker.io/library/ubuntu@sha256:3fe5b610f5c41eeeb56c2995bd4afb4990ac5b80dc980e33f9251eaaa8013615",
+    "release": "26.04"
   },
   "harnesses": [
     {

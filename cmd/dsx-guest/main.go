@@ -29,6 +29,8 @@ func run(arguments []string) int {
 	switch arguments[0] {
 	case "serve":
 		return runServe(arguments[1:])
+	case "initialize-workspace":
+		return runInitializeWorkspace(arguments[1:])
 	case "ctl":
 		return runControl(arguments[1:])
 	case "ensure-dir":
@@ -88,27 +90,21 @@ func runServe(arguments []string) int {
 	socketPath := flags.String("socket", guest.DefaultSocketPath, "control socket path")
 	childUIDText := flags.String("child-uid", "", "non-root workspace child UID")
 	childGIDText := flags.String("child-gid", "", "workspace child GID")
-	initializeWorkspace := flags.String("initialize-workspace", "", "owned clone workspace volume path")
 	if err := flags.Parse(arguments); err != nil || len(flags.Args()) != 0 {
-		fmt.Fprintln(os.Stderr, "usage: dsx-guest serve [--socket PATH] --child-uid UID --child-gid GID [--initialize-workspace /workspace]")
+		fmt.Fprintln(os.Stderr, "usage: dsx-guest serve [--socket PATH] --child-uid UID --child-gid GID")
 		return 2
 	}
 	childUID, childGID, err := parseChildIdentity(*childUIDText, *childGIDText)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dsx-guest serve: %v\n", err)
-		fmt.Fprintln(os.Stderr, "usage: dsx-guest serve [--socket PATH] --child-uid UID --child-gid GID [--initialize-workspace /workspace]")
+		fmt.Fprintln(os.Stderr, "usage: dsx-guest serve [--socket PATH] --child-uid UID --child-gid GID")
 		return 2
 	}
-	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "dsx-guest serve: supervisor must start as root")
+	if os.Geteuid() != 0 && (uint32(os.Geteuid()) != childUID || uint32(os.Getegid()) != childGID) {
+		fmt.Fprintln(os.Stderr, "dsx-guest serve: non-root supervisor identity must match child identity")
 		return 1
 	}
-	if *initializeWorkspace != "" {
-		if err := guest.InitializeOwnedWorkspace(*initializeWorkspace, childUID, childGID); err != nil {
-			fmt.Fprintf(os.Stderr, "dsx-guest serve: initialize owned workspace: %v\n", err)
-			return 1
-		}
-	}
+
 	info := buildinfo.Current()
 	supervisor, err := guest.NewSupervisor(guest.Options{Version: info.Version, ChildUID: childUID, ChildGID: childGID, Output: os.Stdout})
 	if err != nil {
@@ -144,6 +140,40 @@ func runServe(arguments []string) int {
 	}
 	<-supervisor.Done()
 	return 0
+}
+func runInitializeWorkspace(arguments []string) int {
+	flags := flag.NewFlagSet("dsx-guest initialize-workspace", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	childUIDText := flags.String("child-uid", "", "non-root workspace child UID")
+	childGIDText := flags.String("child-gid", "", "workspace child GID")
+	var paths repeatedStrings
+	flags.Var(&paths, "path", "owned workspace volume path")
+	if err := flags.Parse(arguments); err != nil || len(flags.Args()) != 0 {
+		fmt.Fprintln(os.Stderr, "usage: dsx-guest initialize-workspace --child-uid UID --child-gid GID --path PATH...")
+		return 2
+	}
+	childUID, childGID, err := parseChildIdentity(*childUIDText, *childGIDText)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dsx-guest initialize-workspace: %v\n", err)
+		return 2
+	}
+	if os.Geteuid() != 0 || os.Getegid() != 0 {
+		fmt.Fprintln(os.Stderr, "dsx-guest initialize-workspace: initializer must run as root")
+		return 1
+	}
+	if err := guest.InitializeOwnedWorkspaces(paths, childUID, childGID); err != nil {
+		fmt.Fprintf(os.Stderr, "dsx-guest initialize-workspace: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+type repeatedStrings []string
+
+func (values *repeatedStrings) String() string { return fmt.Sprint([]string(*values)) }
+func (values *repeatedStrings) Set(value string) error {
+	*values = append(*values, value)
+	return nil
 }
 
 func runControl(arguments []string) int {
@@ -378,7 +408,7 @@ func parseExecArguments(arguments []string) (string, []string, error) {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: dsx-guest --version [--json] | dsx-guest serve [--socket PATH] --child-uid UID --child-gid GID [--initialize-workspace /workspace] | dsx-guest ctl [--socket PATH] | dsx-guest ensure-dir --path PATH | dsx-guest stage-file [--read-only --child-uid UID --child-gid GID] --max-bytes BYTES --path PATH | dsx-guest produce-file --max-bytes BYTES --path PATH --cwd PATH -- COMMAND [ARG...] | dsx-guest export-file --kind auth|result --max-bytes BYTES --path PATH | dsx-guest remove-export-file --path PATH | dsx-guest remove-read-only --path PATH | dsx-guest stage-env --path PATH | dsx-guest relay-loopback --port PORT | dsx-guest exec [--env-file PATH] -- COMMAND [ARG...]")
+	fmt.Fprintln(os.Stderr, "usage: dsx-guest --version [--json] | dsx-guest serve [--socket PATH] --child-uid UID --child-gid GID | dsx-guest initialize-workspace --child-uid UID --child-gid GID --path PATH... | dsx-guest ctl [--socket PATH] | dsx-guest ensure-dir --path PATH | dsx-guest stage-file [--read-only --child-uid UID --child-gid GID] --max-bytes BYTES --path PATH | dsx-guest produce-file --max-bytes BYTES --path PATH --cwd PATH -- COMMAND [ARG...] | dsx-guest export-file --kind auth|result --max-bytes BYTES --path PATH | dsx-guest remove-export-file --path PATH | dsx-guest remove-read-only --path PATH | dsx-guest stage-env --path PATH | dsx-guest relay-loopback --port PORT | dsx-guest exec [--env-file PATH] -- COMMAND [ARG...]")
 }
 
 func parseChildIdentity(uidText, gidText string) (uint32, uint32, error) {
