@@ -9,6 +9,14 @@ import (
 
 const ContractVersion = "dsx.execution-plan/v2"
 
+const (
+	AWSModeNone                    = "none"
+	AWSModeHostDefault             = "host-default"
+	AWSGuestDestination            = "/run/dsx/aws"
+	AWSDefaultProfile              = "default"
+	AWSAuthorityDynamicHostDefault = "dynamic-host-default"
+)
+
 type ExecutionPlan struct {
 	ContractVersion string            `json:"contract_version"`
 	Project         ProjectIdentity   `json:"project"`
@@ -22,6 +30,7 @@ type ExecutionPlan struct {
 	Auth            AuthPlan          `json:"auth"`
 	Ports           []PortRequest     `json:"ports"`
 	Browser         *BrowserPlan      `json:"browser,omitempty"`
+	AWS             AWSCapability     `json:"aws"`
 	Bridges         []BridgeGrant     `json:"bridges"`
 	Limits          ResourceLimits    `json:"limits"`
 	Provenance      config.Provenance `json:"provenance"`
@@ -118,6 +127,17 @@ type PortRequest struct {
 type BrowserPlan struct {
 	ImageReference string `json:"image_reference"`
 	ImageDigest    string `json:"image_digest"`
+}
+
+type AWSCapability struct {
+	Mode                    string `json:"mode"`
+	SourceDirectory         string `json:"source_directory"`
+	SourceIdentity          string `json:"source_identity"`
+	Destination             string `json:"destination"`
+	ReadOnly                bool   `json:"read_only"`
+	EligibleProfile         string `json:"eligible_profile"`
+	WorkspaceDefaultEnabled bool   `json:"workspace_default_enabled"`
+	AuthorityModel          string `json:"authority_model"`
 }
 
 type BridgeGrant struct {

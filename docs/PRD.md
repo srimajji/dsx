@@ -388,6 +388,9 @@ Actions are state-aware. Restart and update are unavailable while another lifecy
 | `dsx auth login --agent claude` | Run a DSX-scoped Claude login without importing host or Keychain state. |
 | `dsx auth refresh --agent omp` | Explicitly refresh OMP’s canonical project credentials through the approved artifact path. |
 | `dsx auth purge --agent omp` | Explicitly remove OMP’s canonical project credentials and inactive workspace copies after confirmation. |
+| `dsx aws status [WORKSPACE]` | Show the project AWS capability and non-secret grant, availability, and mirror status for one or all workspaces. Make no changes. |
+| `dsx aws enable WORKSPACE` | Grant the named workspace access to the current and subsequently rotated host `default` identity after validating that a complete temporary session is available. |
+| `dsx aws disable WORKSPACE` | Immediately revoke AWS access from the named workspace and remove its exact private mirror without affecting siblings. |
 | `dsx git status WORKSPACE [--repo MEMBER]` | Show source ref, result branch, dirty state, host fingerprint, rebase state, and fetch state. |
 | `dsx git diff WORKSPACE [--repo MEMBER]` | Show safely rendered workspace changes. |
 | `dsx git fetch WORKSPACE [--repo MEMBER]` | Import committed workspace history through a verified Git bundle into the workspace-specific host ref. |
@@ -419,6 +422,7 @@ The replacements are:
 - `dsx workspace ...` for workspace lifecycle.
 - `dsx agent WORKSPACE ...` for agent lifecycle.
 - `dsx auth ...` for authentication lifecycle.
+- `dsx aws ...` for per-workspace AWS grant lifecycle and non-secret status, but not profile selection or manual credential synchronization.
 - Named `dsx git ...` operations for result review and transfer.
 
 DSX is unreleased, so there are no deprecated compatibility aliases.
@@ -564,7 +568,7 @@ Removal must be idempotent and must not affect sibling workspaces or unrelated p
 
 ### R5. Images, dependencies, toolchain, and shell
 
-- DSX must provide a versioned standard Linux ARM64 image containing common development tools and the supported agent harnesses.
+- DSX must provide a versioned standard Linux ARM64 image based on Ubuntu 26.04 LTS ARM64 and containing common development tools and the supported agent harnesses.
 - Release builds must pull the standard image by published digest.
 - Development builds may build the exact embedded, approved recipe locally.
 - A locally built standard image must be keyed by the complete embedded build-input digest and reused only under that key.
@@ -573,22 +577,33 @@ Removal must be idempotent and must not affect sibling workspaces or unrelated p
 - Setup commands may run only when declared by `.dsx/config.jsonc` or imported from an approved supported field.
 - Changed configuration or image input must invalidate the relevant cached setup state.
 - The managed standard image must provide:
-  - Node.js active LTS.
-  - npm.
+  - Node.js active LTS and npm.
   - A compatible stable pnpm.
-  - Python 3 with pip and venv.
-  - The `python` command.
+  - Python 3 with pip and venv, plus the `python` command.
   - Go.
-  - A supported LTS JDK.
-  - `java` and `javac`.
-- The managed standard image must support configured Node, Python, Java, PHP, and polyglot project workflows; project-specific tools not included in the standard image remain explicit project-image or setup responsibilities.
+  - A supported LTS JDK with `java` and `javac`.
+  - AWS CLI v2 2.36.22 with `aws` and `aws_completer`.
+  - uv 0.12.3 with `uv` and `uvx`.
+  - .NET 10 LTS SDK 10.0.400, .NET and ASP.NET Core runtimes 10.0.11, and `dotnet` and `dnx`.
+  - Standalone Kotlin compiler 2.4.10 with `kotlin` and `kotlinc`, using the managed JDK.
+- Installing AWS CLI grants no AWS capability. Per-workspace AWS grants remain authoritative, and Python `awscli` v1 must not be installed.
+- uv and `dnx` may resolve project dependencies only when explicitly invoked. Kotlin does not imply Gradle, Maven, Kotlin/Native, or runtime dependency resolution.
+- The managed standard image must support configured Node, Python, Java, PHP, .NET, Kotlin, and polyglot project workflows; project-specific tools not included in the standard image remain explicit project-image or setup responsibilities.
+- Its development identity must be exactly `dsx`, UID 1000, GID 1000, home `/home/dsx`, and login shell `/bin/zsh`.
 - An interactive `dsx workspace open NAME` session using the managed standard image must open login interactive Zsh with one DSX-owned authored shell-defaults file.
+- Direct user shells and supported IDE attachment may use passwordless `sudo` inside the workspace VM. DSX provides no root password or direct-root-login workflow.
 - The managed standard image must install immutable, pinned Antidote plugin content.
 - The managed standard image must pre-generate Starship initialization at image-build time.
 - Interactive startup must require neither network access nor plugin fetching or regeneration.
 - The managed standard image must publish its development-tool `PATH` at image level so interactive shells, direct commands, setup, agents, and managed processes resolve the same baseline tools without depending on shell rc files.
 - These guarantees apply only to the DSX-managed standard image.
-- A custom image remains an explicit project responsibility. DSX must not inject the managed shell stack or assume a custom image supplies the standard toolchain.
+- A custom image remains an explicit project responsibility. DSX must not inject the managed shell stack or assume a custom image supplies the standard toolchain, account metadata, or sudo policy.
+
+#### R5.1 External IDE attachment
+
+- The dashboard action `[v] Attach with VS Code (experimental)` must be available only for a definitely running, ownership-verified workspace with no active lifecycle mutation.
+- The action must open the documented VS Code setting and print the exact documented Command Palette picker steps plus the inspected DSX container name.
+- DSX must not start a stopped workspace, create or manage a VS Code remote server, parse `.devcontainer/**`, publish a private `apple-container+...` remote authority, or change `dsx workspace open NAME` from a shell operation.
 
 ### R6. Guest processes and services
 
@@ -675,15 +690,54 @@ OMP authentication is not configured.
 [Esc] Cancel
 ```
 
-### R9. AWS and Leapp
+### R9. AWS host-default capability
 
-- AWS integration must be opt-in.
-- Leapp mode must mount only the required AWS configuration directory, read-only, and must preserve atomic credential rotation.
-- The user must use standard `AWS_PROFILE` and AWS CLI behavior inside the workspace.
-- DSX must not introduce a parallel AWS profile command.
-- DSX must visibly warn that profile selection is convenience rather than credential isolation: an agent that can read the mounted AWS directory may be able to read every profile it contains.
-- DSX must never print AWS credential values.
-- Browser VMs must never receive AWS credentials.
+#### R9.1 Project capability and approval
+
+- AWS integration must be opt-in. The project configuration must accept only `aws.mode: "none"` or `aws.mode: "host-default"`; `none` is the default and must resolve to a zero, disabled capability with no source or mount authority.
+- The removed `leapp` mode and any configurable AWS `profile` field must fail with precise unsupported-configuration diagnostics rather than act as aliases.
+- `host-default` must authorize a provider-neutral capability to follow the standard AWS files in one reviewed canonical physical host directory. DSX integrates only with the provider’s materialized standard-file output and must not invoke or depend on a provider executable, private database, configuration, socket, browser state, or authentication flow.
+- Leapp is the first proven producer of this output because it performs the Google Workspace SAML flow and rotates temporary AWS STS credentials. Leapp or a compatible provider must keep one complete temporary session active as `default` for enablement and rotation; DSX must never start, stop, select, or authenticate that host session.
+- Project approval authorizes only the capability to grant AWS to selected workspaces. It must not grant AWS to an existing workspace or change the default-off state for a new workspace.
+- Project capability review and approval must remain possible when the host default is unavailable, but the UI must guide the user to start a valid temporary host `default` before any workspace can be enabled.
+- The secret-free executable plan and executable-configuration hash must cover the mode, approved canonical source directory and source identity, reserved guest destination `/run/dsx/aws`, read-only state, eligible profile `default`, default workspace grant `disabled`, and authority model `dynamic-host-default`.
+- Host availability, credential bytes, and workspace grant state must not enter the reusable project executable plan or hash. Credential values must never enter configuration, plans, hashes, manifests, status, logs, errors, TUI output, or browser VMs.
+- Before project approval, DSX must present the complete warning that:
+  - AWS can be enabled for selected workspaces only, and new workspaces start disabled.
+  - Leapp or a compatible provider must keep a temporary `default` session active for enablement and credential rotation.
+  - Enabling a workspace grants whichever AWS account and role the host provider currently assigns to `default`.
+  - Switching the active host default changes AWS authority in every AWS-enabled running workspace without another DSX approval or workspace restart.
+  - Named host profiles are unavailable.
+
+#### R9.2 Workspace grant lifecycle
+
+- Every workspace must start with AWS disabled, including workspaces created after `host-default` receives project approval.
+- The per-workspace AWS grant must be durable, ownership-scoped, non-secret manifest state outside the reusable project executable hash. It must survive stop and restart until explicitly disabled or the workspace is removed.
+- `dsx aws enable WORKSPACE` must enable only the named workspace. The TUI must expose an equivalent **Enable AWS** action and show the selected workspace’s current AWS grant and mirror status.
+- Enablement must first validate a bounded, stable host snapshot containing a complete temporary `default` session. If no valid temporary default is available, enablement must fail without changing the grant, helper, mirror, mount, or workspace runtime.
+- After successful validation, DSX must durably record the grant before starting an owned helper or mutating runtime state, then create an independently owned private mirror for that workspace.
+- `dsx aws disable WORKSPACE` and the TUI’s equivalent **Disable AWS** action must immediately revoke only the named workspace. DSX must durably record revocation before stopping its helper and deleting its exact private mirror and control artifacts; new AWS commands in that workspace must then fail while enabled siblings remain unchanged.
+- `dsx aws status [WORKSPACE]` and the TUI must report project capability, workspace grant, host-default availability, and mirror health without returning or displaying secret values. Source status must be limited to `available`, `unavailable`, or a stable non-secret failure code.
+- TUI actions must express lifecycle intent through the same AWS operations as the CLI; the TUI must not manipulate host files, credential bytes, helpers, or grants directly.
+
+#### R9.3 Accepted default and standard AWS behavior
+
+- `host-default` must read only regular `config` and `credentials` files through the approved descriptor-bound directory identity and emit only `[default]` from each file. Named sections must be ignored and absent from every workspace mirror.
+- The credentials section must contain the complete temporary STS set `aws_access_key_id`, `aws_secret_access_key`, and `aws_session_token`. Missing session tokens, long-lived key-only credentials, `credential_process`, `credential_source`, `source_profile`, `web_identity_token_file`, SSO references or caches, role chains, and external file or process providers must fail closed.
+- Duplicate sections or keys, malformed or oversized files, symlinks, non-regular files, wrong ownership, changed approved directory identity, and authority-bearing config references must fail safely. Bounded profile-local non-secret settings such as `region` and `output` may be retained.
+- DSX must not set `AWS_PROFILE`. Standard AWS CLI and SDK default-profile resolution must work inside an enabled workspace, including `aws sts get-caller-identity` without profile flags.
+- Named profiles must be unavailable. A named `--profile NAME` lookup must fail because the named section is absent, and DSX must provide neither a profile-selection command nor a manual `dsx aws sync` command.
+
+#### R9.4 Rotation, revocation, isolation, and cleanup
+
+- Each enabled running workspace must have an independently owned helper that continuously obtains bounded stable source snapshots, filters `default`, and atomically publishes complete paired generations to that workspace’s private read-only mirror mounted at `/run/dsx/aws`.
+- Propagation is measured from the provider’s completed publication of a stable host file pair. A replacement must normally become visible in every healthy AWS-enabled running workspace in less than 1 second, and physical acceptance requires every such workspace to converge within 2 seconds. No workspace may observe a mixed config and credentials generation.
+- A transient unstable or unreadable source may keep the prior complete generation temporarily while reporting a non-secret degraded state. A stable snapshot without a valid complete temporary `default` is authoritative revocation and must atomically publish an empty generation and remove prior credential bytes.
+- A stable valid replacement of `default`, whether routine rotation or a different account or role, must fan out only to AWS-enabled running workspaces without a DSX command, reapproval, or restart. DSX must not attempt to pin or distinguish the identity.
+- An enabled stopped workspace must run no mirror helper. Start and restart must obtain and publish a fresh valid `default` generation before exposing a shell, agent, or AWS environment; they must never expose a persisted stale generation.
+- A disabled workspace must have no AWS files, AWS environment, helper, mirror, or host-source access. Browser VMs must receive no AWS files, environment, mount, grant, or helper under any circumstance.
+- Guest writes to the AWS mirror must fail. DSX must never modify the approved host files.
+- Disable and rollback must remove only the selected workspace’s exact helper, control artifacts, mount state, and private mirror generations while preserving its durable disabled grant state. Workspace removal and project cleanup must additionally delete only the durable grant records whose ownership is proven for the selected scope. All paths must preserve enabled siblings, unrelated resources, and host file contents, hashes, ownership, and modes; ambiguous evidence must be reported and preserved.
 
 ### R10. Networking
 
@@ -908,6 +962,7 @@ Existing DSX-owned resources from the prior resource model:
   - Allowed-agent selection.
   - Default-agent selection.
   - Internet-policy selection.
+  - AWS capability selection with active-host-default guidance.
   - Returning from review without losing selections or mutating state.
 - New workspaces must default to dynamic loopback publication, 6 CPUs, and 6 GiB unless configured otherwise.
 - Authentication import must always be a separate explicit approval.
@@ -925,6 +980,7 @@ Existing DSX-owned resources from the prior resource model:
   - Fetching results.
   - Removing the selected workspace.
   - Showing and reconfiguring published ports.
+  - Showing AWS grant and mirror status and enabling or disabling AWS for the selected workspace.
   - Identifying legacy cleanup-only resources.
 - Actions must be state-aware.
 - Update and restart must be disabled while another lifecycle mutation is active.
@@ -953,9 +1009,10 @@ Existing DSX-owned resources from the prior resource model:
 
 ### 8.2 Required controls
 
-- Run the workspace as a non-root user by default.
-- Guest elevation, if enabled, grants authority only inside the workspace VM.
-- Drop unnecessary capabilities.
+- Run the workspace as the fixed non-root identity `dsx` (`1000:1000`) by default.
+- Direct shells and supported IDE attachment may use image-provided passwordless sudo. Managed guest processes retain no-new-privileges and cannot elevate.
+- Guest elevation grants authority over the workspace VM and mounted workspace resources only. It must not grant host runtime, host-home, or host-source authority.
+- DSX provides no root password or direct-root-login workflow.
 - Do not expose host runtime control to a workspace.
 - Do not mount host source or host home directories.
 - Pass process arguments as structured arrays.
@@ -985,7 +1042,7 @@ Existing DSX-owned resources from the prior resource model:
 ### 8.3 Residual risks
 
 - An agent can modify or delete any content in its private workspace clone.
-- An agent can read and exfiltrate any secret deliberately placed in its workspace, including repository `.env` files and explicitly mounted AWS credentials.
+- An agent can read and exfiltrate any secret deliberately placed in its workspace, including repository `.env` files and the temporary `default` credentials mirrored into an explicitly AWS-enabled workspace.
 - Persisted provider OAuth tokens remain sensitive plaintext within host-resident DSX or VM storage.
 - A malicious dependency or approved setup command has the same workspace authority as the agent.
 - Internet access permits source exfiltration unless network policy restricts destinations.
@@ -1009,7 +1066,7 @@ Existing DSX-owned resources from the prior resource model:
 - Codex CLI supports its approved portable `auth.json`.
 - OpenCode supports its approved provider-auth artifact.
 - Claude host authentication is not portable and requires DSX login.
-- Leapp continues to update standard AWS credential files atomically.
+- A host provider can continuously materialize one complete temporary AWS STS session as `default` in standard AWS `config` and `credentials` files; Leapp is the first provider proven against this contract.
 - Host browser automation does not require browser-profile reuse for the isolated testing path.
 - The user’s terminal supports the minimum capabilities required by the TUI, or DSX can use accessible or plain output.
 
@@ -1037,7 +1094,7 @@ The MVP does not:
 - Isolate one process from another inside the same integrated workspace.
 - Schedule tasks, coordinate agent prompts, resolve semantic conflicts, or merge parallel results automatically.
 - Provide a graphical desktop or web interface, IDE, cloud execution service, or remote multi-host scheduler.
-- Migrate users away from Leapp or replace standard AWS profile behavior.
+- Migrate users away from Leapp, control a host AWS provider, replace standard AWS default-profile behavior, expose named AWS profiles, or require manual credential synchronization.
 - Import Claude host login or macOS Keychain state.
 - Import complete harness directories.
 - Translate OMP’s Codex identity into Codex CLI credentials.
@@ -1104,12 +1161,28 @@ The MVP does not:
 56. Cleanup is idempotent and reports ambiguous ownership instead of deleting the resource.
 57. Newly generated runtime names are readable, deterministic, unique within their ownership scope, and no more than 62 bytes.
 58. Existing resources retain their existing names, are reported as legacy cleanup-only resources, and cannot be started, opened, updated, restarted, adopted, or used for new agents.
-59. The dashboard exposes create, open, agent, update, start or stop, restart, Git review, remove, and port actions for the selected workspace.
+59. The dashboard exposes create, open, agent, update, start or stop, restart, Git review, remove, port, and AWS status, enable, and disable actions for the selected workspace.
 60. Restart and update are unavailable in the TUI while another lifecycle mutation is active.
 61. The TUI restores terminal state around interactive shells and agents, respects `NO_COLOR` and resizing, supports narrow layouts and accessible form mode, and safely escapes untrusted terminal content.
 62. Browser and host-proxy resources start only when explicitly requested.
 63. No permanent DSX daemon is required.
 64. Runtime planning and cleanup meet the performance targets in R17 when the runtime is responsive.
+65. AWS project configuration accepts only `none` and `host-default`; removed `leapp` mode and any `profile` field are rejected precisely, and no secret value is representable in configuration, executable plans, hashes, manifests, or output.
+66. Project approval reviews the canonical source identity, `/run/dsx/aws` destination, read-only state, `default` eligibility, default-off workspace policy, and dynamic authority model, while host availability and workspace grant state do not change the reusable project hash.
+67. Approval states that only selected workspaces may be enabled, new workspaces are disabled, a compatible provider must keep a temporary default active, a host-default switch changes every enabled running workspace without reapproval or restart, and named profiles are unavailable.
+68. Every new workspace starts AWS-disabled, and each explicit workspace grant is durable, ownership-scoped, outside the project executable hash, and preserved across stop and restart.
+69. AWS enablement without a complete valid temporary host `default` fails without changing grant or runtime state; successful enablement records the grant before starting a helper or publishing a private mirror.
+70. Each enabled workspace receives only its independently owned, read-only, default-only mirror; standard AWS default resolution works without `AWS_PROFILE`, while named profile lookup fails.
+71. Complete stable host-default replacements reach only healthy AWS-enabled running workspaces atomically, normally in less than 1 second and in every physical acceptance run within 2 seconds, with no mixed file generation.
+72. An enabled stopped workspace has no helper and obtains a fresh valid generation before start or restart exposes a shell, agent, or AWS environment.
+73. Stable removal or invalidation of host `default` revokes enabled mirrors and removes prior credential bytes instead of preserving stale access; transient unstable reads remain bounded and non-secret.
+74. Disablement records revocation before immediately stopping the selected workspace’s helper and deleting its exact mirror and control artifacts; new AWS calls fail there and enabled siblings remain usable.
+75. Disabled workspaces and browser VMs have no AWS files, environment, helper, mirror, grant propagation, or host-source access.
+76. Mirrors contain only the `default` config and credentials sections with a complete temporary STS session; named sections are absent; long-lived or external-provider shapes fail closed; malformed, duplicate, oversized, symlinked, replaced, or unstable inputs fail safely without logging source bytes; and guest writes fail.
+77. Rotation and freshness require no manual `dsx aws sync`, DSX provider-control command, DSX restart, workspace restart, or renewed approval.
+78. CLI and TUI enable, disable, and status operations share one lifecycle; status is non-secret, and the TUI remains an intent-only client of that lifecycle.
+79. Physical Apple/Leapp acceptance uses two temporary sessions assigned to `default` and two workspaces: both workspaces start AWS-disabled; enabling only the first leaves the second without AWS; enabling the second gives both the first identity; replacing host `default` changes both atomically within 2 seconds without restart; disabling the first revokes it immediately while the second remains usable; the remaining mirror has no named profile; stopping the host default removes the second workspace’s prior credentials; guest writes fail; and a browser-enabled agent receives no AWS state.
+80. The physical acceptance cleanup stops and removes the tested resources, restores the initial DSX-owned runtime inventory, removes only exact proven owned AWS runtime artifacts and grants in scope, leaves host AWS file contents, hashes, ownership, and modes unchanged, preserves siblings and unrelated resources, and reports rather than deletes ambiguous evidence. Ordinary disable and rollback retain the durable disabled grant state.
 
 ## 12. Success measures
 

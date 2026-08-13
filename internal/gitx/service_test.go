@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -451,9 +452,71 @@ func TestHostGitUsesProtectedConfigurationAndRejectsUnallowlistedLocalConfig(t *
 		gitTest(t, fixture.path, "config", "--local", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 		gitTest(t, fixture.path, "config", "--local", "branch.main.remote", "origin")
 		gitTest(t, fixture.path, "config", "--local", "branch.main.merge", "refs/heads/main")
+		gitTest(t, fixture.path, "config", "--local", "branch.main.vscode-merge-base", "origin/main")
+		gitTest(t, fixture.path, "config", "--local", "branch.main.github-pr-owner-number", "StuDocu#repository#11")
+		gitTest(t, fixture.path, "config", "--local", "branch.feat/core-19.vscode-merge-base", "origin/main")
+		gitTest(t, fixture.path, "config", "--local", "branch.feat/core-19.github-pr-owner-number", "StuDocu#repository#11")
+		gitTest(t, fixture.path, "config", "--local", "branch.feat/core-19.gh-merge-base", "main")
+		gitTest(t, fixture.path, "config", "--local", "branch.release.1.0.vscode-merge-base", "origin/main")
+		gitTest(t, fixture.path, "config", "--local", "remote.origin.gh-resolved", "base")
 		artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "safe", TempRoot: t.TempDir()})
 		if err != nil {
 			t.Fatalf("PrepareSource with ordinary clone configuration: %v", err)
+		}
+		defer fixture.service.RemoveArtifact(artifact.BundlePath)
+		if err := fixture.service.VerifyBundle(context.Background(), artifact.BundlePath, artifact.BundleDigest); err != nil {
+			t.Fatalf("VerifyBundle() error = %v", err)
+		}
+	})
+	for name, test := range map[string]struct {
+		key   string
+		value string
+	}{
+		"unreviewed branch leaf":             {key: "branch.main.unreviewed", value: "value"},
+		"branch leaf resembling vscode":      {key: "branch.main.vscode-command", value: "/tmp/run-me"},
+		"branch leaf resembling github":      {key: "branch.main.github-pr-command", value: "/tmp/run-me"},
+		"unreviewed remote leaf":             {key: "remote.origin.gh-unreviewed", value: "value"},
+		"unsafe empty vscode merge base":     {key: "branch.main.vscode-merge-base", value: ""},
+		"unsafe empty github owner number":   {key: "branch.feat/core-19.github-pr-owner-number", value: ""},
+		"unsafe empty gh merge base":         {key: "branch.feat/core-19.gh-merge-base", value: ""},
+		"unsafe empty gh resolved":           {key: "remote.origin.gh-resolved", value: ""},
+		"worktree configuration extension":   {key: "extensions.worktreeConfig", value: "true"},
+		"valueless unreviewed implicit true": {key: "dsx.unreviewed", value: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newRepositoryWithCommit(t)
+			gitTest(t, fixture.path, "config", "--local", test.key, test.value)
+			_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir()})
+			want := wantUnallowlistedConfigError(normalizeGitConfigKey(test.key))
+			if err == nil || err.Error() != want {
+				t.Fatalf("PrepareSource with %s error = %v, want %q", test.key, err, want)
+			}
+		})
+	}
+	t.Run("valueless allowlisted implicit boolean", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		appendFile(t, filepath.Join(fixture.path, ".git", "config"), "[core]\n\tprecomposeunicode\n")
+		if records := gitTest(t, fixture.path, "config", "--local", "--list"); !strings.Contains(records, "\ncore.precomposeunicode\n") {
+			t.Fatalf("configuration does not contain a valueless record: %q", records)
+		}
+		artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "safe", TempRoot: t.TempDir()})
+		if err != nil {
+			t.Fatalf("PrepareSource with valueless implicit boolean: %v", err)
+		}
+		defer fixture.service.RemoveArtifact(artifact.BundlePath)
+	})
+	t.Run("mixed case subsection remediation", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		gitTest(t, fixture.path, "config", "--local", "branch.Feat/Core-19.unreviewed", "value")
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir()})
+		want := wantUnallowlistedConfigError("branch.Feat/Core-19.unreviewed")
+		if err == nil || err.Error() != want {
+			t.Fatalf("PrepareSource with mixed-case subsection error = %v, want %q", err, want)
+		}
+		gitTest(t, fixture.path, "config", "--local", "--unset-all", "branch.Feat/Core-19.unreviewed")
+		artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "safe", TempRoot: t.TempDir()})
+		if err != nil {
+			t.Fatalf("PrepareSource after documented remediation: %v", err)
 		}
 		defer fixture.service.RemoveArtifact(artifact.BundlePath)
 	})
@@ -476,7 +539,7 @@ func TestHostGitUsesProtectedConfigurationAndRejectsUnallowlistedLocalConfig(t *
 			}
 			gitTest(t, fixture.path, "config", "--local", key, value)
 			_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir()})
-			want := fmt.Sprintf("repository-local Git configuration %q is not allowlisted", strings.ToLower(key))
+			want := wantUnallowlistedConfigError(strings.ToLower(key))
 			if err == nil || err.Error() != want {
 				t.Fatalf("PrepareSource with %s error = %v, want %q", key, err, want)
 			}
@@ -485,14 +548,553 @@ func TestHostGitUsesProtectedConfigurationAndRejectsUnallowlistedLocalConfig(t *
 			}
 		})
 	}
-	t.Run("command remote transport", func(t *testing.T) {
+	for name, config := range map[string]string{
+		"empty include section":                   "[include]\n",
+		"empty conditional include section":       "[includeIf \"gitdir:/does/not/match/\"]\n",
+		"comment-only include section":            "[include]\n\t# path = /must-not-read\n\t; still no variable\n",
+		"include followed by an ordinary section": "[include]\n[core]\n\tprecomposeunicode = true\n",
+		"adjacent include and ordinary headers":   "[include][core]\n\tprecomposeunicode = true\n",
+	} {
+		t.Run(name+" does not fabricate include path", func(t *testing.T) {
+			fixture := newRepositoryWithCommit(t)
+			appendFile(t, filepath.Join(fixture.path, ".git", "config"), config)
+			artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+				Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "safe", TempRoot: t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("PrepareSource with %s: %v", name, err)
+			}
+			defer fixture.service.RemoveArtifact(artifact.BundlePath)
+			if err := fixture.service.VerifyBundle(context.Background(), artifact.BundlePath, artifact.BundleDigest); err != nil {
+				t.Fatalf("VerifyBundle() with %s: %v", name, err)
+			}
+		})
+	}
+	for name, test := range map[string]struct {
+		config  string
+		wantKey string
+	}{
+		"include section": {
+			config:  "[include]\n\tunrelated = inert\n",
+			wantKey: "include.unrelated",
+		},
+		"conditional include section": {
+			config:  "[includeIf \"gitdir:/does/not/match/\"]\n\tunrelated = inert\n",
+			wantKey: "includeif.gitdir:/does/not/match/.unrelated",
+		},
+	} {
+		t.Run(name+" reports an unrelated variable as itself", func(t *testing.T) {
+			fixture := newRepositoryWithCommit(t)
+			appendFile(t, filepath.Join(fixture.path, ".git", "config"), test.config)
+			_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+				Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir(),
+			})
+			want := wantUnallowlistedConfigError(test.wantKey)
+			if err == nil || err.Error() != want {
+				t.Fatalf("PrepareSource with unrelated %s variable error = %v, want %q", name, err, want)
+			}
+		})
+	}
+	for name, test := range map[string]struct {
+		config     string
+		wantKey    string
+		wantRecord string
+	}{
+		"include subsection path": {
+			config:     "[include \"metadata\"] path = inert\n",
+			wantKey:    "include.metadata.path",
+			wantRecord: "include.metadata.path=inert",
+		},
+		"conditional include without condition path": {
+			config:     "[includeIf] path = inert\n",
+			wantKey:    "includeif.path",
+			wantRecord: "includeif.path=inert",
+		},
+		"explicit empty include subsection path": {
+			config:     "[include \"\"] path = inert\n",
+			wantKey:    "include..path",
+			wantRecord: "include..path=inert",
+		},
+		"explicit empty extensions subsection worktreeConfig": {
+			config:     "[extensions \"\"] worktreeConfig = true\n",
+			wantKey:    "extensions..worktreeconfig",
+			wantRecord: "extensions..worktreeconfig=true",
+		},
+	} {
+		t.Run(name+" is handled by normal aggregation", func(t *testing.T) {
+			fixture := newRepositoryWithCommit(t)
+			appendFile(t, filepath.Join(fixture.path, ".git", "config"),
+				test.config+"[dsx]\n\tunreviewed = inert\n")
+			if records := gitTest(t, fixture.path, "config", "--local", "--list"); !strings.Contains("\n"+records, "\n"+test.wantRecord+"\n") {
+				t.Fatalf("Git configuration records = %q, want exact record %q", records, test.wantRecord)
+			}
+			_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+				Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir(),
+			})
+			want := wantUnallowlistedConfigError("dsx.unreviewed", test.wantKey)
+			if err == nil || err.Error() != want {
+				t.Fatalf("PrepareSource with %s error = %v, want aggregated error %q", name, err, want)
+			}
+		})
+	}
+	t.Run("BOM-prefixed config rejects include before Git", func(t *testing.T) {
 		fixture := newRepositoryWithCommit(t)
-		gitTest(t, fixture.path, "config", "--local", "remote.origin.url", "ext::touch command-transport-ran")
-		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir()})
-		if err == nil || err.Error() != `repository-local Git configuration "remote.origin.url" is not allowlisted` {
-			t.Fatalf("PrepareSource with command transport error = %v", err)
+		configPath := filepath.Join(fixture.path, ".git", "config")
+		included := filepath.Join(t.TempDir(), "malformed-included-config")
+		writeFile(t, included, "not a Git configuration line\n")
+		config := append([]byte{0xef, 0xbb, 0xbf}, mustRead(t, configPath)...)
+		config = append(config, []byte(fmt.Sprintf("[include]\n\tpath = %s\n", included))...)
+		writeFile(t, configPath, config)
+		err := prepareSourceBeforeGit(t, fixture)
+		want := wantUnallowlistedConfigError("include.path")
+		if err.Error() != want {
+			t.Fatalf("PrepareSource with BOM-prefixed include error = %v, want %q", err, want)
+		}
+		if strings.Contains(err.Error(), included) {
+			t.Fatalf("include target leaked into error: %v", err)
 		}
 	})
+	t.Run("gitfile without commondir rejects include before Git", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		gitDir := moveGitDirectoryAside(t, fixture.path)
+		writeFile(t, filepath.Join(fixture.path, ".git"), "gitdir: "+gitDir+"\n")
+		gitFileInfo, err := os.Lstat(filepath.Join(fixture.path, ".git"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !gitFileInfo.Mode().IsRegular() {
+			t.Fatalf("repository .git mode = %v, want regular gitfile", gitFileInfo.Mode())
+		}
+		gitDirInfo, err := os.Lstat(gitDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !gitDirInfo.IsDir() || gitDirInfo.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("Git directory mode = %v, want physical directory", gitDirInfo.Mode())
+		}
+		if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Git directory commondir error = %v, want not exist", err)
+		}
+
+		included := filepath.Join(t.TempDir(), "malformed-included-config")
+		writeFile(t, included, "not a Git configuration line\n")
+		if err := os.Chmod(included, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chmod(included, 0o600)
+		})
+		appendFile(t, filepath.Join(gitDir, "config"), fmt.Sprintf("[include]\n\tpath = %s\n", included))
+
+		err = prepareSourceBeforeGit(t, fixture)
+		want := wantUnallowlistedConfigError("include.path")
+		if err.Error() != want {
+			t.Fatalf("PrepareSource with no-commondir gitfile include error = %v, want %q", err, want)
+		}
+		if strings.Contains(err.Error(), included) {
+			t.Fatalf("include target leaked into error: %v", err)
+		}
+	})
+	for name, conditional := range map[string]bool{
+		"unconditional include": false,
+		"matching includeIf":    true,
+	} {
+		t.Run("linked worktree "+name+" rejects before Git", func(t *testing.T) {
+			fixture, gitDir, commonDir := newLinkedWorktree(t, newRepositoryWithCommit(t))
+			included := filepath.Join(t.TempDir(), "malformed-included-config")
+			writeFile(t, included, "not a Git configuration line\n")
+			header := "[include]"
+			wantKey := "include.path"
+			if conditional {
+				condition := "gitdir:" + filepath.ToSlash(gitDir) + "/"
+				header = `[includeIf "` + condition + `"]`
+				wantKey = "includeif." + condition + ".path"
+			}
+			appendFile(t, filepath.Join(commonDir, "config"), fmt.Sprintf("%s\n\tpath = %s\n", header, included))
+			err := prepareSourceBeforeGit(t, fixture)
+			want := wantUnallowlistedConfigError(wantKey)
+			if err.Error() != want {
+				t.Fatalf("PrepareSource with linked-worktree %s error = %v, want %q", name, err, want)
+			}
+			if strings.Contains(err.Error(), included) {
+				t.Fatalf("include target leaked into error: %v", err)
+			}
+		})
+	}
+	for name, test := range map[string]struct {
+		config  string
+		wantKey string
+	}{
+		"multiline include path": {
+			config:  "[include]\n\tpath = %s\n",
+			wantKey: "include.path",
+		},
+		"multiline conditional include path": {
+			config:  "[includeIf \"gitdir:/Repos/\"]\n\tpath = %s\n",
+			wantKey: "includeif.gitdir:/Repos/.path",
+		},
+		"same-line include path": {
+			config:  "[include] path = %s\n",
+			wantKey: "include.path",
+		},
+		"mixed-case include path": {
+			config:  "[InClUdE]\n\tPaTh = %s\n",
+			wantKey: "include.path",
+		},
+		"adjacent section headers before include path": {
+			config:  "[core][include]\n\tpath = %s\n",
+			wantKey: "include.path",
+		},
+		"section transition before include path": {
+			config:  "[core]\n\tbare = false\n[include]\n\tpath = %s\n",
+			wantKey: "include.path",
+		},
+	} {
+		t.Run("pre-scan rejects "+name, func(t *testing.T) {
+			fixture := newRepositoryWithCommit(t)
+			included := filepath.Join(t.TempDir(), "malformed-included-config")
+			writeFile(t, included, "not a Git configuration line\n")
+			appendFile(t, filepath.Join(fixture.path, ".git", "config"), fmt.Sprintf(test.config, included))
+			err := prepareSourceBeforeGit(t, fixture)
+			want := wantUnallowlistedConfigError(test.wantKey)
+			if err.Error() != want {
+				t.Fatalf("PrepareSource with %s error = %v, want %q", name, err, want)
+			}
+		})
+	}
+	t.Run("include is reported before other rejected keys", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		included := filepath.Join(t.TempDir(), "malformed-included-config")
+		writeFile(t, included, "not a Git configuration line\n")
+		appendFile(t, filepath.Join(fixture.path, ".git", "config"),
+			fmt.Sprintf("[core]\n\tfsmonitor = /must-not-run\n[include]\n\tpath = %s\n", included))
+		err := prepareSourceBeforeGit(t, fixture)
+		want := wantUnallowlistedConfigError("include.path")
+		if err.Error() != want {
+			t.Fatalf("PrepareSource with include and unsupported key error = %v, want %q", err, want)
+		}
+	})
+	t.Run("aggregated unsupported keys", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		marker := filepath.Join(t.TempDir(), "executed")
+		script := filepath.Join(t.TempDir(), "hostile")
+		writeFile(t, script, fmt.Sprintf("#!/bin/sh\n/usr/bin/touch %q\n", marker))
+		if err := os.Chmod(script, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, fixture.path, "config", "--local", "core.fsmonitor", script)
+		gitTest(t, fixture.path, "config", "--local", "--add", "credential.helper", "!"+script)
+		gitTest(t, fixture.path, "config", "--local", "filter.payload.process", script)
+		gitTest(t, fixture.path, "config", "--local", "merge.payload.driver", script)
+		gitTest(t, fixture.path, "config", "--local", "--add", "credential.helper", "!"+script)
+		before := hostByteSnapshot(t, fixture.path)
+		tempRoot := t.TempDir()
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: tempRoot})
+		want := wantUnallowlistedConfigError("core.fsmonitor", "credential.helper", "filter.payload.process", "merge.payload.driver")
+		if err == nil || err.Error() != want {
+			t.Fatalf("PrepareSource with multiple unsupported keys error = %v, want %q", err, want)
+		}
+		if strings.Contains(err.Error(), script) {
+			t.Fatalf("configured value leaked into error: %v", err)
+		}
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("configured executable ran: %v", err)
+		}
+		entries, err := os.ReadDir(tempRoot)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("temporary root entries = %v, err = %v", entries, err)
+		}
+		assertHostByteSnapshot(t, fixture.path, before)
+	})
+	t.Run("command remote transport", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		marker := filepath.Join(t.TempDir(), "command-transport-ran")
+		transport := filepath.Join(t.TempDir(), "remote-transport")
+		writeFile(t, transport, fmt.Sprintf("#!/bin/sh\n/usr/bin/touch %q\nexit 1\n", marker))
+		if err := os.Chmod(transport, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, fixture.path, "config", "--local", "remote.origin.url", "ext::"+transport)
+		before := hostByteSnapshot(t, fixture.path)
+		tempRoot := t.TempDir()
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: tempRoot})
+		want := wantUnallowlistedConfigError("remote.origin.url")
+		if err == nil || err.Error() != want {
+			t.Fatalf("PrepareSource with command transport error = %v, want %q", err, want)
+		}
+		if strings.Contains(err.Error(), transport) {
+			t.Fatalf("command transport value leaked into error: %v", err)
+		}
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("command transport executed: %v", err)
+		}
+		entries, readErr := os.ReadDir(tempRoot)
+		if readErr != nil || len(entries) != 0 {
+			t.Fatalf("temporary root entries = %v, err = %v", entries, readErr)
+		}
+		assertHostByteSnapshot(t, fixture.path, before)
+	})
+}
+
+func TestWorktreeConfigActivationIsRejectedBeforeGit(t *testing.T) {
+	t.Run("valueless activation rejects before Git or included target read", func(t *testing.T) {
+		fixture, _, commonDir := newLinkedWorktree(t, newRepositoryWithCommit(t))
+		appendFile(t, filepath.Join(commonDir, "config"), "[extensions]\n\tworktreeConfig\n")
+
+		included := filepath.Join(t.TempDir(), "malformed-unreadable-config")
+		writeFile(t, included, "not a Git configuration line\n")
+		if err := os.Chmod(included, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chmod(included, 0o600)
+		})
+		writeFile(t, filepath.Join(commonDir, "config.worktree"), fmt.Sprintf("[include]\n\tpath = %s\n", included))
+
+		err := prepareSourceBeforeGit(t, fixture)
+		want := wantUnallowlistedConfigError("extensions.worktreeconfig")
+		if err.Error() != want {
+			t.Fatalf("PrepareSource with valueless extensions.worktreeConfig error = %v, want %q", err, want)
+		}
+		if strings.Contains(err.Error(), included) {
+			t.Fatalf("config.worktree include target leaked into error: %v", err)
+		}
+	})
+
+	t.Run("explicit false ignores config.worktree and follows normal allowlist rejection", func(t *testing.T) {
+		fixture, _, commonDir := newLinkedWorktree(t, newRepositoryWithCommit(t))
+		appendFile(t, filepath.Join(commonDir, "config"), "[extensions]\n\tworktreeConfig = false\n")
+
+		included := filepath.Join(t.TempDir(), "malformed-unreadable-config")
+		writeFile(t, included, "not a Git configuration line\n")
+		if err := os.Chmod(included, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chmod(included, 0o600)
+		})
+		writeFile(t, filepath.Join(commonDir, "config.worktree"), fmt.Sprintf("[include]\n\tpath = %s\n", included))
+
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+			Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir(),
+		})
+		want := wantUnallowlistedConfigError("extensions.worktreeconfig")
+		if err == nil || err.Error() != want {
+			t.Fatalf("PrepareSource with extensions.worktreeConfig=false error = %v, want %q", err, want)
+		}
+		if strings.Contains(err.Error(), included) {
+			t.Fatalf("inactive config.worktree include target leaked into error: %v", err)
+		}
+	})
+}
+
+func TestHostGitMetadataStructuralBoundariesRejectBeforeGit(t *testing.T) {
+	t.Run("malformed gitdir declaration", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		gitDirectory := moveGitDirectoryAside(t, fixture.path)
+		writeFile(t, filepath.Join(fixture.path, ".git"), "gitdir "+gitDirectory+"\n")
+		assertStructuralGitMetadataError(t, prepareSourceBeforeGit(t, fixture), ".git gitfile")
+	})
+	t.Run("missing gitdir target", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		moveGitDirectoryAside(t, fixture.path)
+		writeFile(t, filepath.Join(fixture.path, ".git"), "gitdir: "+filepath.Join(t.TempDir(), "missing")+"\n")
+		assertStructuralGitMetadataError(t, prepareSourceBeforeGit(t, fixture), "Git directory target")
+	})
+	t.Run("symlink gitfile", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		gitDirectory := moveGitDirectoryAside(t, fixture.path)
+		pointer := filepath.Join(t.TempDir(), "gitfile")
+		writeFile(t, pointer, "gitdir: "+gitDirectory+"\n")
+		if err := os.Symlink(pointer, filepath.Join(fixture.path, ".git")); err != nil {
+			t.Fatal(err)
+		}
+		assertStructuralGitMetadataError(t, prepareSourceBeforeGit(t, fixture), "repository .git entry")
+	})
+	t.Run("oversized gitfile", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		moveGitDirectoryAside(t, fixture.path)
+		gitFile := filepath.Join(fixture.path, ".git")
+		writeFile(t, gitFile, "gitdir: ")
+		if err := os.Truncate(gitFile, (1<<20)+1); err != nil {
+			t.Fatal(err)
+		}
+		assertStructuralGitMetadataError(t, prepareSourceBeforeGit(t, fixture), ".git gitfile")
+	})
+	t.Run("malformed commondir", func(t *testing.T) {
+		fixture, gitDir, _ := newLinkedWorktree(t, newRepositoryWithCommit(t))
+		writeFile(t, filepath.Join(gitDir, "commondir"), "../..\nextra\n")
+		assertStructuralGitMetadataError(t, prepareSourceBeforeGit(t, fixture), "common-directory pointer")
+	})
+	t.Run("oversized commondir", func(t *testing.T) {
+		fixture, gitDir, _ := newLinkedWorktree(t, newRepositoryWithCommit(t))
+		commonPointer := filepath.Join(gitDir, "commondir")
+		writeFile(t, commonPointer, "../..")
+		if err := os.Truncate(commonPointer, (1<<20)+1); err != nil {
+			t.Fatal(err)
+		}
+		assertStructuralGitMetadataError(t, prepareSourceBeforeGit(t, fixture), "common-directory pointer")
+	})
+	t.Run("common config symlink replacement", func(t *testing.T) {
+		fixture, _, commonDir := newLinkedWorktree(t, newRepositoryWithCommit(t))
+		configPath := filepath.Join(commonDir, "config")
+		originalPath := filepath.Join(commonDir, "config.before-replacement")
+		if err := os.Rename(configPath, originalPath); err != nil {
+			t.Fatal(err)
+		}
+		replacement := filepath.Join(t.TempDir(), "replacement-config")
+		writeFile(t, replacement, "[include]\n\tpath = /must-not-read\n")
+		if err := os.Symlink(replacement, configPath); err != nil {
+			t.Fatal(err)
+		}
+		original := append([]byte(nil), mustRead(t, originalPath)...)
+		replacementBytes := append([]byte(nil), mustRead(t, replacement)...)
+		assertStructuralGitMetadataError(t, prepareSourceBeforeGit(t, fixture), "repository common Git configuration")
+		if !bytes.Equal(mustRead(t, originalPath), original) || !bytes.Equal(mustRead(t, replacement), replacementBytes) {
+			t.Fatal("common config replacement or preserved original was mutated")
+		}
+	})
+	for name, header := range map[string]string{
+		"spaced include":   "[include ]\n\tpath = /must-not-read\n",
+		"spaced includeIf": "[includeIf \"gitdir:/Repos/\" ]\n\tpath = /must-not-read\n",
+	} {
+		t.Run(name+" is a structural parse error", func(t *testing.T) {
+			fixture := newRepositoryWithCommit(t)
+			appendFile(t, filepath.Join(fixture.path, ".git", "config"), header)
+			_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+				Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir(),
+			})
+			assertStructuralGitMetadataError(t, err, "inspect repository-local Git configuration:")
+		})
+	}
+	for name, test := range map[string]struct {
+		config string
+		key    string
+	}{
+		"worktreeConfig activation": {config: "[extensions]\n\tworktreeConfig = true\\", key: "extensions.worktreeconfig"},
+		"include path":              {config: "[include]\n\tpath = /x\\", key: "include.path"},
+	} {
+		t.Run(name+" continuation at EOF follows Git semantics", func(t *testing.T) {
+			fixture := newRepositoryWithCommit(t)
+			appendFile(t, filepath.Join(fixture.path, ".git", "config"), test.config)
+			err := prepareSourceBeforeGit(t, fixture)
+			want := wantUnallowlistedConfigError(test.key)
+			if err.Error() != want {
+				t.Fatalf("PrepareSource with continuation at EOF error = %v, want %q", err, want)
+			}
+		})
+	}
+	t.Run("valid continued harmless scalar", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		appendFile(t, filepath.Join(fixture.path, ".git", "config"), "[branch \"main\"]\n\tvscode-merge-base = origin/\\\nmain\n")
+		artifact, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+			Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "safe", TempRoot: t.TempDir(),
+		})
+		if err != nil {
+			t.Fatalf("PrepareSource with valid continued harmless scalar: %v", err)
+		}
+		defer fixture.service.RemoveArtifact(artifact.BundlePath)
+	})
+}
+
+func wantUnallowlistedConfigError(keys ...string) string {
+	quoted := make([]string, 0, len(keys))
+	for _, key := range keys {
+		quoted = append(quoted, strconv.Quote(key))
+	}
+	return "repository-local Git configuration keys are not allowlisted: " + strings.Join(quoted, ", ") +
+		"; remove a key with: git config --local --unset-all <key>"
+}
+
+func newLinkedWorktree(t *testing.T, base repositoryFixture) (repositoryFixture, string, string) {
+	t.Helper()
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreePath := filepath.Join(parent, "linked")
+	gitTest(t, base.path, "worktree", "add", "--quiet", "--detach", worktreePath, "HEAD")
+	gitFile := strings.TrimSuffix(strings.TrimSuffix(string(mustRead(t, filepath.Join(worktreePath, ".git"))), "\n"), "\r")
+	gitDirText, ok := strings.CutPrefix(gitFile, "gitdir: ")
+	if !ok || gitDirText == "" {
+		t.Fatalf("linked worktree .git = %q", gitFile)
+	}
+	gitDir := gitDirText
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(worktreePath, gitDir)
+	}
+	gitDir, err = filepath.EvalSymlinks(filepath.Clean(gitDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonText := strings.TrimSuffix(strings.TrimSuffix(string(mustRead(t, filepath.Join(gitDir, "commondir"))), "\n"), "\r")
+	if commonText == "" {
+		t.Fatal("linked worktree commondir is empty")
+	}
+	commonDir := commonText
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(gitDir, commonDir)
+	}
+	commonDir, err = filepath.EvalSymlinks(filepath.Clean(commonDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repositoryFixture{t: t, path: worktreePath, service: base.service}, gitDir, commonDir
+}
+
+func moveGitDirectoryAside(t *testing.T, repositoryPath string) string {
+	t.Helper()
+	external, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(external, "gitdir")
+	if err := os.Rename(filepath.Join(repositoryPath, ".git"), moved); err != nil {
+		t.Fatal(err)
+	}
+	return moved
+}
+
+func prepareSourceBeforeGit(t *testing.T, fixture repositoryFixture) error {
+	t.Helper()
+	runner := &unexpectedGitRunner{}
+	service, err := NewService(runner, testGitExecutable(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.service = service
+	_, err = fixture.service.PrepareSource(context.Background(), SourceRequest{
+		Repository: fixture.repository(), ApprovedRoot: fixture.path, Workspace: "secure", TempRoot: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("PrepareSource accepted rejected repository-local Git metadata")
+	}
+	if runner.calls != 0 {
+		t.Fatalf("PrepareSource invoked Git %d time(s) before rejecting repository-local Git metadata", runner.calls)
+	}
+	return err
+}
+
+func assertStructuralGitMetadataError(t *testing.T, err error, boundary string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("repository-local Git metadata was accepted")
+	}
+	if !strings.Contains(err.Error(), boundary) {
+		t.Fatalf("structural Git metadata error = %v, want boundary %q", err, boundary)
+	}
+	if strings.Contains(err.Error(), "not allowlisted") || strings.Contains(err.Error(), "git config --local --unset-all") {
+		t.Fatalf("structural Git metadata error was reported as policy remediation: %v", err)
+	}
+}
+
+type unexpectedGitRunner struct {
+	calls int
+}
+
+func (runner *unexpectedGitRunner) Run(context.Context, Command) (Exit, error) {
+	runner.calls++
+	return Exit{Code: -1}, errors.New("unexpected Git invocation")
 }
 
 func TestApplyRollbackCaptureIsBoundedBeforeMutation(t *testing.T) {
@@ -1099,6 +1701,18 @@ func writeFile(t *testing.T, filePath string, content any) {
 		t.Fatalf("unsupported file content %T", content)
 	}
 	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func appendFile(t *testing.T, filePath, content string) {
+	t.Helper()
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := file.WriteString(content)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
 		t.Fatal(err)
 	}
 }

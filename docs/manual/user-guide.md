@@ -113,6 +113,10 @@ A representative configuration is:
   "auth": {
     "imports": ["omp", "codex", "opencode"]
   },
+  "aws": {
+    "mode": "host-default",
+    "directory": "/Users/example/.aws"
+  },
   "network": { "internet": true, "hostGrants": [] },
   "ports": [
     {
@@ -139,6 +143,41 @@ Structured `argv` is executed directly. It is not converted to a host shell stri
 
 Reviewed host-directory grants, where supported for narrow integrations, must be canonical and read-only. Semantic validation denies host home, project source, runtime sockets, SSH/GPG agents, Keychain, Tailscale state, browser profiles, temporary/runtime directories, symlink escapes, and the reserved `dsx-guest` target.
 
+#### Repository-local Git configuration
+
+DSX runs host Git to create restrictive source bundles and to fetch and apply workspace results. Repository-local Git configuration is an input to those operations, so it is security-relevant: Git configuration can run commands, load further configuration, or acquire objects over unexpected transports.
+
+DSX therefore accepts only reviewed, inert repository-local keys: repository format facts, identity and preference scalars, and common branch and remote metadata. The four additional supported metadata shapes are exactly:
+
+```text
+branch.<branch>.vscode-merge-base
+branch.<branch>.github-pr-owner-number
+branch.<branch>.gh-merge-base
+remote.<remote>.gh-resolved
+```
+
+These cover VS Code merge bases, GitHub pull-request numbers, and GitHub CLI merge-base and default-repository annotations. Their values must still be safe non-empty scalars; similarly named or command-oriented leaves are not accepted.
+
+During a repository-configuration validation, DSX performs a filesystem preflight before starting the Git command associated with that validation. A physical `.git` directory selects its `config`. Otherwise, DSX accepts only a non-symlink regular gitfile of at most 64 KiB containing exactly one `gitdir: ` line with an optional LF or CRLF terminator; a relative target is repository-relative and must resolve to a canonical physical directory. An optional `commondir`, when present, has the same file, size, and one-line terminator constraints, resolves relative paths from the Git directory, and must also name a canonical physical directory. When `commondir` is absent, DSX race-revalidates that absence and uses the Git directory. DSX performs a bounded stable read of the resulting common `config` when it exists, stripping exactly one leading UTF-8 BOM there; gitfiles and `commondir` files do not accept a BOM. An absent resolved common `config` is a legitimate empty repository-local configuration only after DSX revalidates the Git directory, any present `commondir` pointer and target, and the configuration's continued absence. DSX inspects actual `path` assignments in direct `[include]` and `[includeIf "..."]` sections, never resolves, opens, or reads an include target, and does not treat an empty include section header alone as a policy violation. It does not rely on `--no-includes` as a listing-level defense, because Git may process repository configuration while setting up the repository command.
+
+The same bounded common-config snapshot is checked for `extensions.worktreeConfig`, including its valueless implicit-true form. Direct include path assignments retain the first-error precedence described below. Once none remain, configuration that enables the extension is rejected during filesystem preflight, without starting the Git command for that validation. For repository-controlled static input, this prevents Git from activating the unscanned `$GIT_DIR/config.worktree`. Disabled forms do not activate that file, but the key remains unsupported and is rejected through the normal aggregate allowlist path after preflight.
+
+The bounded snapshot and revalidation protect against repository-controlled static input and fail closed when a metadata or configuration mutation is observable during those checks. The local host user is trusted. DSX does not claim to defend against that user, or another process acting with that user's authority, concurrently replacing `.git` metadata after a check or while the following Git process starts.
+
+If actual direct include path assignments exist, DSX reports their keys first, sorted and deduplicated without values, and does not start Git for that validation. Remove all include assignments and retry. Other unsupported keys are intentionally not merged into that first error; after include removal, DSX aggregates every safely listable unsupported key in one sorted, deduplicated, value-free rejection:
+
+```console
+$ dsx workspace create feature
+dsx workspace create: repository-local Git configuration keys are not allowlisted: "include.path"; remove a key with: git config --local --unset-all <key>
+$ git config --local --unset-all include.path
+$ dsx workspace create feature
+dsx workspace create: repository-local Git configuration keys are not allowlisted: "core.fsmonitor", "credential.helper", "filter.lfs.process"; remove a key with: git config --local --unset-all <key>
+```
+
+Command-bearing and object-acquiring configuration stays blocked: credential helpers, clean/smudge and process filters, external diff commands and merge drivers, filesystem monitors and hooks, and command remote transports such as `ext::`. A common concrete case is `git lfs install --local`, which writes command-bearing `filter.lfs.*` entries that can run Git LFS and alter object acquisition. Run `git lfs install` globally instead.
+
+Remediate by removing an unsupported repository-local key or by moving a legitimate personal preference into your global Git configuration. Do not try to disable DSX validation. A missing required `.git` metadata entry or gitfile, a malformed `.git` gitfile or present `commondir` pointer, a missing referenced target, and symlinked, non-regular, replaced, unreadable, oversized, or non-canonical metadata paths and files are reported as structural errors rather than allowlist rejections. The only file-absence exception is the resolved common `config` described above; an absent optional `commondir` selects the Git directory, and both absences are race-revalidated.
+
 ## 3. Setup and TUI
 
 ### 3.1 Bare command and setup
@@ -147,8 +186,8 @@ With a terminal, bare `dsx` opens setup for an unconfigured project or the dashb
 
 Setup is a three-step flow:
 
-1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default agent, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI.
-2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews scroll without truncation and cannot be approved before the complete content has been viewed.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default agent, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI. Setup also asks whether the project may allow selected workspaces to follow the host AWS `default`; this authorizes only the capability, never a workspace grant.
+2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. For `host-default`, it also shows the approved canonical source and identity, reserved read-only guest destination, eligible profile `default`, new-workspace default **Disabled**, and dynamic identity warning. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews scroll without truncation and cannot be approved before the complete content has been viewed.
 3. Verify Apple Container, persist configuration and approval, prepare DSX Standard when required, and open the dashboard.
 
 Authentication import remains a separate explicit approval. Setup does not silently import credentials. No configuration, approval, credential, or runtime resource is persisted before final confirmation. A post-confirmation Apple runtime preflight must succeed before project mutation.
@@ -165,7 +204,8 @@ The dashboard shows:
 - source branch and revision;
 - workspace default and project-allowed agents;
 - final URLs and published ports;
-- unfetched or unresolved-work warnings; and
+- unfetched or unresolved-work warnings;
+- AWS grant and non-secret availability state; and
 - `Legacy — cleanup only` resources.
 
 Actions for the selected workspace are state-aware:
@@ -181,6 +221,8 @@ Actions for the selected workspace are state-aware:
 | **g** | Review Git status or diff. |
 | **d** | Remove. |
 | **q** | Quit. |
+
+The dashboard also exposes **Enable AWS** or **Disable AWS** for the selected workspace. These TUI actions record intent and use the same workspace lifecycle path as the CLI.
 
 Update and restart are disabled while another lifecycle mutation is active. A workspace needing conflict resolution remains openable.
 
@@ -217,6 +259,9 @@ Before handing the terminal to an interactive workspace shell or agent, the TUI 
 | `dsx auth login --agent AGENT` | Perform an explicit DSX-scoped login. |
 | `dsx auth refresh --agent AGENT` | Refresh canonical project credentials through the harness adapter. |
 | `dsx auth purge --agent AGENT` | Confirm removal of canonical credentials and inactive copies. |
+| `dsx aws status WORKSPACE` | Report that workspace's grant and non-secret host-default availability or failure state. |
+| `dsx aws enable WORKSPACE` | Grant one workspace access to the current and continuously refreshed host default. |
+| `dsx aws disable WORKSPACE` | Revoke one workspace and remove its private AWS mirror. |
 | `dsx git status WORKSPACE [--repo MEMBER]` | Show source, result, dirty, rebase, fingerprint, and fetch state. |
 | `dsx git diff WORKSPACE [--repo MEMBER]` | Render bounded, terminal-safe changes. |
 | `dsx git fetch WORKSPACE [--repo MEMBER]` | Import verified committed history into the named host ref. |
@@ -276,7 +321,13 @@ $ dsx workspace stop feature-a
 
 `open` is permitted for `running`, `stopped`, and `needs_resolution` workspaces. It starts a stopped workspace, waits for guest readiness, and enters the shell. `start` performs the same state restoration without terminal attachment. `stop` terminates active agents and temporary helpers, removes live publications as appropriate, and preserves private clone data, credentials, dependencies, service volumes, configuration, and ownership.
 
-The managed DSX Standard shell is login interactive Zsh with pinned, image-owned Antidote plugin content and pre-generated Starship initialization. Startup is offline. Node/npm/pnpm, Python/pip/venv, Go, and an LTS JDK are exported at image level so direct structured commands do not need rc files. Custom images remain responsible for their own shell and toolchain.
+The managed DSX Standard image is Ubuntu 26.04 LTS ARM64. Its fixed identity is `dsx` (`1000:1000`), home `/home/dsx`, with login interactive Zsh, pinned image-owned Antidote content, and pre-generated Starship initialization. Direct shells and VS Code attachment may run `sudo -n COMMAND` without a password inside the workspace VM; DSX creates no root password or direct-root-login workflow. Elevation controls the VM and mounted workspace resources, never the host runtime, host home, or host source.
+
+The image-level baseline exports Node/npm/pnpm, Python/pip/venv, Go, an LTS JDK, AWS CLI v2 2.36.22 (`aws`, `aws_completer`), uv 0.12.3 (`uv`, `uvx`), .NET 10 LTS SDK 10.0.400 with .NET/ASP.NET Core runtimes 10.0.11 (`dotnet`, `dnx`), and standalone Kotlin compiler 2.4.10 (`kotlin`, `kotlinc`). Installing AWS CLI grants no AWS authority: the default-only per-workspace grant remains controlling, and disabled workspaces receive no AWS files or environment. Python `awscli` v1 is absent. uv and `dnx` may fetch dependencies only when explicitly invoked. Kotlin uses the managed JDK and does not include Gradle, Maven, Kotlin/Native, or runtime dependency resolution. Custom images remain responsible for compatible `1000:1000` account metadata, shell, toolchain, and any sudo policy.
+
+For a running, non-mutating workspace, press `v` for **Attach with VS Code (experimental)**. With Dev Containers 0.467.0+ and Apple `container` 1.2.2, enable **Dev › Containers: Experimental Apple Container Support**, run **Dev Containers: Attach to Running Apple Container...**, choose the exact inspected DSX container name printed by DSX, and open `/workspace`. DSX does not start stopped workspaces, parse `.devcontainer`, or manufacture a private remote-authority URI. IDE attachment does not provide automatic port discovery; approved DSX loopback publications remain authoritative.
+
+Workspaces created with an earlier Standard image retain their immutable image and identity contract. Preserve work through fetch/apply or another explicit workflow, remove the old workspace with `dsx workspace remove`, approve the changed Standard-image hash, and recreate it. DSX never silently replaces or recursively chowns existing persistent resources.
 
 ### 5.4 Restart
 
@@ -461,11 +512,35 @@ Workspace create, start, and restart do not implicitly restore long-running proj
 
 Sibling workspace networks are not bridged. A browser connects only to the selected workspace network.
 
-### 10.3 AWS and Leapp
+### 10.3 Default-only host AWS
 
-`aws.mode: "leapp"` is opt-in. The reviewed source directory must resolve to the canonical physical directory containing the required standard AWS files. DSX copies a stable paired generation into private state and exposes only that mirror read-only. Optional `aws.profile` sets standard `AWS_PROFILE`; it is convenience, not credential isolation, because every profile in the approved files may be readable.
+The project configuration has only two AWS modes:
 
-Browser VMs never receive AWS state. DSX never prints credential values.
+- `aws.mode: "none"` (the default) authorizes no host AWS access; and
+- `aws.mode: "host-default"` authorizes the project capability to offer selected workspaces the standard host AWS `default` from the approved canonical `aws.directory`.
+
+No profile name is configurable in this increment. `host-default` extracts only `[default]` from the standard credentials and config files, does not set `AWS_PROFILE`, and ignores all named sections. Named profiles, `--profile` switching, and identity pinning are future work.
+
+Project setup does not enable AWS in any workspace. Every new workspace starts with AWS access disabled. The approval must say that the capability is for selected workspaces only; new workspaces remain disabled; Leapp Desktop (or a compatible provider) must keep one complete temporary `default` active for enablement and rotation; switching the host default changes every AWS-enabled running workspace without another DSX approval or workspace restart; and named profiles are unavailable. The approved canonical source directory and identity, reserved guest destination `/run/dsx/aws`, read-only mode, eligible profile `default`, default-off state, and `dynamic-host-default` authority model are executable authority covered by the project approval hash. Host availability and credential bytes are not.
+
+DSX integrates only with the provider's standard-file output. It never starts, stops, logs into, or otherwise controls Leapp or another provider. Enabling requires a valid complete temporary host `default`:
+
+```console
+$ dsx aws status feature-a
+$ dsx aws enable feature-a
+$ dsx aws status feature-a
+$ dsx aws disable feature-a
+```
+
+`status` exposes the durable workspace grant plus only `available`, `unavailable`, or a stable non-secret failure code. It never emits credential values. The dashboard's selected-workspace **Enable AWS** and **Disable AWS** actions are equivalent to the CLI routes; the TUI records intent and uses the same lifecycle path.
+
+An enabled running workspace owns a private mirror helper. It takes bounded stable snapshots, filters `default`, and atomically publishes complete config-and-credentials generations read-only at `/run/dsx/aws`. A stable replacement of the host default propagates continuously to every AWS-enabled running workspace without a DSX command, reapproval, or restart. This is deliberately dynamic authority: the effective account or role may change when the provider switches `default`.
+
+The workspace grant persists across stop and restart. Stop terminates the helper and live publication while preserving the non-secret grant. Start and restart perform a fresh complete sync before exposing a shell or agent. Disable records revocation before terminating the helper and deleting that workspace's exact mirror. Remove cleans up the exact grant, helper, and mirror along with the proven workspace resources. A stable removal of host `default` revokes published credentials rather than retaining stale bytes.
+
+An AWS-disabled workspace has no AWS files, AWS environment, mirror helper, or host-source access. Siblings do not share mirror state, and enabling or disabling one leaves the others' grants unchanged. Browser VMs never receive AWS files, environment, or mirror access, even for an agent session attached to an AWS-enabled workspace.
+
+If enable, start, or restart reports that the host default is unavailable, start or renew one temporary `default` session in Leapp Desktop (or a compatible provider), then run `dsx aws status WORKSPACE`. For a source-identity failure, restore the reviewed canonical directory; changing it requires project reapproval. For an unexpected AWS identity, inspect the provider's active `default` and disable affected workspaces—the first increment intentionally follows that dynamic alias.
 
 ### 10.4 Published ports
 

@@ -14,19 +14,23 @@ func TestAuthLoginCleanupPreservesReplacementWithForeignOwnership(t *testing.T) 
 	projectID := model.ProjectID("cdcdcdcdcdcdcdcdcdcd")
 	sessionID := model.RunID("00000000-0000-7000-8000-000000000121")
 	name, err := runtime.CanonicalAuthLoginName(t.TempDir(), string(harness.Claude))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	labels, err := runtime.AuthLoginOwnershipLabels(projectID, sessionID, string(harness.Claude))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	foreign := append([]runtime.Label(nil), labels...)
 	foreign[0].Value = "foreign"
 	missing := append([]runtime.Label(nil), labels[:len(labels)-1]...)
 	ambiguous := append(append([]runtime.Label(nil), labels...), labels[0])
 
 	for _, test := range []struct {
-		name string
-		kind runtime.ResourceKind
+		name      string
+		kind      runtime.ResourceKind
 		container bool
-		labels []runtime.Label
+		labels    []runtime.Label
 	}{
 		{name: "container-foreign", kind: runtime.ResourceAuthLogin, container: true, labels: foreign},
 		{name: "container-missing", kind: runtime.ResourceAuthLogin, container: true, labels: missing},
@@ -37,14 +41,18 @@ func TestAuthLoginCleanupPreservesReplacementWithForeignOwnership(t *testing.T) 
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repository, err := auth.NewRepository(t.TempDir())
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			intent := auth.AuthLoginIntent{
 				Version: auth.AuthLoginIntentVersion, Generation: 1,
 				Project: auth.Project{ID: projectID, Harness: harness.Claude}, SessionID: string(sessionID),
 				PlanHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				State: auth.AuthLoginPlanned, VolumeName: name, ContainerName: name,
+				State:    auth.AuthLoginPlanned, VolumeName: name, ContainerName: name,
 			}
-			if err := repository.CreateAuthLoginIntent(context.Background(), intent); err != nil { t.Fatal(err) }
+			if err := repository.CreateAuthLoginIntent(context.Background(), intent); err != nil {
+				t.Fatal(err)
+			}
 			intent.Generation = 2
 			intent.State = auth.AuthLoginRunning
 			resource := runtime.Resource{ID: runtime.ResourceID(name), Name: name, Kind: test.kind}
@@ -56,7 +64,9 @@ func TestAuthLoginCleanupPreservesReplacementWithForeignOwnership(t *testing.T) 
 				volume = resource
 				intent.VolumeID = name
 			}
-			if err := repository.ReplaceAuthLoginIntent(context.Background(), intent, 1); err != nil { t.Fatal(err) }
+			if err := repository.ReplaceAuthLoginIntent(context.Background(), intent, 1); err != nil {
+				t.Fatal(err)
+			}
 
 			fake := &recordingWorkspaceRuntime{resources: map[runtime.ResourceID]runtime.ResourceSnapshot{
 				resource.ID: {Resource: resource, State: "running", Labels: test.labels},
@@ -72,7 +82,9 @@ func TestAuthLoginCleanupPreservesReplacementWithForeignOwnership(t *testing.T) 
 				t.Fatalf("cleanup stopped an ambiguous replacement %d times", fake.stops)
 			}
 			preserved, found, err := repository.LoadAuthLoginIntent(context.Background(), intent.Project, intent.SessionID)
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			if !found || preserved.State != auth.AuthLoginCleaning {
 				t.Fatalf("cleanup intent = %#v, found=%t", preserved, found)
 			}

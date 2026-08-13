@@ -68,7 +68,7 @@
       "$ref": "#/$defs/auth"
     },
     "aws": {
-      "description": "Opt-in standard AWS/Leapp directory grant; never contains credential values.",
+      "description": "Optional project capability to follow the host AWS default profile for selected workspaces; every new workspace remains AWS-disabled and no credential values are represented.",
       "$ref": "#/$defs/aws"
     },
     "network": {
@@ -507,27 +507,20 @@
       }
     },
     "aws": {
-      "description": "Standard AWS behavior using no grant or an opt-in read-only Leapp directory.",
+      "description": "Optional project capability using no AWS authority or a reviewed host-default source; authorizing it does not enable AWS in any workspace.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "mode": {
-          "description": "none disables AWS host credentials; leapp requires a reviewed directory and permits an optional profile.",
-          "enum": ["none", "leapp"]
+          "description": "none disables the project AWS capability; host-default authorizes selected workspaces to follow the temporary default profile while every new workspace remains disabled.",
+          "enum": ["none", "host-default"]
         },
         "directory": {
-          "description": "Canonical physical, non-symlink host directory mounted read-only in Leapp mode; it must contain regular config and credentials files, and every profile in them may be readable.",
+          "description": "Canonical physical, non-symlink host directory containing regular standard AWS config and credentials files; host-default reads only the default profile from this reviewed source.",
           "type": "string",
           "minLength": 1,
           "maxLength": 1024,
           "examples": ["/Users/example/.aws"]
-        },
-        "profile": {
-          "description": "Standard AWS_PROFILE selection convenience; this is not credential isolation.",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256,
-          "examples": ["development"]
         }
       }
     },

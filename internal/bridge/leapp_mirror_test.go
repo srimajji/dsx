@@ -17,9 +17,11 @@ import (
 	"github.com/srimajji/dsx/internal/model"
 )
 
-func TestLeappMirrorSynchronizesCompleteAtomicRotations(t *testing.T) {
-	source := leappFixture(t, "config-one", strings.Repeat("generation-one\n", 256))
-	authority, err := ResolveLeappDirectory(source)
+func TestHostAWSMirrorPublishesOnlyDefaultAndCompleteRotations(t *testing.T) {
+	config := "[default]\nregion = eu-west-1\n[named]\nregion = us-east-1\n"
+	credentials := hostAWSTemporaryCredentials("one") + "\n[named]\naws_access_key_id = named-access\naws_secret_access_key = named-secret\naws_session_token = named-token\n"
+	source := hostAWSFixture(t, config, credentials)
+	authority, err := ResolveHostAWSDirectory(source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,8 +29,7 @@ func TestLeappMirrorSynchronizesCompleteAtomicRotations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := canonicalTemporaryDirectory(t)
-	mirror := filepath.Join(run, leappMirrorDataName)
+	mirror := filepath.Join(canonicalTemporaryDirectory(t), hostAWSWorkspaceDataName)
 	if err := os.Mkdir(mirror, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -36,48 +37,55 @@ func TestLeappMirrorSynchronizesCompleteAtomicRotations(t *testing.T) {
 	if err != nil || code != "" {
 		t.Fatalf("initial synchronize = %q, %v", code, err)
 	}
-	for index, generation := range []string{strings.Repeat("generation-two\n", 256), strings.Repeat("generation-three\n", 256)} {
-		temporary := filepath.Join(source, ".credentials-next")
-		if err := os.WriteFile(temporary, []byte(generation), 0o600); err != nil {
-			t.Fatal(err)
+	for name, forbidden := range map[string]string{hostAWSConfigFile: "[named]", hostAWSCredentialsFile: "named-secret"} {
+		contents, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, name))
+		if readErr != nil {
+			t.Fatal(readErr)
 		}
-		if err := os.Rename(temporary, filepath.Join(source, leappCredentialsFile)); err != nil {
-			t.Fatal(err)
+		if bytes.Contains(contents, []byte(forbidden)) || !bytes.Contains(contents, []byte("[default]")) {
+			t.Fatalf("mirror %s did not contain only default: %q", name, contents)
 		}
-		configDigest, credentialDigest, code, err = synchronizeLeappMirror(mirror, spec, configDigest, credentialDigest)
-		if err != nil || code != "" {
-			t.Fatalf("rotation %d synchronize = %q, %v", index, code, err)
+	}
+
+	nextConfig := "[default]\nregion = ap-southeast-2\n[ignored]\nregion = eu-central-1\n"
+	nextCredentials := hostAWSTemporaryCredentials("two") + "\n[ignored]\naws_access_key_id = ignored-access\naws_secret_access_key = ignored-secret\naws_session_token = ignored-token\n"
+	writeHostAWSFiles(t, source, nextConfig, nextCredentials)
+	configDigest, credentialDigest, code, err = synchronizeLeappMirror(mirror, spec, configDigest, credentialDigest)
+	if err != nil || code != "" {
+		t.Fatalf("replacement synchronize = %q, %v", code, err)
+	}
+	filtered, state, err := FilterHostDefaultSnapshot(HostAWSDirectorySnapshot{Config: []byte(nextConfig), Credentials: []byte(nextCredentials)})
+	if err != nil || state != HostDefaultAvailable {
+		t.Fatalf("filter replacement = %q, %v", state, err)
+	}
+	for name, want := range map[string][]byte{hostAWSConfigFile: filtered.Config, hostAWSCredentialsFile: filtered.Credentials} {
+		contents, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, name))
+		if readErr != nil || !bytes.Equal(contents, want) {
+			t.Fatalf("replacement %s was partial or unfiltered: got %q want %q, %v", name, contents, want, readErr)
 		}
-		contents, err := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, leappCredentialsFile))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(contents) != generation {
-			t.Fatalf("rotation %d was partial: got %d want %d", index, len(contents), len(generation))
-		}
-		info, err := os.Lstat(filepath.Join(mirror, leappMirrorCurrentName, leappCredentialsFile))
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 {
-			t.Fatalf("mirror credentials mode = %v, %v", info, err)
+		info, statErr := os.Lstat(filepath.Join(mirror, leappMirrorCurrentName, name))
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 {
+			t.Fatalf("mirror %s mode = %v, %v", name, info, statErr)
 		}
 	}
 }
-func TestLeappMirrorGenerationCommitPreservesLastKnownGoodOnFailure(t *testing.T) {
-	mirror := filepath.Join(canonicalTemporaryDirectory(t), leappMirrorDataName)
+func TestHostAWSMirrorGenerationCommitPreservesLastKnownGoodOnFailure(t *testing.T) {
+	mirror := filepath.Join(canonicalTemporaryDirectory(t), hostAWSWorkspaceDataName)
 	if err := os.Mkdir(mirror, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	old := LeappDirectorySnapshot{Config: []byte("config-one"), Credentials: []byte("credentials-one")}
+	old := HostAWSDirectorySnapshot{Config: []byte("config-one"), Credentials: []byte("credentials-one")}
 	if err := publishLeappMirrorGeneration(mirror, old, nil); err != nil {
 		t.Fatal(err)
 	}
 	injected := errors.New("injected commit failure")
-	next := LeappDirectorySnapshot{Config: []byte("config-two"), Credentials: []byte("credentials-two")}
+	next := HostAWSDirectorySnapshot{Config: []byte("config-two"), Credentials: []byte("credentials-two")}
 	err := publishLeappMirrorGeneration(mirror, next, func() error {
-		config, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, leappConfigFile))
+		config, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, hostAWSConfigFile))
 		if readErr != nil || string(config) != "config-one" {
 			t.Fatalf("current generation changed before commit: %q, %v", config, readErr)
 		}
-		credentials, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, leappCredentialsFile))
+		credentials, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, hostAWSCredentialsFile))
 		if readErr != nil || string(credentials) != "credentials-one" {
 			t.Fatalf("current generation was mixed before commit: %q, %v", credentials, readErr)
 		}
@@ -86,14 +94,14 @@ func TestLeappMirrorGenerationCommitPreservesLastKnownGoodOnFailure(t *testing.T
 	if !errors.Is(err, injected) {
 		t.Fatalf("publish failure = %v", err)
 	}
-	for name, want := range map[string]string{leappConfigFile: "config-one", leappCredentialsFile: "credentials-one"} {
+	for name, want := range map[string]string{hostAWSConfigFile: "config-one", hostAWSCredentialsFile: "credentials-one"} {
 		contents, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, name))
 		if readErr != nil || string(contents) != want {
 			t.Fatalf("last known-good %s = %q, %v", name, contents, readErr)
 		}
 	}
 	if err := publishLeappMirrorGeneration(mirror, next, func() error {
-		for name, want := range map[string]string{leappConfigFile: "config-one", leappCredentialsFile: "credentials-one"} {
+		for name, want := range map[string]string{hostAWSConfigFile: "config-one", hostAWSCredentialsFile: "credentials-one"} {
 			contents, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, name))
 			if readErr != nil || string(contents) != want {
 				t.Fatalf("pre-commit generation mixed at %s: %q, %v", name, contents, readErr)
@@ -103,7 +111,7 @@ func TestLeappMirrorGenerationCommitPreservesLastKnownGoodOnFailure(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]string{leappConfigFile: "config-two", leappCredentialsFile: "credentials-two"} {
+	for name, want := range map[string]string{hostAWSConfigFile: "config-two", hostAWSCredentialsFile: "credentials-two"} {
 		contents, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, name))
 		if readErr != nil || string(contents) != want {
 			t.Fatalf("committed generation mixed at %s: %q, %v", name, contents, readErr)
@@ -111,34 +119,140 @@ func TestLeappMirrorGenerationCommitPreservesLastKnownGoodOnFailure(t *testing.T
 	}
 }
 
-func TestLeappMirrorPairedSourceRotationRetriesThenFailCloses(t *testing.T) {
-	mirror := filepath.Join(canonicalTemporaryDirectory(t), leappMirrorDataName)
+func TestHostAWSMirrorTransientUnsafeReadPreservesLastKnownGood(t *testing.T) {
+	mirror := filepath.Join(canonicalTemporaryDirectory(t), hostAWSWorkspaceDataName)
 	if err := os.Mkdir(mirror, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	initial := LeappDirectorySnapshot{Config: []byte("config-one"), Credentials: []byte("credentials-one")}
+	initial := HostAWSDirectorySnapshot{Config: []byte("config-one"), Credentials: []byte("credentials-one")}
 	if err := publishLeappMirrorGeneration(mirror, initial, nil); err != nil {
 		t.Fatal(err)
 	}
 	oldConfig := sha256.Sum256(initial.Config)
 	oldCredentials := sha256.Sum256(initial.Credentials)
 	reads := 0
-	_, _, code, err := synchronizeLeappMirrorWithSnapshot(mirror, leappMirrorSpec{}, oldConfig, oldCredentials, func() (LeappDirectorySnapshot, string, error) {
+	nextConfig, nextCredentials, code, err := synchronizeLeappMirrorWithSnapshot(mirror, leappMirrorSpec{}, oldConfig, oldCredentials, func() (HostAWSDirectorySnapshot, string, error) {
 		reads++
-		return LeappDirectorySnapshot{Config: []byte("config-two"), Credentials: []byte("credentials-one")}, "", nil
+		return HostAWSDirectorySnapshot{}, "source_unsafe", ErrHostAWSSourceUnsafe
 	})
-	if err == nil || code != "source_unsafe" || reads != 3 {
-		t.Fatalf("stable mixed source = code %q err %v reads %d", code, err, reads)
+	if !errors.Is(err, ErrHostAWSSourceUnsafe) || code != "source_unsafe" || reads != 1 || nextConfig != oldConfig || nextCredentials != oldCredentials {
+		t.Fatalf("transient read = digests %x/%x code %q err %v reads %d", nextConfig, nextCredentials, code, err, reads)
 	}
-	for name, want := range map[string]string{leappConfigFile: "config-one", leappCredentialsFile: "credentials-one"} {
+	for name, want := range map[string]string{hostAWSConfigFile: "config-one", hostAWSCredentialsFile: "credentials-one"} {
 		contents, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, name))
 		if readErr != nil || string(contents) != want {
-			t.Fatalf("failed source rotation replaced %s: %q, %v", name, contents, readErr)
+			t.Fatalf("transient read replaced last-known-good %s: %q, %v", name, contents, readErr)
 		}
 	}
 }
 
-func TestLeappMirrorSourceFailuresAreNonSecretAndFailClosed(t *testing.T) {
+func TestHostAWSMirrorStableRevocationPublishesEmptyGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		config      string
+		credentials string
+	}{
+		{name: "unavailable", config: "[named]\nregion = us-east-1\n", credentials: "[named]\naws_access_key_id = named\naws_secret_access_key = named\naws_session_token = named\n"},
+		{name: "unsupported", config: "[default]\ncredential_process = external-command\n", credentials: hostAWSTemporaryCredentials("unsupported")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := hostAWSFixture(t, "[default]\nregion = eu-west-1\n", hostAWSTemporaryCredentials("available"))
+			authority, err := ResolveHostAWSDirectory(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec, _, err := validatedLeappMirrorSpec(authority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mirror := filepath.Join(canonicalTemporaryDirectory(t), hostAWSWorkspaceDataName)
+			if err := os.Mkdir(mirror, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			configDigest, credentialsDigest, code, err := synchronizeLeappMirror(mirror, spec, [32]byte{}, [32]byte{})
+			if err != nil || code != "" {
+				t.Fatalf("initial synchronize = %q, %v", code, err)
+			}
+			previousGeneration, err := currentLeappMirrorGeneration(mirror)
+			if err != nil || previousGeneration == "" {
+				t.Fatalf("initial generation = %q, %v", previousGeneration, err)
+			}
+			writeHostAWSFiles(t, source, test.config, test.credentials)
+			_, _, code, err = synchronizeLeappMirror(mirror, spec, configDigest, credentialsDigest)
+			if err != nil || code != "" {
+				t.Fatalf("revocation synchronize = %q, %v", code, err)
+			}
+			for _, name := range []string{hostAWSConfigFile, hostAWSCredentialsFile} {
+				contents, readErr := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, name))
+				if readErr != nil || len(contents) != 0 {
+					t.Fatalf("revoked %s retained host bytes: %q, %v", name, contents, readErr)
+				}
+			}
+			if _, statErr := os.Lstat(previousGeneration); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("revocation retained prior credential generation %q: %v", previousGeneration, statErr)
+			}
+		})
+	}
+}
+
+func TestHostAWSMirrorReplacementPropagationBudget(t *testing.T) {
+	source := hostAWSFixture(t, "[default]\nregion = eu-west-1\n", hostAWSTemporaryCredentials("one"))
+	authority, err := ResolveHostAWSDirectory(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, _, err := validatedLeappMirrorSpec(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror := filepath.Join(canonicalTemporaryDirectory(t), hostAWSWorkspaceDataName)
+	if err := os.Mkdir(mirror, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configDigest, credentialsDigest, code, err := synchronizeLeappMirror(mirror, spec, [32]byte{}, [32]byte{})
+	if err != nil || code != "" {
+		t.Fatalf("initial synchronize = %q, %v", code, err)
+	}
+	initialGeneration, err := currentLeappMirrorGeneration(mirror)
+	if err != nil || initialGeneration == "" {
+		t.Fatalf("initial generation = %q, %v", initialGeneration, err)
+	}
+	unchangedStarted := time.Now()
+	for range 32 {
+		configDigest, credentialsDigest, code, err = synchronizeLeappMirror(mirror, spec, configDigest, credentialsDigest)
+		if err != nil || code != "" {
+			t.Fatalf("unchanged synchronize = %q, %v", code, err)
+		}
+	}
+	unchangedElapsed := time.Since(unchangedStarted)
+	unchangedGeneration, err := currentLeappMirrorGeneration(mirror)
+	if err != nil || unchangedGeneration != initialGeneration {
+		t.Fatalf("unchanged polling republished generation: initial %q current %q, %v", initialGeneration, unchangedGeneration, err)
+	}
+
+	replacement := hostAWSTemporaryCredentials("replacement")
+	writeHostAWSFiles(t, source, "[default]\nregion = ap-southeast-2\n", replacement)
+	replacementStarted := time.Now()
+	_, _, code, err = synchronizeLeappMirror(mirror, spec, configDigest, credentialsDigest)
+	replacementElapsed := time.Since(replacementStarted)
+	if err != nil || code != "" {
+		t.Fatalf("replacement synchronize = %q, %v", code, err)
+	}
+	if leappMirrorPollInterval+replacementElapsed >= 2*time.Second {
+		t.Fatalf("replacement propagation exceeded budget: poll %s + filter/publish %s", leappMirrorPollInterval, replacementElapsed)
+	}
+	replacementGeneration, err := currentLeappMirrorGeneration(mirror)
+	if err != nil || replacementGeneration == "" || replacementGeneration == initialGeneration {
+		t.Fatalf("replacement generation = %q after %q, %v", replacementGeneration, initialGeneration, err)
+	}
+	credentials, err := os.ReadFile(filepath.Join(mirror, leappMirrorCurrentName, hostAWSCredentialsFile))
+	if err != nil || !bytes.Contains(credentials, []byte("replacement")) {
+		t.Fatalf("replacement was not published: %q, %v", credentials, err)
+	}
+	t.Logf("32 unchanged filter passes: %s; replacement filter/publish: %s; worst polling interval: %s", unchangedElapsed, replacementElapsed, leappMirrorPollInterval)
+}
+
+func TestHostAWSMirrorSourceFailuresAreNonSecret(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*testing.T, string)
@@ -151,17 +265,17 @@ func TestLeappMirrorSourceFailuresAreNonSecretAndFailClosed(t *testing.T) {
 			if err := os.Mkdir(source, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			writeLeappFiles(t, source, "replacement", "replacement-secret-must-not-appear")
+			writeHostAWSFiles(t, source, "replacement", "replacement-secret-must-not-appear")
 		}},
 		{name: "credential symlink", want: "source_unsafe", mutate: func(t *testing.T, source string) {
-			if err := os.Remove(filepath.Join(source, leappCredentialsFile)); err != nil {
+			if err := os.Remove(filepath.Join(source, hostAWSCredentialsFile)); err != nil {
 				t.Fatal(err)
 			}
 			target := filepath.Join(filepath.Dir(source), "outside-secret")
 			if err := os.WriteFile(target, []byte("symlink-secret-must-not-appear"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(target, filepath.Join(source, leappCredentialsFile)); err != nil {
+			if err := os.Symlink(target, filepath.Join(source, hostAWSCredentialsFile)); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -171,21 +285,21 @@ func TestLeappMirrorSourceFailuresAreNonSecretAndFailClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := file.Truncate(MaxLeappFileBytes + 1); err != nil {
+			if err := file.Truncate(MaxHostAWSFileBytes + 1); err != nil {
 				_ = file.Close()
 				t.Fatal(err)
 			}
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Rename(temporary, filepath.Join(source, leappCredentialsFile)); err != nil {
+			if err := os.Rename(temporary, filepath.Join(source, hostAWSCredentialsFile)); err != nil {
 				t.Fatal(err)
 			}
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			source := leappFixture(t, "config", "approved-secret-must-not-appear")
-			authority, err := ResolveLeappDirectory(source)
+			source := hostAWSFixture(t, "[default]\nregion = eu-west-1\n", hostAWSTemporaryCredentials("approved-secret-must-not-appear"))
+			authority, err := ResolveHostAWSDirectory(source)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,7 +308,7 @@ func TestLeappMirrorSourceFailuresAreNonSecretAndFailClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			run := canonicalTemporaryDirectory(t)
-			mirror := filepath.Join(run, leappMirrorDataName)
+			mirror := filepath.Join(run, hostAWSWorkspaceDataName)
 			if err := os.Mkdir(mirror, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -228,50 +342,29 @@ func TestLeappMirrorHelperCommandStartsInDedicatedSession(t *testing.T) {
 	}
 }
 
-func TestLeappMirrorStopRecoversProvenDeadHelperArtifacts(t *testing.T) {
-	stateRoot, err := os.MkdirTemp("/private/tmp", "dsx-leapp-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.Remove(filepath.Join(stateRoot, leappMirrorDirectoryName, "aaaaaaaaaaaaaaaaaaaa", "main"))
-		_ = os.Remove(filepath.Join(stateRoot, leappMirrorDirectoryName, "aaaaaaaaaaaaaaaaaaaa"))
-		_ = os.Remove(filepath.Join(stateRoot, leappMirrorDirectoryName))
-		_ = os.Remove(stateRoot)
-	})
+func TestHostAWSWorkspaceDisableRecoversDeadHelperAndPreservesStableChannel(t *testing.T) {
+	stateRoot := canonicalTemporaryDirectory(t)
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewProductionLeappMirrorManager(stateRoot, executable)
+	manager, err := NewProductionHostAWSWorkspaceManager(stateRoot, executable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := leaseTestIdentity(t, "leapp-permissions", "01890f5c-7b00-7000-8000-000000000071")
-	paths, err := manager.ensurePaths(identity)
+	identity := leaseTestIdentity(t, "host-aws-permissions", "01890f5c-7b00-7000-8000-000000000071")
+	stablePath, err := manager.Prepare(context.Background(), identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(paths.mirror, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := publishLeappMirrorGeneration(paths.mirror, LeappDirectorySnapshot{Config: []byte("config"), Credentials: []byte("credentials")}, nil); err != nil {
-		t.Fatal(err)
-	}
-	partial, err := os.MkdirTemp(paths.mirror, leappMirrorGenerationPrefix)
+	paths, exists, err := manager.existingPaths(identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(partial, 0o700); err != nil {
-		t.Fatal(err)
+	if !exists {
+		t.Fatal("prepared Leapp mirror paths do not exist")
 	}
-	if err := atomicWriteLeappMirrorFile(partial, leappConfigFile, []byte("partially staged")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(paths.mirror, leappMirrorWritePrefix+"dead"), []byte("staged"), 0o400); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(paths.mirror, leappMirrorCurrentPrefix+"dead"), nil, 0o600); err != nil {
+	if err := publishLeappMirrorGeneration(paths.mirror, HostAWSDirectorySnapshot{Config: []byte("config"), Credentials: []byte("credentials")}, nil); err != nil {
 		t.Fatal(err)
 	}
 	ledger := leappMirrorLedger{Version: 1, Identity: identity, SpecDigest: strings.Repeat("a", 64), PID: 424242, ProcessStartedAt: time.Now().UTC(), Executable: manager.executable}
@@ -300,11 +393,139 @@ func TestLeappMirrorStopRecoversProvenDeadHelperArtifacts(t *testing.T) {
 		}
 		return false, nil
 	}
-	if err := manager.Stop(context.Background(), identity); err != nil {
+	if err := manager.Disable(context.Background(), identity); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(paths.run); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("dead helper run survived recovery: %v", err)
+	if stablePath != paths.mirror {
+		t.Fatalf("stable path = %q, want %q", stablePath, paths.mirror)
+	}
+	if empty, err := hostAWSPublicationEmpty(stablePath); err != nil || !empty {
+		t.Fatalf("disabled publication empty = %v, %v", empty, err)
+	}
+	if absent, err := exactLeappMirrorHelperArtifactsAbsent(paths); err != nil || !absent {
+		t.Fatalf("disabled helper artifacts absent = %v, %v", absent, err)
+	}
+	if preparedAgain, err := manager.Prepare(context.Background(), identity); err != nil || preparedAgain != stablePath {
+		t.Fatalf("idempotent prepare path = %q, %v", preparedAgain, err)
+	}
+}
+func TestHostAWSWorkspaceStablePathAcrossEnableDisableReenableAndExactRemove(t *testing.T) {
+	stateRoot := canonicalTemporaryDirectory(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewProductionHostAWSWorkspaceManager(stateRoot, executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := leaseTestIdentity(t, "host-aws-lifecycle", "01890f5c-7b00-7000-8000-000000000072")
+	source := hostAWSFixture(t, "[default]\nregion=us-east-1\n", "[default]\naws_access_key_id=one\naws_secret_access_key=two\n")
+	authority, err := ResolveHostAWSDirectory(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.launchOverride = func(_ context.Context, paths leappMirrorPaths, gotIdentity LeaseIdentity, _ leappMirrorSpec, _ string) (string, error) {
+		if gotIdentity != identity {
+			t.Fatalf("enable identity = %#v, want %#v", gotIdentity, identity)
+		}
+		if err := publishLeappMirrorGeneration(paths.mirror, HostAWSDirectorySnapshot{Config: []byte("enabled-config"), Credentials: []byte("enabled-credentials")}, nil); err != nil {
+			return "", err
+		}
+		return paths.mirror, nil
+	}
+	prepared, err := manager.Prepare(context.Background(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedAgain, err := manager.Prepare(context.Background(), identity)
+	if err != nil || preparedAgain != prepared {
+		t.Fatalf("idempotent Prepare() = %q, %v; want %q", preparedAgain, err, prepared)
+	}
+	enabled, err := manager.Enable(context.Background(), identity, authority)
+	if err != nil || enabled != prepared {
+		t.Fatalf("Enable() = %q, %v; want stable %q", enabled, err, prepared)
+	}
+	if err := manager.Disable(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+	if empty, err := hostAWSPublicationEmpty(prepared); err != nil || !empty {
+		t.Fatalf("disabled publication empty = %v, %v", empty, err)
+	}
+	reenabled, err := manager.Enable(context.Background(), identity, authority)
+	if err != nil || reenabled != prepared {
+		t.Fatalf("re-Enable() = %q, %v; want stable %q", reenabled, err, prepared)
+	}
+	if err := manager.Remove(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(prepared); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed stable publication still exists: %v", err)
+	}
+	if err := manager.Remove(context.Background(), identity); err != nil {
+		t.Fatalf("idempotent Remove() = %v", err)
+	}
+}
+
+func TestHostAWSWorkspaceFirstEnableUnavailableFailsAndKeepsPreparedEmpty(t *testing.T) {
+	stateRoot := canonicalTemporaryDirectory(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewProductionHostAWSWorkspaceManager(stateRoot, executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := leaseTestIdentity(t, "host-aws-unavailable", "01890f5c-7b00-7000-8000-000000000074")
+	source := hostAWSFixture(t, "", "")
+	authority, err := ResolveHostAWSDirectory(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stablePath, err := manager.Prepare(context.Background(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.launchOverride = func(_ context.Context, paths leappMirrorPaths, _ LeaseIdentity, spec leappMirrorSpec, _ string) (string, error) {
+		_, _, code, syncErr := synchronizeInitialLeappMirror(paths.mirror, spec)
+		if syncErr == nil || code != "source_unavailable" {
+			t.Fatalf("initial unavailable sync = %q, %v", code, syncErr)
+		}
+		return "", syncErr
+	}
+	if _, err := manager.Enable(context.Background(), identity, authority); err == nil {
+		t.Fatal("first Enable() accepted unavailable host default")
+	}
+	if empty, verifyErr := hostAWSPublicationEmpty(stablePath); verifyErr != nil || !empty {
+		t.Fatalf("failed first enable publication empty = %v, %v", empty, verifyErr)
+	}
+}
+
+func TestHostAWSWorkspaceRemovePreservesAmbiguousPublicationEvidence(t *testing.T) {
+	stateRoot := canonicalTemporaryDirectory(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewProductionHostAWSWorkspaceManager(stateRoot, executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := leaseTestIdentity(t, "host-aws-ambiguity", "01890f5c-7b00-7000-8000-000000000073")
+	stablePath, err := manager.Prepare(context.Background(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ambiguous := filepath.Join(stablePath, "unowned")
+	if err := os.WriteFile(ambiguous, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Remove(context.Background(), identity); model.ErrorCodeOf(err) != model.CodeAmbiguous {
+		t.Fatalf("Remove() error = %v, want ambiguous", err)
+	}
+	if contents, err := os.ReadFile(ambiguous); err != nil || string(contents) != "preserve" {
+		t.Fatalf("ambiguous evidence was not preserved: %q, %v", contents, err)
 	}
 }
 
@@ -312,7 +533,7 @@ func TestLeappMirrorExactReattachAndCrossIdentityControl(t *testing.T) {
 	identity := leaseTestIdentity(t, "leapp-reattach", "01890f5c-7b00-7000-8000-000000000041")
 	other := identity
 	other.RunID = model.RunID("01890f5c-7b00-7000-8000-000000000042")
-	spec := leappMirrorSpec{CanonicalPath: "/private/source", Source: LeappSourceIdentity{Device: 1, Inode: 2, UID: uint32(os.Geteuid())}}
+	spec := leappMirrorSpec{CanonicalPath: "/private/source", Source: HostAWSSourceIdentity{Device: 1, Inode: 2, UID: uint32(os.Geteuid())}}
 	executable := executableIdentity{Path: "/private/dsx", Device: 3, Inode: 4, Size: 5, UID: uint32(os.Geteuid())}
 	ledger := leappMirrorLedger{Version: 1, Identity: identity, Spec: spec, SpecDigest: strings.Repeat("a", 64), PID: 123, ProcessStartedAt: time.Now().UTC(), Executable: executable}
 	if err := validateLeappMirrorLedger(ledger, identity, spec, ledger.SpecDigest, executable); err != nil {
@@ -337,13 +558,13 @@ func TestLeappMirrorExactReattachAndCrossIdentityControl(t *testing.T) {
 	}
 }
 
-func TestLeappDescriptorSnapshotRetriesPairedRotationWithoutMixedGeneration(t *testing.T) {
-	source := leappFixture(t, "config-one", "credentials-one")
-	authority, err := ResolveLeappDirectory(source)
+func TestHostAWSDescriptorSnapshotRetriesPairedRotationWithoutMixedGeneration(t *testing.T) {
+	source := hostAWSFixture(t, "config-one", "credentials-one")
+	authority, err := ResolveHostAWSDirectory(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	opened, err := OpenApprovedLeappDirectory(authority)
+	opened, err := OpenApprovedHostAWSDirectory(authority)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,9 +575,9 @@ func TestLeappDescriptorSnapshotRetriesPairedRotationWithoutMixedGeneration(t *t
 		var name, contents string
 		switch attempt {
 		case 1:
-			name, contents = leappConfigFile, "config-two"
+			name, contents = hostAWSConfigFile, "config-two"
 		case 3:
-			name, contents = leappCredentialsFile, "credentials-two"
+			name, contents = hostAWSCredentialsFile, "credentials-two"
 		default:
 			return
 		}
@@ -378,7 +599,7 @@ func TestLeappDescriptorSnapshotRetriesPairedRotationWithoutMixedGeneration(t *t
 
 func TestLeappMirrorAcceptedReadinessValidationFailureStopsExactHelper(t *testing.T) {
 	identity := leaseTestIdentity(t, "leapp-readiness", "01890f5c-7b00-7000-8000-000000000061")
-	spec := leappMirrorSpec{CanonicalPath: "/private/source", Source: LeappSourceIdentity{Device: 1, Inode: 2, UID: uint32(os.Geteuid())}}
+	spec := leappMirrorSpec{CanonicalPath: "/private/source", Source: HostAWSSourceIdentity{Device: 1, Inode: 2, UID: uint32(os.Geteuid())}}
 	executable := executableIdentity{Path: "/private/dsx", Device: 3, Inode: 4, Size: 5, UID: uint32(os.Geteuid())}
 	digest := strings.Repeat("a", 64)
 	ready := leappMirrorResponse{Version: 1, State: "ready", Identity: identity, SpecDigest: digest, PID: 123, Executable: executable}
@@ -400,7 +621,7 @@ func TestLeappMirrorAcceptedReadinessValidationFailureStopsExactHelper(t *testin
 			}
 			paths := makeLeappMirrorPaths(filepath.Dir(filepath.Dir(filepath.Dir(run))), filepath.Dir(filepath.Dir(run)), filepath.Dir(run), run)
 			stopped := false
-			manager := &ProductionLeappMirrorManager{
+			manager := &ProductionHostAWSWorkspaceManager{
 				executable: executable, stopWait: time.Second, loadReadyLedger: test.load, verifySnapshot: test.verify,
 				controlOverride: func(_ context.Context, _ leappMirrorPaths, request leappMirrorCommand) (leappMirrorResponse, error) {
 					stopped = request.Action == "stop" && request.Identity == identity && request.SpecDigest == digest
@@ -419,8 +640,8 @@ func TestLeappMirrorAcceptedReadinessValidationFailureStopsExactHelper(t *testin
 			if !stopped || !bytes.Equal(acceptance.Bytes(), []byte{1}) {
 				t.Fatalf("cleanup stop=%v acceptance=%v", stopped, acceptance.Bytes())
 			}
-			if _, err := os.Lstat(run); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("exact failed-launch run cleanup = %v", err)
+			if info, err := os.Stat(run); err != nil || !info.IsDir() {
+				t.Fatalf("stable publication run was removed during failed-launch cleanup: %v", err)
 			}
 		})
 	}

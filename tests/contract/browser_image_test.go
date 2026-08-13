@@ -156,6 +156,8 @@ func TestBrowserImageRecipeAndLockContract(t *testing.T) {
 	for _, forbidden := range []string{
 		"dsx-guest", "harness", "omp", "codex", "claude", "opencode",
 		"credential", "_auth", ".aws", "aws", "provider", "secret",
+		"aws_config_file", "aws_shared_credentials_file", "aws_profile", "aws_default_profile", "/run/dsx/aws",
+		"host-aws", "host aws", "mirror", "publication",
 		"/workspace", "/source", "/src", ".git", "mount", "volume", "socket", ".sock",
 		"expose ", "--publish", "\nadd ", "\ncmd ", " npx ", "npm install", "npm exec",
 	} {

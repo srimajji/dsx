@@ -93,6 +93,31 @@ func TestParseChildIdentityRejectsMalformedOrRootUID(t *testing.T) {
 	}
 }
 
+func TestInitializeWorkspaceArgumentsRequireExactOrderedAllowlist(t *testing.T) {
+	valid := []string{
+		"initialize-workspace", "--child-uid", "1000", "--child-gid", "1000",
+		"--path", "/workspace",
+		"--path", "/home/dsx/.dsx/auth",
+		"--path", "/home/dsx/.local/state/dsx",
+		"--path", "/home/dsx/.cache",
+		"--path", "/var/lib/dsx",
+	}
+	// Unit tests cannot run the root-only mutation, but exact parsing reaches the
+	// root check while incomplete/reordered arguments fail earlier.
+	if code := run(valid); os.Geteuid() != 0 && code != 1 {
+		t.Fatalf("valid initializer parsing exit = %d, want root-only rejection", code)
+	}
+	missing := append([]string(nil), valid[:len(valid)-2]...)
+	if code := run(missing); code == 0 {
+		t.Fatal("missing initializer path accepted")
+	}
+	reordered := append([]string(nil), valid...)
+	reordered[6], reordered[8] = reordered[8], reordered[6]
+	if code := run(reordered); code == 0 {
+		t.Fatal("reordered initializer paths accepted")
+	}
+}
+
 func TestParseExecArgumentsAcceptsOnlyOptionalEnvironmentFileBeforeDelimiter(t *testing.T) {
 	path, argv, err := parseExecArguments([]string{"--env-file", "/tmp/dsx-run/00000000-0000-7000-8000-000000000000/env-00000000000000000000000000000000", "--", "printf", "%s", "a b"})
 	if err != nil || path == "" || len(argv) != 3 || argv[2] != "a b" {

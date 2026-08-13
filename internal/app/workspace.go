@@ -14,6 +14,7 @@ import (
 	"time"
 
 	agentimage "github.com/srimajji/dsx/images/agent"
+	"github.com/srimajji/dsx/internal/bridge"
 	"github.com/srimajji/dsx/internal/gitx"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/ownership"
@@ -45,6 +46,18 @@ var privateWorkspaceVolumes = []struct {
 	{workspaceServiceRole, "/var/lib/dsx"},
 }
 
+const standardWorkspaceUser = "1000:1000"
+
+var workspaceInitializationArgv = []string{
+	DefaultGuestHelperPath, "initialize-workspace",
+	"--child-uid", "1000", "--child-gid", "1000",
+	"--path", "/workspace",
+	"--path", "/home/dsx/.dsx/auth",
+	"--path", "/home/dsx/.local/state/dsx",
+	"--path", "/home/dsx/.cache",
+	"--path", "/var/lib/dsx",
+}
+
 type WorkspacePlanResolver func(context.Context, string) (plan.ExecutionPlan, error)
 type WorkspaceRemovalGuard func(context.Context, state.Manifest, runtime.ResourceSnapshot) ([]string, error)
 
@@ -55,11 +68,11 @@ type WorkspaceDependencies struct {
 	Manifests         state.ManifestRepository
 	Locks             state.LockRepository
 	Runtime           runtime.Adapter
+	HostAWS           bridge.HostAWSWorkspaceManager
 	Git               gitx.HostService
 	TempRoot          string
 	Now               func() time.Time
 	NewRunID          func(time.Time) (model.RunID, error)
-	User              func() string
 	GuestHelperSource func() (runtime.HostPath, error)
 	RemovalGuard      WorkspaceRemovalGuard
 }
@@ -71,11 +84,11 @@ type WorkspaceService struct {
 	manifests         state.ManifestRepository
 	locks             state.LockRepository
 	runtime           runtime.Adapter
+	hostAWS           bridge.HostAWSWorkspaceManager
 	git               gitx.HostService
 	tempRoot          string
 	now               func() time.Time
 	newRunID          func(time.Time) (model.RunID, error)
-	user              func() string
 	guestHelperSource func() (runtime.HostPath, error)
 	removalGuard      WorkspaceRemovalGuard
 }
@@ -89,10 +102,6 @@ func NewWorkspaceService(dependencies WorkspaceDependencies) *WorkspaceService {
 	if newRunID == nil {
 		newRunID = model.NewRunID
 	}
-	user := dependencies.User
-	if user == nil {
-		user = func() string { return "1000:1000" }
-	}
 	tempRoot := dependencies.TempRoot
 	if tempRoot == "" {
 		tempRoot = filepath.Clean(os.TempDir())
@@ -100,8 +109,8 @@ func NewWorkspaceService(dependencies WorkspaceDependencies) *WorkspaceService {
 	service := &WorkspaceService{
 		inspection: dependencies.Inspection, resolvePlan: dependencies.ResolvePlan,
 		approvals: dependencies.Approvals, manifests: dependencies.Manifests, locks: dependencies.Locks,
-		runtime: dependencies.Runtime, git: dependencies.Git, tempRoot: tempRoot, now: now,
-		newRunID: newRunID, user: user, guestHelperSource: dependencies.GuestHelperSource,
+		runtime: dependencies.Runtime, git: dependencies.Git, hostAWS: dependencies.HostAWS, tempRoot: tempRoot, now: now,
+		newRunID: newRunID, guestHelperSource: dependencies.GuestHelperSource,
 		removalGuard: dependencies.RemovalGuard,
 	}
 	if service.removalGuard == nil && service.git != nil {
@@ -270,6 +279,9 @@ func (service *WorkspaceService) Create(ctx context.Context, request WorkspaceCr
 	if _, err := reviewedRuntimeMounts(execution); err != nil {
 		return result, err
 	}
+	if execution.AWS.Mode == plan.AWSModeHostDefault && service.hostAWS == nil {
+		return result, model.NewError(model.CodeUnavailable, "host AWS workspace publication is unavailable", nil)
+	}
 	defaultAgent := request.DefaultAgent
 	if defaultAgent == "" {
 		defaultAgent = execution.Agents.Default
@@ -336,7 +348,15 @@ func (service *WorkspaceService) Create(ctx context.Context, request WorkspaceCr
 	if err != nil {
 		return result, err
 	}
-	spec, err := workspaceSpec(execution, manifest, image, network, owner, helper, service.user())
+	var hostAWSMirror runtime.HostPath
+	if execution.AWS.Mode == plan.AWSModeHostDefault {
+		stablePath, prepareErr := service.hostAWS.Prepare(ctx, workspaceLeaseIdentity(manifest))
+		if prepareErr != nil {
+			return result, prepareErr
+		}
+		hostAWSMirror = runtime.HostPath(stablePath)
+	}
+	spec, err := workspaceSpec(execution, manifest, image, network, owner, helper, hostAWSMirror)
 	if err != nil {
 		return result, err
 	}
@@ -353,6 +373,9 @@ func (service *WorkspaceService) Create(ctx context.Context, request WorkspaceCr
 	}
 	snapshot, err = service.ownedSnapshot(ctx, manifest, manifest.Resources[ownerIndex], true)
 	if err != nil {
+		return result, err
+	}
+	if err := service.initializeWorkspaceVolumes(ctx, snapshot); err != nil {
 		return result, err
 	}
 	if err := service.bootstrapWorkspace(ctx, snapshot, &manifest, artifacts); err != nil {
@@ -374,6 +397,21 @@ func (service *WorkspaceService) Create(ctx context.Context, request WorkspaceCr
 		}
 	}
 	return result, nil
+}
+
+func (service *WorkspaceService) initializeWorkspaceVolumes(ctx context.Context, snapshot runtime.ResourceSnapshot) error {
+	exit, err := service.runtime.Exec(ctx, snapshot, runtime.ExecSpec{
+		Argv:       append([]string(nil), workspaceInitializationArgv...),
+		WorkingDir: "/workspace",
+		User:       "0:0",
+	}, runtime.ExecIO{})
+	if err != nil {
+		return model.Wrap(model.CodeUnavailable, "initialize workspace volume ownership", err)
+	}
+	if exit.Code == nil || *exit.Code != 0 {
+		return model.NewError(model.CodeUnavailable, "initialize workspace volume ownership", nil)
+	}
+	return nil
 }
 
 func (service *WorkspaceService) Start(ctx context.Context, request WorkspaceStartRequest) (result WorkspaceResult, returnErr error) {
@@ -402,9 +440,15 @@ func (service *WorkspaceService) Start(ctx context.Context, request WorkspaceSta
 				returnErr = errors.Join(returnErr, service.finalizeLifecycleFailure(ctx, manifest, "start", returnErr))
 			}
 		}()
+		if err := service.activateHostAWSForRuntime(ctx, manifest, access.Plan); err != nil {
+			return result, err
+		}
 		if err := service.runtime.StartWorkspace(ctx, access.Workspace); err != nil {
 			return result, err
 		}
+	}
+	if err := service.initializeWorkspaceVolumes(ctx, access.Workspace); err != nil {
+		return result, err
 	}
 	next := model.StateRunning
 	if workspaceHasConflict(*manifest) {
@@ -437,6 +481,9 @@ func (service *WorkspaceService) Stop(ctx context.Context, request WorkspaceStop
 		return result, err
 	}
 	if err := service.clearActiveSession(ctx, access.Manifest); err != nil {
+		return result, err
+	}
+	if err := service.disableHostAWSForStoppedRuntime(ctx, *access.Manifest); err != nil {
 		return result, err
 	}
 	if access.Workspace.State == "running" {
@@ -489,6 +536,9 @@ func (service *WorkspaceService) Restart(ctx context.Context, request WorkspaceR
 			return result, err
 		}
 	}
+	if err := service.activateHostAWSForRuntime(ctx, manifest, access.Plan); err != nil {
+		return result, err
+	}
 	if err := service.runtime.StartWorkspace(ctx, access.Workspace); err != nil {
 		return result, err
 	}
@@ -531,7 +581,11 @@ func (service *WorkspaceService) Open(ctx context.Context, request WorkspaceOpen
 	if access.Manifest.ActiveSession != nil {
 		return result, model.NewError(model.CodeConflict, "workspace has an active session", nil)
 	}
-	spec := runtime.ExecSpec{Argv: []string{"/bin/zsh", "-il"}, WorkingDir: "/workspace", User: service.user(), Terminal: request.Terminal}
+	spec := runtime.ExecSpec{Argv: []string{"/bin/zsh", "-il"}, WorkingDir: "/workspace", User: standardWorkspaceUser, Terminal: request.Terminal}
+	spec, err = service.PrepareWorkspaceExecution(ctx, *access.Manifest, spec)
+	if err != nil {
+		return result, err
+	}
 	var process runtime.ProcessSpec
 	if request.Terminal {
 		if request.RunInteractive == nil {
@@ -667,6 +721,9 @@ func (service *WorkspaceService) Remove(ctx context.Context, request WorkspaceRe
 		if err := service.transitionManifest(ctx, &manifest, model.StateCleaning, "remove", ""); err != nil {
 			return result, err
 		}
+		if err := service.revokeAndRemoveHostAWS(ctx, &manifest); err != nil {
+			return result, err
+		}
 	}
 	deleted, preserved, err := service.deleteManifestResources(ctx, &manifest)
 	result.DeletedResources, result.Preserved = deleted, preserved
@@ -691,6 +748,25 @@ func (service *WorkspaceService) Remove(ctx context.Context, request WorkspaceRe
 	result.DeletedManifest = true
 	result.State = model.StateDeleted
 	return result, nil
+}
+
+type WorkspaceAttachInfoRequest struct {
+	Root      string
+	Workspace model.WorkspaceName
+}
+
+type WorkspaceAttachInfo struct {
+	Workspace model.WorkspaceName
+	Container string
+}
+
+func (service *WorkspaceService) AttachInfo(ctx context.Context, request WorkspaceAttachInfoRequest) (result WorkspaceAttachInfo, returnErr error) {
+	access, unlock, err := service.workspaceAccess(ctx, request.Root, request.Workspace, true)
+	if err != nil {
+		return result, err
+	}
+	defer func() { returnErr = errors.Join(returnErr, unlock()) }()
+	return WorkspaceAttachInfo{Workspace: access.Manifest.Workspace, Container: access.Workspace.Name}, nil
 }
 
 func (service *WorkspaceService) workspaceAccess(ctx context.Context, root string, name model.WorkspaceName, requireRunning bool) (access workspaceAccess, unlock func() error, returnErr error) {
@@ -1091,6 +1167,9 @@ func (service *WorkspaceService) rollbackCreate(ctx context.Context, manifest *s
 	if manifest.State != model.StateCleaning {
 		_ = service.transitionManifest(ctx, manifest, model.StateCleaning, "remove", "")
 	}
+	if err := service.revokeAndRemoveHostAWS(ctx, manifest); err != nil {
+		return err
+	}
 	_, preserved, err := service.deleteManifestResources(ctx, manifest)
 	if err != nil {
 		return model.Wrap(model.CodeUnavailable, "workspace rollback preserved resources: "+strings.Join(preserved, ", "), err)
@@ -1143,6 +1222,9 @@ func (service *WorkspaceService) removeSourceArtifacts(artifacts []gitx.SourceAr
 
 func plannedWorkspaceManifest(execution plan.ExecutionPlan, name model.WorkspaceName, runID model.RunID, defaultAgent string, artifacts []gitx.SourceArtifact, now time.Time) (state.Manifest, error) {
 	manifest := state.Manifest{Version: state.ManifestVersion, Generation: 1, ProjectID: execution.Project.ID, CanonicalRoot: execution.Project.CanonicalRoot, Workspace: name, RunID: runID, PlanHash: execution.ExecutableHash, DefaultAgent: defaultAgent, State: model.StatePlanned, Operation: "create", CreatedAt: now.UTC(), UpdatedAt: now.UTC(), Git: make([]state.GitRecord, len(artifacts))}
+	if execution.AWS.Mode == plan.AWSModeHostDefault {
+		manifest.AWSGrant = &state.AWSGrantRecord{}
+	}
 	resources := []struct {
 		kind runtime.ResourceKind
 		role string
@@ -1178,8 +1260,8 @@ func plannedWorkspaceManifest(execution plan.ExecutionPlan, name model.Workspace
 	return manifest, state.ValidateManifest(manifest)
 }
 
-func workspaceSpec(execution plan.ExecutionPlan, manifest state.Manifest, image runtime.Image, network, owner state.ResourceRecord, helper runtime.HostPath, childUser string) (runtime.WorkspaceSpec, error) {
-	mounts := make([]runtime.Mount, 0, len(manifest.Resources)+len(execution.Mounts)+1)
+func workspaceSpec(execution plan.ExecutionPlan, manifest state.Manifest, image runtime.Image, network, owner state.ResourceRecord, helper, hostAWSMirror runtime.HostPath) (runtime.WorkspaceSpec, error) {
+	mounts := make([]runtime.Mount, 0, len(manifest.Resources)+len(execution.Mounts)+2)
 	for _, volume := range privateWorkspaceVolumes {
 		record, err := workspaceManifestResource(manifest, runtime.ResourceVolume, volume.role)
 		if err != nil {
@@ -1212,7 +1294,13 @@ func workspaceSpec(execution plan.ExecutionPlan, manifest state.Manifest, image 
 		mounts = append(mounts, mount)
 	}
 	mounts = append(mounts, runtime.Mount{Source: filepath.Dir(string(helper)), Target: DefaultGuestHelperDirectory, Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityGuestHelper})
-	uid, gid, err := guestUserIdentity(childUser)
+	if execution.AWS.Mode == plan.AWSModeHostDefault {
+		if hostAWSMirror == "" {
+			return runtime.WorkspaceSpec{}, model.NewError(model.CodeUnavailable, "host AWS workspace publication path is unavailable", nil)
+		}
+		mounts = append(mounts, runtime.Mount{Source: string(hostAWSMirror), Target: plan.AWSGuestDestination, Type: "bind", ReadOnly: true, Authority: runtime.MountAuthorityHostAWSMirror})
+	}
+	uid, gid, err := guestUserIdentity(standardWorkspaceUser)
 	if err != nil {
 		return runtime.WorkspaceSpec{}, err
 	}
@@ -1220,7 +1308,7 @@ func workspaceSpec(execution plan.ExecutionPlan, manifest state.Manifest, image 
 	for index, port := range execution.Ports {
 		ports[index] = runtime.PortRequest{HostIP: port.HostIP, HostPort: port.HostPort, GuestPort: port.GuestPort, Protocol: port.Protocol}
 	}
-	return runtime.WorkspaceSpec{Name: owner.Name, CanonicalRoot: runtime.HostPath(execution.Project.CanonicalRoot), Image: image, Entrypoint: []string{DefaultGuestHelperPath, "serve", "--socket", DefaultGuestSocketPath, "--child-uid", uid, "--child-gid", gid, "--initialize-workspace", "/workspace"}, WorkingDir: "/workspace", User: "0:0", Mounts: mounts, Networks: []string{network.Name}, Ports: ports, Labels: workspaceRuntimeLabels(owner.Labels), CPUs: execution.Limits.CPUs, MemoryBytes: execution.Limits.MemoryBytes}, nil
+	return runtime.WorkspaceSpec{Name: owner.Name, CanonicalRoot: runtime.HostPath(execution.Project.CanonicalRoot), HostAWSMirrorSource: hostAWSMirror, Image: image, Entrypoint: []string{DefaultGuestHelperPath, "serve", "--socket", DefaultGuestSocketPath, "--child-uid", uid, "--child-gid", gid}, WorkingDir: "/workspace", User: standardWorkspaceUser, Mounts: mounts, Networks: []string{network.Name}, Ports: ports, Labels: workspaceRuntimeLabels(owner.Labels), CPUs: execution.Limits.CPUs, MemoryBytes: execution.Limits.MemoryBytes}, nil
 }
 
 func enforceWorkspaceLimit(manifests []state.Manifest, maximum int, exclude model.RunID, operation string) error {
@@ -1316,11 +1404,11 @@ func (service *WorkspaceService) ensureWorkspaceImage(ctx context.Context, execu
 
 func (service *WorkspaceService) bootstrapWorkspace(ctx context.Context, snapshot runtime.ResourceSnapshot, manifest *state.Manifest, artifacts []gitx.SourceArtifact) (returnErr error) {
 	staging := "/tmp/dsx-source-" + string(manifest.RunID)
-	if _, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: []string{"/bin/mkdir", "-p", staging}, WorkingDir: "/workspace", User: service.user()}, runtime.ExecIO{}); err != nil {
+	if _, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: []string{"/bin/mkdir", "-p", staging}, WorkingDir: "/workspace", User: standardWorkspaceUser}, runtime.ExecIO{}); err != nil {
 		return err
 	}
 	defer func() {
-		_, err := service.execWorkspace(context.WithoutCancel(ctx), snapshot, runtime.ExecSpec{Argv: []string{"/bin/rm", "-rf", "--", staging}, WorkingDir: "/workspace", User: service.user()}, runtime.ExecIO{})
+		_, err := service.execWorkspace(context.WithoutCancel(ctx), snapshot, runtime.ExecSpec{Argv: []string{"/bin/rm", "-rf", "--", staging}, WorkingDir: "/workspace", User: standardWorkspaceUser}, runtime.ExecIO{})
 		returnErr = errors.Join(returnErr, err)
 	}()
 	for index, artifact := range artifacts {
@@ -1329,11 +1417,11 @@ func (service *WorkspaceService) bootstrapWorkspace(ctx context.Context, snapsho
 			return err
 		}
 		commands := [][]string{{"/usr/bin/git", "init", "--quiet", artifact.Repository.GuestPath}, {"/usr/bin/git", "-C", artifact.Repository.GuestPath, "fetch", "--no-tags", "--no-write-fetch-head", "--", bundle, artifact.BundleRef}, {"/usr/bin/git", "-C", artifact.Repository.GuestPath, "checkout", "-B", manifest.Git[index].WorkspaceBranch, artifact.SourceRevision}}
-		if _, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: []string{"/bin/mkdir", "-p", path.Dir(artifact.Repository.GuestPath)}, WorkingDir: "/workspace", User: service.user()}, runtime.ExecIO{}); err != nil {
+		if _, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: []string{"/bin/mkdir", "-p", path.Dir(artifact.Repository.GuestPath)}, WorkingDir: "/workspace", User: standardWorkspaceUser}, runtime.ExecIO{}); err != nil {
 			return err
 		}
 		for _, argv := range commands {
-			exit, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, WorkingDir: "/workspace", User: service.user()}, runtime.ExecIO{})
+			exit, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, WorkingDir: "/workspace", User: standardWorkspaceUser}, runtime.ExecIO{})
 			if err != nil {
 				return err
 			}

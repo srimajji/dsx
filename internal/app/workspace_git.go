@@ -23,7 +23,9 @@ const workspaceGitCleanupTimeout = 30 * time.Second
 
 func (service *WorkspaceService) Update(ctx context.Context, request WorkspaceUpdateRequest) (result WorkspaceResult, returnErr error) {
 	access, unlock, finish, err := service.workspaceGitAccess(ctx, request.Root, request.Workspace)
-	if err != nil { return result, err }
+	if err != nil {
+		return result, err
+	}
 	keepRunning := false
 	defer func() { returnErr = errors.Join(returnErr, finish(keepRunning), unlock()) }()
 	manifest := access.Manifest
@@ -50,7 +52,9 @@ func (service *WorkspaceService) Update(ctx context.Context, request WorkspaceUp
 			Repository: workspaceGitRepository(record), Workspace: string(manifest.Workspace), TempRoot: service.tempRoot,
 			SourceBranch: record.SourceBranch, SourceRevision: record.SourceRevision,
 		})
-		if prepareErr != nil { return result, prepareErr }
+		if prepareErr != nil {
+			return result, prepareErr
+		}
 		if verifyErr := service.git.VerifyBundle(ctx, artifact.BundlePath, artifact.BundleDigest); verifyErr != nil {
 			return result, errors.Join(verifyErr, service.git.RemoveArtifact(artifact.BundlePath))
 		}
@@ -58,17 +62,24 @@ func (service *WorkspaceService) Update(ctx context.Context, request WorkspaceUp
 	}
 
 	stageRoot := "/tmp/dsx-update-" + string(manifest.RunID)
-	if err := service.workspaceCommand(ctx, access.Workspace, []string{"/bin/mkdir", "-m", "0700", "-p", stageRoot}, "/workspace", nil, nil); err != nil { return result, err }
+	if err := service.workspaceCommand(ctx, access.Workspace, []string{"/bin/mkdir", "-m", "0700", "-p", stageRoot}, "/workspace", nil, nil); err != nil {
+		return result, err
+	}
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceGitCleanupTimeout); defer cancel()
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceGitCleanupTimeout)
+		defer cancel()
 		returnErr = errors.Join(returnErr, service.workspaceCommand(cleanupCtx, access.Workspace, []string{"/bin/rm", "-rf", "--", stageRoot}, "/workspace", nil, nil))
 	}()
 	execute := service.workspaceGitExecutor(access.Workspace)
 	originalState := manifest.State
 	for index, artifact := range artifacts {
 		guestBundle := path.Join(stageRoot, fmt.Sprintf("source-%d.bundle", index))
-		if err := service.runtime.CopyTo(ctx, access.Workspace, runtime.HostPath(artifact.BundlePath), runtime.GuestPath(guestBundle)); err != nil { return result, err }
-		if err := service.workspaceCommand(ctx, access.Workspace, []string{"/bin/chmod", "0600", guestBundle}, "/workspace", nil, nil); err != nil { return result, err }
+		if err := service.runtime.CopyTo(ctx, access.Workspace, runtime.HostPath(artifact.BundlePath), runtime.GuestPath(guestBundle)); err != nil {
+			return result, err
+		}
+		if err := service.workspaceCommand(ctx, access.Workspace, []string{"/bin/chmod", "0600", guestBundle}, "/workspace", nil, nil); err != nil {
+			return result, err
+		}
 		record := &manifest.Git[index]
 		beforeRevision, err := service.workspaceRevision(ctx, access.Workspace, record.GuestPath, record.WorkspaceBranch)
 		if err != nil {
@@ -93,7 +104,9 @@ func (service *WorkspaceService) Update(ctx context.Context, request WorkspaceUp
 		record.BackupRef = rebase.BackupRef
 		if rebase.Conflict {
 			manifest.Operation, manifest.Failure = "", "rebase conflict requires manual resolution"
-			if err := service.replaceManifest(ctx, manifest); err != nil { return result, err }
+			if err := service.replaceManifest(ctx, manifest); err != nil {
+				return result, err
+			}
 			keepRunning = true
 			return workspaceResult(*manifest), nil
 		}
@@ -106,30 +119,44 @@ func (service *WorkspaceService) Update(ctx context.Context, request WorkspaceUp
 			record.ResultCommit, record.ResultBundleDigest = "", ""
 		} else {
 			digest, bundleErr := service.workspaceResultDigest(ctx, access.Workspace, *record, rebase.ResultCommit, stageRoot, index)
-			if bundleErr != nil { return result, bundleErr }
+			if bundleErr != nil {
+				return result, bundleErr
+			}
 			record.ResultCommit, record.ResultBundleDigest = rebase.ResultCommit, digest
 		}
-		if err := service.replaceManifest(ctx, manifest); err != nil { return result, err }
+		if err := service.replaceManifest(ctx, manifest); err != nil {
+			return result, err
+		}
 	}
 	manifest.Operation, manifest.Failure = "", ""
-	if err := service.transitionManifest(ctx, manifest, originalState, "", ""); err != nil { return result, err }
+	if err := service.transitionManifest(ctx, manifest, originalState, "", ""); err != nil {
+		return result, err
+	}
 	keepRunning = originalState == model.StateRunning
 	return workspaceResult(*manifest), nil
 }
 
 func (service *WorkspaceService) GitStatus(ctx context.Context, request GitStatusRequest) (result GitStatusResult, returnErr error) {
 	access, unlock, finish, err := service.workspaceGitAccess(ctx, request.Root, request.Workspace)
-	if err != nil { return result, err }
+	if err != nil {
+		return result, err
+	}
 	defer func() { returnErr = errors.Join(returnErr, finish(false), unlock()) }()
 	indexes, err := selectedWorkspaceGitIndexes(*access.Manifest, request.Repository)
-	if err != nil { return result, err }
+	if err != nil {
+		return result, err
+	}
 	result.ProjectID, result.Workspace = access.Manifest.ProjectID, access.Manifest.Workspace
 	for _, index := range indexes {
 		record := access.Manifest.Git[index]
 		status, err := service.git.Status(ctx, gitx.StatusRequest{Repository: workspaceGitRepository(record), Workspace: string(access.Manifest.Workspace), SourceBranch: record.SourceBranch, SourceRevision: record.SourceRevision, WorkspaceBranch: record.WorkspaceBranch, ResultCommit: record.ResultCommit, TrackedFingerprint: record.TrackedFingerprint, FetchedCommit: record.FetchedCommit})
-		if err != nil { return result, err }
+		if err != nil {
+			return result, err
+		}
 		guest, err := service.workspaceWorkingState(ctx, access.Workspace, record)
-		if err != nil { return result, err }
+		if err != nil {
+			return result, err
+		}
 		status.WorkspaceTrackedClean, status.WorkspaceUntracked, status.RebaseInProgress = guest.trackedClean, guest.untracked, guest.rebase
 		status.WarnUntracked, status.WarnIgnored = record.WarnUntracked, record.WarnIgnored
 		status.Fetched = record.ResultFetched() && status.Fetched && status.FetchedCommit == record.ResultCommit
@@ -140,30 +167,54 @@ func (service *WorkspaceService) GitStatus(ctx context.Context, request GitStatu
 
 func (service *WorkspaceService) GitFetch(ctx context.Context, request GitFetchRequest) (result GitFetchResult, returnErr error) {
 	access, unlock, finish, err := service.workspaceGitAccess(ctx, request.Root, request.Workspace)
-	if err != nil { return result, err }
+	if err != nil {
+		return result, err
+	}
 	defer func() { returnErr = errors.Join(returnErr, finish(false), unlock()) }()
 	indexes, err := selectedWorkspaceGitIndexes(*access.Manifest, request.Repository)
-	if err != nil { return result, err }
+	if err != nil {
+		return result, err
+	}
 	result.ProjectID, result.Workspace = access.Manifest.ProjectID, access.Manifest.Workspace
 	stageRoot := "/tmp/dsx-fetch-" + string(access.Manifest.RunID)
-	if err := service.workspaceCommand(ctx, access.Workspace, []string{"/bin/mkdir", "-m", "0700", "-p", stageRoot}, "/workspace", nil, nil); err != nil { return result, err }
-	defer func() { cleanupCtx,cancel:=context.WithTimeout(context.WithoutCancel(ctx),workspaceGitCleanupTimeout);defer cancel();returnErr=errors.Join(returnErr,service.workspaceCommand(cleanupCtx,access.Workspace,[]string{"/bin/rm","-rf","--",stageRoot},"/workspace",nil,nil)) }()
+	if err := service.workspaceCommand(ctx, access.Workspace, []string{"/bin/mkdir", "-m", "0700", "-p", stageRoot}, "/workspace", nil, nil); err != nil {
+		return result, err
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceGitCleanupTimeout)
+		defer cancel()
+		returnErr = errors.Join(returnErr, service.workspaceCommand(cleanupCtx, access.Workspace, []string{"/bin/rm", "-rf", "--", stageRoot}, "/workspace", nil, nil))
+	}()
 	for _, index := range indexes {
 		record := &access.Manifest.Git[index]
 		state, err := service.workspaceWorkingState(ctx, access.Workspace, *record)
-		if err != nil { return result, err }
-		if state.rebase { return result, model.NewError(model.CodeConflict, "workspace rebase must be continued or aborted before fetch", nil) }
+		if err != nil {
+			return result, err
+		}
+		if state.rebase {
+			return result, model.NewError(model.CodeConflict, "workspace rebase must be continued or aborted before fetch", nil)
+		}
 		head, err := service.workspaceRevision(ctx, access.Workspace, record.GuestPath, record.WorkspaceBranch)
-		if err != nil { return result, err }
-		if head == record.SourceRevision { continue }
+		if err != nil {
+			return result, err
+		}
+		if head == record.SourceRevision {
+			continue
+		}
 		bundle, digest, cleanup, err := service.copyWorkspaceResult(ctx, access.Workspace, *record, head, stageRoot, index)
-		if err != nil { return result, err }
+		if err != nil {
+			return result, err
+		}
 		fetched, fetchErr := service.git.FetchResult(ctx, gitx.FetchRequest{Repository: workspaceGitRepository(*record), Workspace: string(access.Manifest.Workspace), BundlePath: bundle, Digest: digest, ExpectedCommit: head})
 		cleanupErr := cleanup()
-		if fetchErr != nil || cleanupErr != nil { return result, errors.Join(fetchErr, cleanupErr) }
+		if fetchErr != nil || cleanupErr != nil {
+			return result, errors.Join(fetchErr, cleanupErr)
+		}
 		record.ResultCommit, record.ResultBundleDigest = head, digest
 		record.FetchedCommit, record.FetchedHostRef = fetched.Commit, fetched.HostRef
-		if err := service.replaceManifest(ctx, access.Manifest); err != nil { return result, err }
+		if err := service.replaceManifest(ctx, access.Manifest); err != nil {
+			return result, err
+		}
 		result.Repositories = append(result.Repositories, fetched)
 	}
 	return result, nil
@@ -207,19 +258,32 @@ func (service *WorkspaceService) GitDiff(ctx context.Context, request GitDiffReq
 
 func (service *WorkspaceService) GitApply(ctx context.Context, request GitApplyRequest) (result GitApplyResult, returnErr error) {
 	access, unlock, finish, err := service.workspaceGitAccess(ctx, request.Root, request.Workspace)
-	if err != nil { return result, err }
+	if err != nil {
+		return result, err
+	}
 	defer func() { returnErr = errors.Join(returnErr, finish(false), unlock()) }()
 	indexes, err := selectedWorkspaceGitIndexes(*access.Manifest, request.Repository)
-	if err != nil { return result, err }
+	if err != nil {
+		return result, err
+	}
 	result.ProjectID, result.Workspace = access.Manifest.ProjectID, access.Manifest.Workspace
-	type prepared struct { repository string; transaction gitx.ApplyTransaction }
+	type prepared struct {
+		repository  string
+		transaction gitx.ApplyTransaction
+	}
 	transactions := make([]prepared, 0, len(indexes))
 	for _, index := range indexes {
 		record := access.Manifest.Git[index]
-		if !record.HasResultWork() { continue }
-		if !record.ResultFetched() || record.FetchedHostRef != gitx.RefNamespace+string(access.Manifest.Workspace) { return result, model.NewError(model.CodeConflict, "workspace result must be fetched before apply", nil) }
+		if !record.HasResultWork() {
+			continue
+		}
+		if !record.ResultFetched() || record.FetchedHostRef != gitx.RefNamespace+string(access.Manifest.Workspace) {
+			return result, model.NewError(model.CodeConflict, "workspace result must be fetched before apply", nil)
+		}
 		transaction, err := service.git.PrepareApply(ctx, gitx.ApplyRequest{Repository: workspaceGitRepository(record), SourceRevision: record.SourceRevision, TrackedFingerprint: record.TrackedFingerprint, FetchedRef: record.FetchedHostRef, ExpectedCommit: record.ResultCommit})
-		if err != nil { return result, err }
+		if err != nil {
+			return result, err
+		}
 		transactions = append(transactions, prepared{record.Repository, transaction})
 	}
 	for _, item := range transactions {
@@ -306,6 +370,9 @@ func (service *WorkspaceService) reconcileWorkspaceConflict(ctx context.Context,
 func (service *WorkspaceService) protectWorkspaceRemoval(ctx context.Context, manifest state.Manifest, snapshot runtime.ResourceSnapshot) (protected []string, returnErr error) {
 	temporary := manifest.State == model.StateStopped
 	if temporary {
+		if err := service.disableHostAWSForStoppedRuntime(ctx, manifest); err != nil {
+			return nil, err
+		}
 		if err := service.runtime.StartWorkspace(ctx, snapshot); err != nil {
 			return nil, err
 		}
@@ -388,16 +455,38 @@ func (service *WorkspaceService) workspaceWorkingState(ctx context.Context, snap
 }
 func (service *WorkspaceService) workspaceGitAccess(ctx context.Context, root string, name model.WorkspaceName) (workspaceAccess, func() error, func(bool) error, error) {
 	access, unlock, err := service.workspaceAccess(ctx, root, name, false)
-	if err != nil { return access, nil, nil, err }
+	if err != nil {
+		return access, nil, nil, err
+	}
 	temporary := access.Manifest.State == model.StateStopped
 	if temporary {
-		if err := service.runtime.StartWorkspace(ctx, access.Workspace); err != nil { _=unlock(); return access,nil,nil,err }
+		if err := service.disableHostAWSForStoppedRuntime(ctx, *access.Manifest); err != nil {
+			_ = unlock()
+			return access, nil, nil, err
+		}
+		if err := service.runtime.StartWorkspace(ctx, access.Workspace); err != nil {
+			_ = unlock()
+			return access, nil, nil, err
+		}
 		owner, ownerErr := workspaceManifestResource(*access.Manifest, runtime.ResourceWorkspace, workspaceOwnerRole)
-		if ownerErr != nil { _=unlock(); return access,nil,nil,ownerErr }
+		if ownerErr != nil {
+			_ = unlock()
+			return access, nil, nil, ownerErr
+		}
 		access.Workspace, err = service.ownedSnapshot(ctx, *access.Manifest, owner, true)
-		if err != nil { _=unlock(); return access,nil,nil,err }
+		if err != nil {
+			_ = unlock()
+			return access, nil, nil, err
+		}
 	}
-	finish := func(keepRunning bool) error { if !temporary || keepRunning{return nil}; cleanupCtx,cancel:=context.WithTimeout(context.WithoutCancel(ctx),workspaceGitCleanupTimeout);defer cancel();return service.runtime.Stop(cleanupCtx,access.Workspace,runtime.StopPolicy{TimeoutSeconds:workspaceStopSeconds,Signal:runtime.Signal("TERM")}) }
+	finish := func(keepRunning bool) error {
+		if !temporary || keepRunning {
+			return nil
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceGitCleanupTimeout)
+		defer cancel()
+		return service.runtime.Stop(cleanupCtx, access.Workspace, runtime.StopPolicy{TimeoutSeconds: workspaceStopSeconds, Signal: runtime.Signal("TERM")})
+	}
 	return access, unlock, finish, nil
 }
 
@@ -406,12 +495,12 @@ func (service *WorkspaceService) workspaceGitExecutor(snapshot runtime.ResourceS
 		argv := []string{"/usr/bin/git", "--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"}
 		argv = append(argv, arguments...)
 		env := []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=cat", "LC_ALL=C"}
-		return service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, Env: env, WorkingDir: runtime.GuestPath(directory), User: service.user()}, runtime.ExecIO{Stdout: stdout, Stderr: stderr})
+		return service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, Env: env, WorkingDir: runtime.GuestPath(directory), User: standardWorkspaceUser}, runtime.ExecIO{Stdout: stdout, Stderr: stderr})
 	}
 }
 
 func (service *WorkspaceService) workspaceCommand(ctx context.Context, snapshot runtime.ResourceSnapshot, argv []string, directory string, stdout, stderr io.Writer) error {
-	exit, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, WorkingDir: runtime.GuestPath(directory), User: service.user()}, runtime.ExecIO{Stdout: stdout, Stderr: stderr})
+	exit, err := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{Argv: argv, WorkingDir: runtime.GuestPath(directory), User: standardWorkspaceUser}, runtime.ExecIO{Stdout: stdout, Stderr: stderr})
 	if err != nil {
 		return err
 	}
@@ -528,7 +617,7 @@ func (service *WorkspaceService) copyWorkspaceResult(
 	}
 	copyCapture := &hardLimitWriter{writer: file, remaining: int(gitx.MaxResultBundleBytes)}
 	exit, copyErr := service.execWorkspace(ctx, snapshot, runtime.ExecSpec{
-		Argv: []string{"/bin/cat", "--", guest}, WorkingDir: "/workspace", User: service.user(),
+		Argv: []string{"/bin/cat", "--", guest}, WorkingDir: "/workspace", User: standardWorkspaceUser,
 	}, runtime.ExecIO{Stdout: copyCapture, Stderr: io.Discard})
 	syncErr := file.Sync()
 	closeErr := file.Close()
@@ -565,5 +654,3 @@ func workspaceFileSHA256(name string) (string, error) {
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
-
-

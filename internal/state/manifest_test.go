@@ -31,6 +31,122 @@ func TestManifestV2ValidatesWorkspaceGitAndIndependentVolumes(t *testing.T) {
 	}
 }
 
+func TestManifestAWSGrantDefaultsOffAndRoundTrips(t *testing.T) {
+	manifest := manifestV2Fixture(t)
+	if manifest.AWSGrant != nil {
+		t.Fatalf("default AWS grant = %#v, want absent", manifest.AWSGrant)
+	}
+	if err := ValidateManifest(manifest); err != nil {
+		t.Fatalf("default-off manifest rejected: %v", err)
+	}
+	defaultData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(defaultData), `"aws_grant"`) {
+		t.Fatalf("default manifest persisted an AWS grant: %s", defaultData)
+	}
+
+	manifest.AWSGrant = &AWSGrantRecord{Enabled: true}
+	manifest.Operation = "aws-enable"
+	enabledData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := DecodeManifest(enabledData)
+	if err != nil {
+		t.Fatalf("decode enabled AWS grant: %v", err)
+	}
+	if enabled.AWSGrant == nil || !enabled.AWSGrant.Enabled || enabled.Operation != "aws-enable" {
+		t.Fatalf("enabled AWS grant round-trip = %#v operation %q", enabled.AWSGrant, enabled.Operation)
+	}
+
+	enabled.AWSGrant.Enabled = false
+	enabled.Operation = "aws-disable"
+	disabledData, err := json.Marshal(enabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := DecodeManifest(disabledData)
+	if err != nil {
+		t.Fatalf("decode disabled AWS grant: %v", err)
+	}
+	if disabled.AWSGrant == nil || disabled.AWSGrant.Enabled || disabled.Operation != "aws-disable" {
+		t.Fatalf("disabled AWS grant round-trip = %#v operation %q", disabled.AWSGrant, disabled.Operation)
+	}
+}
+
+func TestManifestAWSGrantJSONIsStrictAndCurrentOnly(t *testing.T) {
+	manifest := manifestV2Fixture(t)
+	manifest.AWSGrant = &AWSGrantRecord{Enabled: true}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withUnknownGrantField := strings.Replace(string(data), `"aws_grant":{"enabled":true}`, `"aws_grant":{"enabled":true,"secret":"forbidden"}`, 1)
+	if withUnknownGrantField == string(data) {
+		t.Fatal("test did not inject the unknown AWS grant field")
+	}
+	if _, err := DecodeManifest([]byte(withUnknownGrantField)); err == nil {
+		t.Fatal("manifest accepted an unknown AWS grant field")
+	}
+
+	legacy := manifest
+	legacy.Version = LegacyManifestVersion
+	legacy.Legacy = true
+	if err := ValidateLegacyManifestForCleanup(legacy); err == nil {
+		t.Fatal("legacy cleanup accepted an AWS grant")
+	}
+}
+
+func TestManifestOperationAllowlistIsExact(t *testing.T) {
+	allowed := []string{"", "create", "open", "start", "stop", "restart", "update", "remove", "capture", "aws-enable", "aws-disable"}
+	for _, operation := range allowed {
+		manifest := manifestV2Fixture(t)
+		manifest.Operation = operation
+		switch operation {
+		case "aws-enable":
+			manifest.AWSGrant = &AWSGrantRecord{Enabled: true}
+		case "aws-disable":
+			manifest.AWSGrant = &AWSGrantRecord{}
+		}
+		if err := ValidateManifest(manifest); err != nil {
+			t.Fatalf("allowed operation %q rejected: %v", operation, err)
+		}
+	}
+	for _, operation := range []string{"aws", "aws_enable", "AWS-enable", "aws-enable ", "clean"} {
+		manifest := manifestV2Fixture(t)
+		manifest.Operation = operation
+		if err := ValidateManifest(manifest); err == nil {
+			t.Fatalf("unlisted operation %q accepted", operation)
+		}
+	}
+	for _, test := range []struct {
+		operation string
+		grant     *AWSGrantRecord
+	}{
+		{operation: "aws-enable"},
+		{operation: "aws-enable", grant: &AWSGrantRecord{}},
+		{operation: "aws-disable"},
+		{operation: "aws-disable", grant: &AWSGrantRecord{Enabled: true}},
+	} {
+		manifest := manifestV2Fixture(t)
+		manifest.Operation = test.operation
+		manifest.AWSGrant = test.grant
+		if err := ValidateManifest(manifest); err == nil {
+			t.Fatalf("operation %q accepted mismatched AWS grant %#v", test.operation, test.grant)
+		}
+	}
+
+	manifest := manifestV2Fixture(t)
+	manifest.Operation = "aws-enable"
+	manifest.AWSGrant = &AWSGrantRecord{Enabled: true}
+	manifest.State = model.WorkspaceState("aws-enabled")
+	if err := ValidateManifest(manifest); err == nil {
+		t.Fatal("AWS operation bypassed workspace state validation")
+	}
+}
+
 func TestManifestActiveSessionIsBoundedAndIdentityChecked(t *testing.T) {
 	manifest := manifestV2Fixture(t)
 	manifest.ActiveSession = &SessionRecord{
@@ -72,6 +188,10 @@ func TestDecodeLegacyManifestIsCleanupOnly(t *testing.T) {
 	decoded, err := DecodeManifest(data)
 	if err != nil {
 		t.Fatal(err)
+	}
+	legacyWithGrant := strings.TrimSuffix(string(data), "}") + `,"aws_grant":{"enabled":true}}`
+	if _, err := DecodeManifest([]byte(legacyWithGrant)); err == nil {
+		t.Fatal("legacy manifest accepted an AWS grant field")
 	}
 	if !decoded.Legacy || decoded.Version != LegacyManifestVersion || decoded.Workspace != current.Workspace {
 		t.Fatalf("legacy decode = %#v", decoded)

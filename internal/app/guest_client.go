@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"time"
 
@@ -102,7 +101,7 @@ func NewGuestClientWithDependencies(dependencies GuestClientDependencies) *Guest
 	}
 	user := dependencies.User
 	if user == "" {
-		user = fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+		user = standardWorkspaceUser
 	}
 	return &GuestClient{
 		adapter:         dependencies.Adapter,

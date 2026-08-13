@@ -70,11 +70,10 @@ func runVerifiedLeappMirrorHelper(ready io.Writer, acceptance io.Reader, paths l
 		writeLeappMirrorResponse(ready, leappMirrorResponse{Version: 1, State: "error", Identity: identity, SpecDigest: digest, PID: os.Getpid(), Executable: executable, Failure: code})
 		return 1
 	}
-	mirror, err := ensurePrivateChildDirectory(paths.run, leappMirrorDataName)
-	if err != nil || mirror != paths.mirror {
+	if err := verifyPrivateDirectory(paths.mirror); err != nil || verifyLeappMirrorSnapshot(paths.mirror) != nil {
 		return fail(nil, "startup_failed")
 	}
-	configDigest, credentialsDigest, code, err := synchronizeLeappMirror(paths.mirror, spec, [32]byte{}, [32]byte{})
+	configDigest, credentialsDigest, code, err := synchronizeInitialLeappMirror(paths.mirror, spec)
 	if err != nil {
 		return fail(nil, code)
 	}
@@ -153,63 +152,82 @@ func writeLeappMirrorAcceptance(writer io.Writer) bool {
 	written, err := writer.Write([]byte{1})
 	return err == nil && written == 1
 }
+func synchronizeInitialLeappMirror(mirror string, spec leappMirrorSpec) ([32]byte, [32]byte, string, error) {
+	configDigest, credentialsDigest, code, err := synchronizeLeappMirror(mirror, spec, [32]byte{}, [32]byte{})
+	if err != nil {
+		return configDigest, credentialsDigest, code, err
+	}
+	empty, err := hostAWSPublicationEmpty(mirror)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, "source_unsafe", err
+	}
+	if empty {
+		return [32]byte{}, [32]byte{}, "source_unavailable", errors.New("host AWS default is unavailable")
+	}
+	return configDigest, credentialsDigest, "", nil
+}
 
 func synchronizeLeappMirror(mirror string, spec leappMirrorSpec, oldConfig, oldCredentials [32]byte) ([32]byte, [32]byte, string, error) {
-	return synchronizeLeappMirrorWithSnapshot(mirror, spec, oldConfig, oldCredentials, func() (LeappDirectorySnapshot, string, error) {
-		directory, err := OpenApprovedLeappDirectory(leappAuthorityForSpec(spec))
+	return synchronizeLeappMirrorWithSnapshot(mirror, spec, oldConfig, oldCredentials, func() (HostAWSDirectorySnapshot, string, error) {
+		directory, err := OpenApprovedHostAWSDirectory(leappAuthorityForSpec(spec))
 		if err != nil {
 			switch {
-			case errors.Is(err, ErrLeappSourceOversized):
-				return LeappDirectorySnapshot{}, "source_oversized", ErrLeappSourceOversized
-			case errors.Is(err, ErrLeappSourceUnsafe):
-				return LeappDirectorySnapshot{}, "source_unsafe", ErrLeappSourceUnsafe
+			case errors.Is(err, ErrHostAWSSourceOversized):
+				return HostAWSDirectorySnapshot{}, "source_oversized", ErrHostAWSSourceOversized
+			case errors.Is(err, ErrHostAWSSourceUnsafe):
+				return HostAWSDirectorySnapshot{}, "source_unsafe", ErrHostAWSSourceUnsafe
 			default:
-				return LeappDirectorySnapshot{}, "source_identity_changed", ErrLeappSourceIdentity
+				return HostAWSDirectorySnapshot{}, "source_identity_changed", ErrHostAWSSourceIdentity
 			}
 		}
 		snapshot, snapshotErr := directory.Snapshot()
 		closeErr := directory.Close()
 		if snapshotErr != nil {
 			code := "source_unsafe"
-			if errors.Is(snapshotErr, ErrLeappSourceOversized) {
+			if errors.Is(snapshotErr, ErrHostAWSSourceOversized) {
 				code = "source_oversized"
 			}
-			return LeappDirectorySnapshot{}, code, snapshotErr
+			return HostAWSDirectorySnapshot{}, code, snapshotErr
 		}
 		if closeErr != nil {
-			return LeappDirectorySnapshot{}, "source_unsafe", ErrLeappSourceUnsafe
+			return HostAWSDirectorySnapshot{}, "source_unsafe", ErrHostAWSSourceUnsafe
 		}
 		return snapshot, "", nil
 	})
 }
 
-func synchronizeLeappMirrorWithSnapshot(mirror string, _ leappMirrorSpec, oldConfig, oldCredentials [32]byte, readSnapshot func() (LeappDirectorySnapshot, string, error)) ([32]byte, [32]byte, string, error) {
-	for attempt := range 3 {
-		snapshot, code, err := readSnapshot()
-		if err != nil {
-			return oldConfig, oldCredentials, code, err
-		}
-		configDigest := sha256.Sum256(snapshot.Config)
-		credentialsDigest := sha256.Sum256(snapshot.Credentials)
-		if oldConfig != ([32]byte{}) && configDigest != oldConfig && credentialsDigest == oldCredentials {
-			if attempt < 2 {
-				time.Sleep(10 * time.Millisecond)
-				continue
-			}
-			return oldConfig, oldCredentials, "source_unsafe", errors.New("Leapp paired source rotation did not complete")
-		}
-		if configDigest == oldConfig && credentialsDigest == oldCredentials {
-			return oldConfig, oldCredentials, "", nil
-		}
-		if err := publishLeappMirrorGeneration(mirror, snapshot, nil); err != nil {
-			return oldConfig, oldCredentials, "source_unsafe", err
-		}
-		return configDigest, credentialsDigest, "", nil
+func synchronizeLeappMirrorWithSnapshot(mirror string, _ leappMirrorSpec, oldConfig, oldCredentials [32]byte, readSnapshot func() (HostAWSDirectorySnapshot, string, error)) ([32]byte, [32]byte, string, error) {
+	snapshot, code, err := readSnapshot()
+	if err != nil {
+		return oldConfig, oldCredentials, code, err
 	}
-	return oldConfig, oldCredentials, "source_unsafe", errors.New("Leapp paired source rotation did not stabilize")
+	filtered, state, filterErr := FilterHostDefaultSnapshot(snapshot)
+	if filterErr != nil {
+		code := "source_unsafe"
+		if errors.Is(filterErr, ErrHostDefaultOversized) {
+			code = "source_oversized"
+		}
+		return oldConfig, oldCredentials, code, errors.New("host AWS default source could not be filtered safely")
+	}
+	switch state {
+	case HostDefaultAvailable:
+	case HostDefaultUnavailable, HostDefaultUnsupported:
+		filtered = HostAWSDirectorySnapshot{}
+	default:
+		return oldConfig, oldCredentials, "source_unsafe", errors.New("host AWS default source returned an invalid state")
+	}
+	configDigest := sha256.Sum256(filtered.Config)
+	credentialsDigest := sha256.Sum256(filtered.Credentials)
+	if configDigest == oldConfig && credentialsDigest == oldCredentials {
+		return oldConfig, oldCredentials, "", nil
+	}
+	if err := publishLeappMirrorGeneration(mirror, filtered, nil); err != nil {
+		return oldConfig, oldCredentials, "source_unsafe", err
+	}
+	return configDigest, credentialsDigest, "", nil
 }
 
-func publishLeappMirrorGeneration(mirror string, snapshot LeappDirectorySnapshot, beforeCommit func() error) error {
+func publishLeappMirrorGeneration(mirror string, snapshot HostAWSDirectorySnapshot, beforeCommit func() error) error {
 	if err := verifyPrivateDirectory(mirror); err != nil {
 		return err
 	}
@@ -230,10 +248,10 @@ func publishLeappMirrorGeneration(mirror string, snapshot LeappDirectorySnapshot
 	if err := os.Chmod(generation, 0o700); err != nil {
 		return err
 	}
-	if err := atomicWriteLeappMirrorFile(generation, leappConfigFile, snapshot.Config); err != nil {
+	if err := atomicWriteLeappMirrorFile(generation, hostAWSConfigFile, snapshot.Config); err != nil {
 		return err
 	}
-	if err := atomicWriteLeappMirrorFile(generation, leappCredentialsFile, snapshot.Credentials); err != nil {
+	if err := atomicWriteLeappMirrorFile(generation, hostAWSCredentialsFile, snapshot.Credentials); err != nil {
 		return err
 	}
 	if err := verifyLeappMirrorGeneration(generation); err != nil {
@@ -356,7 +374,7 @@ func verifiedLeappMirrorHelperPaths(stateRoot string, identity LeaseIdentity) (l
 	if stateRoot == "" || !filepath.IsAbs(stateRoot) || filepath.Clean(stateRoot) != stateRoot {
 		return leappMirrorPaths{}, errors.New("invalid Leapp mirror state root")
 	}
-	root := filepath.Join(stateRoot, leappMirrorDirectoryName)
+	root := filepath.Join(stateRoot, hostAWSWorkspaceDirectoryName)
 	project := filepath.Join(root, string(identity.ProjectID))
 	workspace := filepath.Join(project, string(identity.Workspace))
 	run := filepath.Join(workspace, string(identity.RunID))
@@ -372,7 +390,6 @@ func cleanupLeappMirrorHelper(paths leappMirrorPaths) {
 	_ = removePrivateSocket(paths.socket)
 	_ = removePrivateRegular(paths.ledger)
 	_ = removePrivateRegular(paths.token)
-	_ = removeLeappMirrorDirectory(paths.mirror)
 }
 
 func writeLeappMirrorFailure(paths leappMirrorPaths, identity LeaseIdentity, digest, code string) {
@@ -397,8 +414,8 @@ func writeLeappMirrorResponse(writer io.Writer, response leappMirrorResponse) bo
 }
 
 func atomicWriteLeappMirrorFile(mirror, name string, contents []byte) error {
-	if (name != leappConfigFile && name != leappCredentialsFile) || len(contents) > MaxLeappFileBytes {
-		return errors.New("invalid bounded Leapp mirror update")
+	if (name != hostAWSConfigFile && name != hostAWSCredentialsFile) || len(contents) > MaxHostAWSFileBytes {
+		return errors.New("invalid bounded host AWS mirror update")
 	}
 	if err := verifyPrivateDirectory(mirror); err != nil {
 		return err
@@ -406,7 +423,7 @@ func atomicWriteLeappMirrorFile(mirror, name string, contents []byte) error {
 	target := filepath.Join(mirror, name)
 	if info, err := os.Lstat(target); err == nil {
 		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 {
-			return errors.New("refusing to replace unsafe Leapp mirror file")
+			return errors.New("refusing to replace unsafe host AWS mirror file")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

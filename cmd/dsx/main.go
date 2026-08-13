@@ -25,7 +25,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) >= 2 && (os.Args[1] == "__bridge-helper" || os.Args[1] == "__bridge-control" || os.Args[1] == "__dsx_leapp_mirror_v1") {
+	if len(os.Args) >= 2 && (os.Args[1] == "__bridge-helper" || os.Args[1] == "__bridge-control" || os.Args[1] == "__dsx_host_aws_mirror_v1") {
 		if len(os.Args) != 2 {
 			os.Exit(2)
 		}
@@ -35,7 +35,7 @@ func main() {
 		case "__bridge-control":
 			os.Exit(bridge.RunLeaseControlClient())
 		default:
-			os.Exit(bridge.RunLeappMirrorCommand())
+			os.Exit(bridge.RunHostAWSMirrorCommand())
 		}
 	}
 	inspectionDependencies := app.InspectionDependencies{Resolver: plan.NewResolver()}
@@ -60,12 +60,17 @@ func main() {
 
 	var setup *app.SetupService
 	var workspaces *app.WorkspaceService
+	var aws *app.AWSService
 	var authentication *app.AuthService
 	var agents *app.AgentService
 	var workspaceGit app.WorkspaceGitManager
 	var workspaceInventory hostcmd.WorkspaceInventory
+	var hostAWS bridge.HostAWSWorkspaceManager
 	if stateRoot, err := dsxStateRoot(); err == nil {
 		if approvals, approvalErr := statefs.NewApprovalRepository(stateRoot); approvalErr == nil {
+			if dsxExecutable, executableErr := canonicalDSXExecutable(); executableErr == nil {
+				hostAWS, _ = bridge.NewProductionHostAWSWorkspaceManager(stateRoot, dsxExecutable)
+			}
 			var manifests *statefs.ManifestRepository
 			var inventory app.OwnedResourceInventory
 			if repository, manifestErr := statefs.NewManifestRepository(stateRoot); manifestErr == nil {
@@ -83,11 +88,13 @@ func main() {
 							Manifests:         manifests,
 							Locks:             manifests,
 							Runtime:           adapter,
+							HostAWS:           hostAWS,
 							Git:               gitService,
 							TempRoot:          filepath.Clean(os.TempDir()),
 							GuestHelperSource: func() (runtime.HostPath, error) { return installedGuestHelper(stateRoot) },
 						})
 						workspaceGit = workspaces
+						aws = app.NewAWSService(workspaces)
 					}
 				}
 				if workspaces != nil {
@@ -119,7 +126,9 @@ func main() {
 		Git:           workspaceGit,
 		Agents:        agents,
 		Auth:          authentication,
+		AWS:           aws,
 		Inventory:     workspaceInventory,
+		VSCode:        hostcmd.NewVSCodeLauncher(),
 		TUI:           runner,
 		Stdin:         os.Stdin,
 		TerminalState: terminal.NewRawState(os.Stdin),
@@ -198,13 +207,23 @@ func dsxStateRoot() (string, error) {
 	}
 	return filepath.Join(home, "Library", "Application Support", "DSX", "v1"), nil
 }
-
-func installedGuestHelper(stateRoot string) (runtime.HostPath, error) {
+func canonicalDSXExecutable() (string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	executable, err = filepath.EvalSymlinks(executable)
+	canonical, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(canonical) || filepath.Clean(canonical) != canonical {
+		return "", fmt.Errorf("resolved dsx executable is not canonical: %q", canonical)
+	}
+	return canonical, nil
+}
+
+func installedGuestHelper(stateRoot string) (runtime.HostPath, error) {
+	executable, err := canonicalDSXExecutable()
 	if err != nil {
 		return "", err
 	}

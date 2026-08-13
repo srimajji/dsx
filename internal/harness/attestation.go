@@ -14,7 +14,7 @@ const (
 	// MaxBuildAttestationBytes bounds guest output before it is parsed on the host.
 	MaxBuildAttestationBytes = 8 << 10
 	// BuildAttestationDigest pins the exact bytes copied by images/agent/Containerfile.
-	BuildAttestationDigest = "sha256:219209eda5f77b364f8270de14e6c5deffe1573f63edcf02b46dd16c00bdbda6"
+	BuildAttestationDigest = "sha256:0dbd480a8a9c325430c4237476e9feac7556857ef76c6432f965f3459a7b2650"
 )
 
 type buildAttestation struct {

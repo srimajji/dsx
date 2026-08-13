@@ -8,7 +8,8 @@ Use DSX to:
 - open OMP, Codex, Claude Code, or OpenCode in an existing workspace;
 - transfer committed revisions without sharing host Git objects;
 - publish selected application ports to loopback;
-- opt into a disposable browser for one agent session; and
+- opt into a disposable browser for one agent session;
+- authorize selected workspaces to follow a temporary host AWS `default`; and
 - remove only resources DSX can prove it owns.
 
 ```mermaid
@@ -79,6 +80,8 @@ Alternate OCI and project images remain supported through configuration and CLI 
 
 Guest ports entered in setup receive dynamic `127.0.0.1` host ports. Cancelling before final confirmation writes no configuration, approval, credential, or runtime resource.
 
+Project setup also asks whether to allow selected workspaces to follow the host AWS `default`. This project-level choice authorizes only the capability: new workspaces still start with AWS access disabled, and enabling one workspace remains a separate action. The approval identifies the canonical host source, the reserved read-only guest destination, and warns that switching the host default changes every AWS-enabled running workspace without another DSX approval or workspace restart.
+
 Setup writes one of these mutually exclusive files:
 
 - `~/.dsx/projects/<project-name>-<project-id>/config.jsonc` for the normal project-local contract; or
@@ -114,6 +117,19 @@ A minimal configuration is:
 ```
 
 The schema is strict and validated offline. Unknown and obsolete fields fail visibly. `agents.default` must be present in `agents.allowed`. `auth.imports` declares only which portable host credential kinds setup may offer; it never imports anything by itself. Claude is intentionally absent because its host login is not portable.
+
+To authorize the optional default-only AWS capability, add:
+
+```jsonc
+{
+  "aws": {
+    "mode": "host-default",
+    "directory": "/Users/example/.aws"
+  }
+}
+```
+
+Omit `aws` or use `"mode": "none"` to authorize no host AWS access. No profile name is configurable in this increment.
 
 ## Create named workspaces
 
@@ -159,7 +175,13 @@ $ dsx workspace restart feature-a
 
 It terminates and does not restore agents, development servers, watchers, manually started databases, background commands, application processes, or browsers. Only `dsx-guest` is restored. Restarting one workspace cannot affect its siblings.
 
-With the managed DSX Standard image, `workspace open` enters login interactive Zsh with the image-owned Starship and pinned offline plugins. DSX does not read, copy, mount, or execute host shell dotfiles. Custom images must provide their own shell and toolchain expectations.
+With the managed DSX Standard image, `workspace open` enters login interactive Zsh as `dsx` (`UID 1000`, `GID 1000`) with home `/home/dsx`, image-owned Starship, and pinned offline plugins. DSX Standard uses Ubuntu 26.04 LTS ARM64. Direct shells and VS Code attachment may run `sudo -n COMMAND` without a password inside the workspace VM; DSX creates no root password or direct-root-login workflow. Elevation can control the VM and mounted workspace resources, but it grants no host runtime, host-home, or host-source authority. DSX does not read, copy, mount, or execute host shell dotfiles. Custom images must provide compatible account, shell, and toolchain expectations; passwordless sudo is a Standard-image guarantee.
+
+The image-level baseline includes AWS CLI v2 2.36.22 (`aws`, `aws_completer`), uv 0.12.3 (`uv`, `uvx`), .NET 10 LTS SDK 10.0.400 with .NET/ASP.NET Core runtimes 10.0.11 (`dotnet`, `dnx`), and standalone Kotlin compiler 2.4.10 (`kotlin`, `kotlinc`) on the managed JDK. Installing `aws` grants no credentials: only an explicit per-workspace AWS grant exposes the host default profile, and disabled workspaces receive no AWS authority. uv and `dnx` may download dependencies only when invoked. Kotlin does not include Gradle, Maven, Kotlin/Native, or runtime dependency resolution.
+
+For a running workspace, select it in the dashboard and press `v` for **Attach with VS Code (experimental)**. Install Dev Containers 0.467.0 or later, enable **Dev › Containers: Experimental Apple Container Support**, run **Dev Containers: Attach to Running Apple Container...**, choose the exact container name DSX prints, and open `/workspace`. Apple `container` 1.2.2 with Dev Containers 0.467.0+ is the verified combination. DSX neither starts stopped workspaces nor reads `.devcontainer`, and VS Code attachment does not replace explicit DSX loopback port publication.
+
+Existing workspaces retain the image and user contract with which they were created. To adopt this Standard-image revision, first fetch/apply or otherwise preserve work, remove the old workspace with ownership-safe `dsx workspace remove NAME`, approve the changed Standard-image hash, and recreate it. DSX does not silently replace or recursively chown existing persistent resources.
 
 ## Run an agent in an existing workspace
 
@@ -203,6 +225,27 @@ Each import presents the exact discovered artifacts for explicit approval. The a
 DSX never imports a complete harness directory or host home, never imports silently, and never translates OMP's Codex provider identity into Codex CLI credentials. Imported credentials become the canonical project store for that harness.
 
 On first use of a harness in a workspace, DSX lazily creates an independent writable copy. Concurrent workspaces never share a writable credential store. Promotion back to the project store is serialized. Ordinary workspace removal preserves canonical project credentials; purge is a separate confirmed action and active copies block it.
+
+## Enable AWS only where needed
+
+Project `host-default` mode permits selected workspaces to use temporary host AWS credentials; it does not grant them automatically. Every new workspace starts with AWS access disabled. Leapp Desktop (or a compatible provider) must keep one complete temporary session active as the standard AWS `default` for enablement and credential rotation. DSX reads the approved standard-file directory; it never starts or controls the provider.
+
+Review the dynamic identity warning carefully: enabling AWS gives the workspace and its agents whichever AWS account and role the host provider currently assigns to `default`. Switching the host default changes every AWS-enabled running workspace without another DSX approval or workspace restart. Named profiles are unavailable in this increment.
+
+Manage one named workspace at a time:
+
+```console
+$ dsx aws status feature-a
+$ dsx aws enable feature-a
+$ dsx aws status feature-a
+$ dsx aws disable feature-a
+```
+
+`status` reports the durable grant and only non-secret availability or failure state. It never prints credential values. **Enable AWS** and **Disable AWS** in the dashboard are the equivalent TUI actions for the selected workspace.
+
+An enabled running workspace continuously follows stable replacements of the host `default`; complete config and credential generations appear atomically and no manual sync is required. Stopping the workspace stops its mirror helper while preserving the grant. Starting or restarting performs a fresh sync before a shell or agent can use AWS. Disabling records revocation before stopping the helper and removing that workspace's private mirror. Removing the workspace cleans up its exact AWS grant, helper, and mirror with the rest of its proven resources.
+
+An AWS-disabled workspace has no AWS files, AWS environment, mirror helper, or access to the host source. Browser VMs never receive AWS state, including when their agent session belongs to an AWS-enabled workspace.
 
 ## Use a browser for one agent session
 
@@ -303,8 +346,10 @@ For the selected workspace:
 - **s** starts or stops it;
 - **r** restarts it;
 - **g** reviews Git changes;
-- **d** removes it; and
+- **d** removes it;
 - **c** creates another workspace.
+
+The dashboard also exposes **Enable AWS** or **Disable AWS** for the selected workspace. These actions record intent and use the same workspace lifecycle path as the CLI.
 
 Actions are state-aware. Update and restart are disabled during another lifecycle mutation. **Needs resolution** remains openable for Git conflict recovery. Without an interactive terminal, bare `dsx` prints help and changes nothing. `DSX_ACCESSIBLE=1` enables accessible form mode, and `NO_COLOR` is respected.
 
@@ -325,6 +370,14 @@ Open the named workspace and use Git's normal rebase continuation or abort comma
 ### Removal reports unfetched work
 
 Run `dsx git status WORKSPACE`, then fetch or apply every repository result. Confirm loss only when the work is intentionally disposable.
+
+### AWS reports that the host default is unavailable
+
+Start or renew one temporary `default` session in Leapp Desktop (or a compatible provider), then run `dsx aws status WORKSPACE`. DSX does not start the provider or retain stale credentials after a stable removal. If status reports a non-secret source or identity failure, restore the reviewed canonical standard-file directory before enabling or restarting.
+
+### AWS identity changed unexpectedly
+
+Run `dsx aws status WORKSPACE` and inspect the provider's active host `default`. This capability intentionally follows a dynamic identity: a host switch propagates continuously to every AWS-enabled running workspace. Disable AWS on workspaces that must not follow it. Named-profile selection and identity pinning are future work.
 
 ### Runtime is unsupported
 

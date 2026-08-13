@@ -10,6 +10,7 @@ import (
 	"github.com/srimajji/dsx/internal/app"
 	"github.com/srimajji/dsx/internal/config"
 	"github.com/srimajji/dsx/internal/model"
+	"github.com/srimajji/dsx/internal/plan"
 	"github.com/srimajji/dsx/internal/terminal"
 )
 
@@ -53,6 +54,13 @@ func renderInspect(writer io.Writer, result app.InspectResult, format string) er
 	if _, err := fmt.Fprintf(writer, "Default agent: %q\nImage: %q\nExecutable hash: %s\n", terminal.SanitizeLine(result.Plan.Agents.Default), terminal.SanitizeLine(image), terminal.SanitizeLine(result.Plan.ExecutableHash)); err != nil {
 		return model.Wrap(model.CodeInternal, "write inspect output", err)
 	}
+	aws, err := renderInspectAWSCapability(result.Plan.AWS)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(writer, aws); err != nil {
+		return model.Wrap(model.CodeInternal, "write inspect AWS capability", err)
+	}
 	var encoded bytes.Buffer
 	encoder := json.NewEncoder(&encoded)
 	encoder.SetEscapeHTML(false)
@@ -71,6 +79,47 @@ func renderInspect(writer io.Writer, result app.InspectResult, format string) er
 		return model.Wrap(model.CodeInternal, "write inspect plan", err)
 	}
 	return nil
+}
+func renderInspectAWSCapability(capability plan.AWSCapability) (string, error) {
+	output := terminal.NewSanitizedBuilder(maxInspectPlanBytes)
+	write := func(parts ...string) {
+		for _, part := range parts {
+			output.WriteString(part)
+		}
+	}
+	write("AWS capability:\n")
+	if capability.Mode == "" || capability.Mode == plan.AWSModeNone {
+		write("  Mode: none\n  Status: Disabled — no host AWS credential authority is approved\n")
+	} else {
+		access := "read/write"
+		if capability.ReadOnly {
+			access = "read-only"
+		}
+		workspaceDefault := "Enabled"
+		if !capability.WorkspaceDefaultEnabled {
+			workspaceDefault = "Disabled"
+		}
+		write(
+			"  Mode: ", terminal.SanitizeLine(capability.Mode), "\n",
+			"  Source: ", terminal.SanitizeLine(capability.SourceDirectory), "\n",
+			"  Source identity: ", terminal.SanitizeLine(capability.SourceIdentity), "\n",
+			"  Destination: ", terminal.SanitizeLine(capability.Destination), "\n",
+			"  Access: ", access, "\n",
+			"  Eligible profile: ", terminal.SanitizeLine(capability.EligibleProfile), " only\n",
+			"  Default for new workspaces: ", workspaceDefault, "\n",
+			"  Authority model: ", terminal.SanitizeLine(capability.AuthorityModel), "\n",
+			"  Host availability: Status only, not approval authority — enablement requires a valid temporary host default; if unavailable, start the host default session\n",
+			"  Warning: This capability is for selected workspaces only; new workspaces start with AWS access disabled.\n",
+			"  Warning: Leapp Desktop or a compatible provider must keep a temporary default session active for enablement and rotation.\n",
+			"  Warning: Only AWS-enabled running workspaces follow the host default.\n",
+			"  Warning: Switching the host default changes every AWS-enabled running workspace without another approval or workspace restart.\n",
+			"  Warning: Named host profiles are unavailable.\n",
+		)
+	}
+	if !output.Complete() {
+		return "", model.NewError(model.CodeInvalidInput, "complete inspect AWS capability exceeds the safe display bound; output was refused rather than truncated", nil)
+	}
+	return output.String(), nil
 }
 
 func renderDoctor(writer io.Writer, result app.DoctorResult, format string) error {

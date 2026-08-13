@@ -19,9 +19,9 @@ type GitStatusRequest struct {
 }
 
 type GitStatusResult struct {
-	ProjectID    model.ProjectID    `json:"project_id"`
+	ProjectID    model.ProjectID     `json:"project_id"`
 	Workspace    model.WorkspaceName `json:"workspace"`
-	Repositories []gitx.Status      `json:"repositories"`
+	Repositories []gitx.Status       `json:"repositories"`
 }
 
 type GitDiffRequest struct {
@@ -38,9 +38,9 @@ type RepositoryDiff struct {
 }
 
 type GitDiffResult struct {
-	ProjectID model.ProjectID    `json:"project_id"`
+	ProjectID model.ProjectID     `json:"project_id"`
 	Workspace model.WorkspaceName `json:"workspace"`
-	Diffs     []RepositoryDiff   `json:"diffs"`
+	Diffs     []RepositoryDiff    `json:"diffs"`
 }
 
 type GitFetchRequest struct {
@@ -50,9 +50,9 @@ type GitFetchRequest struct {
 }
 
 type GitFetchResult struct {
-	ProjectID    model.ProjectID    `json:"project_id"`
+	ProjectID    model.ProjectID     `json:"project_id"`
 	Workspace    model.WorkspaceName `json:"workspace"`
-	Repositories []gitx.FetchResult `json:"repositories"`
+	Repositories []gitx.FetchResult  `json:"repositories"`
 }
 
 type GitApplyRequest struct {
@@ -62,9 +62,9 @@ type GitApplyRequest struct {
 }
 
 type GitApplyResult struct {
-	ProjectID    model.ProjectID    `json:"project_id"`
+	ProjectID    model.ProjectID     `json:"project_id"`
 	Workspace    model.WorkspaceName `json:"workspace"`
-	Repositories []gitx.ApplyResult `json:"repositories"`
+	Repositories []gitx.ApplyResult  `json:"repositories"`
 }
 
 type WorkspaceGitManager interface {

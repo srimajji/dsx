@@ -21,8 +21,8 @@ type AuthStatusRequest struct {
 }
 
 type AuthAgentStatus struct {
-	Agent      harness.Name        `json:"agent"`
-	Configured bool                `json:"configured"`
+	Agent      harness.Name         `json:"agent"`
+	Configured bool                 `json:"configured"`
 	HostImport auth.HostImportState `json:"host_import"`
 }
 
@@ -75,17 +75,17 @@ type AuthPurgeRequest struct {
 // project credential copy. The runner must never mount the host home or another
 // harness's credential root and must copy refreshed artifacts back before return.
 type AuthSessionRequest struct {
-	ProjectRoot     string
-	Agent           harness.Name
-	Session         auth.ProjectSession
-	CredentialRoot  string
-	ReadOnlyRoot    string
-	Layout          harness.AuthLayout
-	Interactive     bool
-	Stdin           io.Reader
-	Stdout          io.Writer
-	Stderr          io.Writer
-	RunInteractive  InteractiveChildRunner
+	ProjectRoot    string
+	Agent          harness.Name
+	Session        auth.ProjectSession
+	CredentialRoot string
+	ReadOnlyRoot   string
+	Layout         harness.AuthLayout
+	Interactive    bool
+	Stdin          io.Reader
+	Stdout         io.Writer
+	Stderr         io.Writer
+	RunInteractive InteractiveChildRunner
 }
 
 type AuthSessionResult struct {

@@ -41,11 +41,16 @@ func TestInitializeOwnedDirectoryUsesDescriptorAndExactOwnership(t *testing.T) {
 	}
 }
 
-func TestInitializeOwnedWorkspaceRejectsOtherPathsAndRootIdentity(t *testing.T) {
-	if err := InitializeOwnedWorkspace("/tmp/workspace", 501, 20); err == nil {
+func TestInitializeOwnedWorkspacesRejectsIncompletePathsAndRootIdentity(t *testing.T) {
+	if err := InitializeOwnedWorkspaces([]string{"/tmp/workspace"}, 501, 20); err == nil {
 		t.Fatal("non-authorized workspace path was accepted")
 	}
-	if err := InitializeOwnedWorkspace(ownedWorkspacePath, 0, 20); err == nil {
+	if err := InitializeOwnedWorkspaces(append([]string(nil), OwnedWorkspacePaths...), 0, 20); err == nil {
 		t.Fatal("root child UID was accepted")
+	}
+	reordered := append([]string(nil), OwnedWorkspacePaths...)
+	reordered[0], reordered[1] = reordered[1], reordered[0]
+	if err := InitializeOwnedWorkspaces(reordered, 501, 20); err == nil {
+		t.Fatal("reordered path allowlist was accepted")
 	}
 }

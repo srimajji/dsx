@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1078,6 +1079,7 @@ func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
 	}
 	mountTargets := make(map[string]struct{}, len(s.Mounts))
 	workspaceVolumes := 0
+	hostAWSMirrors := 0
 	for _, mount := range s.Mounts {
 		if _, err := mountArg(mount); err != nil {
 			return "", err
@@ -1085,6 +1087,12 @@ func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
 		if mount.Authority == runtime.MountAuthorityReviewedHost {
 			if err := validReviewedHostMount(s, mount); err != nil {
 				return "", err
+			}
+		}
+		if mount.Authority == runtime.MountAuthorityHostAWSMirror {
+			hostAWSMirrors++
+			if s.HostAWSMirrorSource == "" || mount.Source != string(s.HostAWSMirrorSource) {
+				return "", errors.New("host AWS mirror source does not match the exact workspace grant")
 			}
 		}
 		if _, duplicate := mountTargets[mount.Target]; duplicate {
@@ -1095,6 +1103,9 @@ func validWorkspace(s runtime.WorkspaceSpec) (runtime.ResourceKind, error) {
 			mount.Authority == runtime.MountAuthorityVolume && !mount.ReadOnly {
 			workspaceVolumes++
 		}
+	}
+	if (s.HostAWSMirrorSource == "" && hostAWSMirrors != 0) || (s.HostAWSMirrorSource != "" && hostAWSMirrors != 1) {
+		return "", errors.New("host AWS mirror mount does not match the workspace capability")
 	}
 	if workspaceVolumes != 1 {
 		return "", errors.New("exactly one writable private workspace volume required")
@@ -1329,12 +1340,28 @@ func validExec(s runtime.ExecSpec) error {
 		}
 	}
 	if s.User != "" {
-		if err := nonroot(s.User); err != nil && !validRootReadOnlyStaging(s) && !validRootReadOnlyCleanup(s) {
+		if err := nonroot(s.User); err != nil && !validRootReadOnlyStaging(s) && !validRootReadOnlyCleanup(s) && !validRootWorkspaceInitialization(s) {
 			return err
 		}
 	}
 	return nil
 }
+func validRootWorkspaceInitialization(spec runtime.ExecSpec) bool {
+	if spec.User != "0:0" || spec.WorkingDir != "/workspace" || len(spec.Env) != 0 {
+		return false
+	}
+	want := []string{
+		"/usr/local/libexec/dsx/dsx-guest", "initialize-workspace",
+		"--child-uid", "1000", "--child-gid", "1000",
+		"--path", "/workspace",
+		"--path", "/home/dsx/.dsx/auth",
+		"--path", "/home/dsx/.local/state/dsx",
+		"--path", "/home/dsx/.cache",
+		"--path", "/var/lib/dsx",
+	}
+	return slices.Equal(spec.Argv, want)
+}
+
 func validRootReadOnlyStaging(spec runtime.ExecSpec) bool {
 	if spec.User != "0:0" || spec.WorkingDir != "/workspace" || len(spec.Env) != 0 || len(spec.Argv) != 9 {
 		return false
@@ -1596,7 +1623,7 @@ func validRootSupervisor(spec runtime.WorkspaceSpec) bool {
 		"--socket", "/run/dsx/control.sock",
 		"--child-uid", "", "--child-gid", "",
 	}
-	if len(spec.Entrypoint) != len(want) && len(spec.Entrypoint) != len(want)+2 {
+	if len(spec.Entrypoint) != len(want) {
 		return false
 	}
 	for index := range want {
@@ -1609,28 +1636,18 @@ func validRootSupervisor(spec runtime.WorkspaceSpec) bool {
 	if uidErr != nil || gidErr != nil || uid == 0 || gid == 0 {
 		return false
 	}
-	initializeWorkspace := len(spec.Entrypoint) == len(want)+2
-	if initializeWorkspace && (spec.Entrypoint[8] != "--initialize-workspace" || spec.Entrypoint[9] != "/workspace") {
-		return false
-	}
 	helperMounts := 0
-	workspaceVolumes := 0
 	for _, mount := range spec.Mounts {
-		switch mount.Target {
-		case "/usr/local/libexec/dsx":
+		if mount.Target == "/workspace" {
+			return false
+		}
+		if mount.Target == "/usr/local/libexec/dsx" {
 			helperMounts++
 			if mount.Type != "bind" || mount.Authority != runtime.MountAuthorityGuestHelper || !mount.ReadOnly ||
 				hostPath(runtime.HostPath(mount.Source)) != nil || validGuestHelperHostDirectory(mount.Source) != nil {
 				return false
 			}
-		case "/workspace":
-			if mount.Type == "volume" && mount.Authority == runtime.MountAuthorityVolume && !mount.ReadOnly {
-				workspaceVolumes++
-			}
 		}
-	}
-	if initializeWorkspace {
-		return helperMounts == 1 && workspaceVolumes == 1
 	}
 	return helperMounts == 1
 }
@@ -1820,9 +1837,9 @@ func validMountAuthority(m runtime.Mount) error {
 			return err
 		}
 		return validGuestHelperHostDirectory(m.Source)
-	case runtime.MountAuthorityLeappMirror:
+	case runtime.MountAuthorityHostAWSMirror:
 		if m.Type != "bind" || m.Target != "/run/dsx/aws" || !m.ReadOnly {
-			return errors.New("Leapp mirror authority has an invalid type, target, or mode")
+			return errors.New("host AWS mirror authority has an invalid type, target, or mode")
 		}
 		return hostPath(runtime.HostPath(m.Source))
 	case runtime.MountAuthorityReviewedHost:

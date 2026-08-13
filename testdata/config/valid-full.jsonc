@@ -27,7 +27,7 @@
   "agents": { "default": "codex", "allowed": ["omp", "codex", "claude", "opencode"] },
   "auth": { "imports": ["omp", "codex", "opencode"] },
   "ports": [{ "name": "web", "guest": 3000, "host": "dynamic", "bind": "127.0.0.1", "protocol": "tcp" }],
-  "aws": { "mode": "none" },
+  "aws": { "mode": "host-default", "directory": "/Users/example/.aws" },
   "network": { "internet": true, "hostGrants": [] },
   "resources": { "cpus": 4, "memory": "8GiB", "maxConcurrentWorkspaces": 2 },
 }

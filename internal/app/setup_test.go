@@ -266,8 +266,66 @@ func TestSetupWithoutDetectedImageSelectsManagedStandard(t *testing.T) {
 	if preview.SelectedImageOption != "standard" || preview.Plan.Image.InputDigest != agentimage.InputDigest() || preview.Hash == "" {
 		t.Fatalf("standard image preview = %#v", preview)
 	}
+	if preview.Config.AWS.Mode != "" && preview.Config.AWS.Mode != plan.AWSModeNone {
+		t.Fatalf("generated setup selected AWS mode %q", preview.Config.AWS.Mode)
+	}
+	if preview.Plan.AWS != (plan.AWSCapability{Mode: plan.AWSModeNone}) {
+		t.Fatalf("generated setup did not default AWS capability off: %#v", preview.Plan.AWS)
+	}
+	for _, capability := range preview.SelectedCapabilities {
+		if capability == "aws" {
+			t.Fatalf("generated setup enabled AWS capability by default: %#v", preview.SelectedCapabilities)
+		}
+	}
 	if len(preview.Diagnostics) != 0 {
 		t.Fatalf("diagnostics = %#v", preview.Diagnostics)
+	}
+}
+
+func TestPreviewExistingAuthorizesHostDefaultCapabilityButNotWorkspaceGrant(t *testing.T) {
+	root := canonicalTemporaryDirectory(t)
+	sourceDirectory := canonicalTemporaryDirectory(t)
+	if err := os.Mkdir(filepath.Join(root, ".dsx"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configuration := `{
+  "schemaVersion": 1,
+  "workspace": {"root": "."},
+  "image": {"standard": true},
+  "agents": {"default": "codex", "allowed": ["codex"]},
+  "aws": {"mode": "host-default", "directory": "` + sourceDirectory + `"}
+}`
+	if err := os.WriteFile(filepath.Join(root, projectConfigPath), []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := setupTestService(t, root, &setupApprovalRepository{}, setupInventory{})
+	preview, err := service.PreviewExisting(context.Background(), BareStateRequest{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Plan.AWS.Mode != plan.AWSModeHostDefault ||
+		preview.Plan.AWS.SourceDirectory != sourceDirectory ||
+		preview.Plan.AWS.SourceIdentity == "" ||
+		preview.Plan.AWS.Destination != plan.AWSGuestDestination ||
+		!preview.Plan.AWS.ReadOnly ||
+		preview.Plan.AWS.EligibleProfile != plan.AWSDefaultProfile ||
+		preview.Plan.AWS.WorkspaceDefaultEnabled ||
+		preview.Plan.AWS.AuthorityModel != plan.AWSAuthorityDynamicHostDefault {
+		t.Fatalf("reviewed AWS capability = %#v", preview.Plan.AWS)
+	}
+	foundAWS := false
+	for _, capability := range preview.SelectedCapabilities {
+		if capability == "aws" {
+			foundAWS = true
+		}
+	}
+	if !foundAWS {
+		t.Fatalf("selected capabilities omitted AWS: %#v", preview.SelectedCapabilities)
+	}
+	for _, grant := range preview.Plan.Bridges {
+		if grant.Kind == "aws" {
+			t.Fatalf("setup converted AWS capability into workspace BridgeGrant: %#v", grant)
+		}
 	}
 }
 

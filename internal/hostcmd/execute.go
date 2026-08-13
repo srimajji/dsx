@@ -36,6 +36,9 @@ Usage:
   dsx agent WORKSPACE [--root PATH] [--agent omp|codex|claude|opencode] [--browser] [-- PROMPT]
   dsx auth status [--root PATH] [--format text|json]
   dsx auth import|login|refresh|purge --agent omp|codex|claude|opencode [--root PATH] [--force]
+  dsx aws enable WORKSPACE [--root PATH]
+  dsx aws disable WORKSPACE [--root PATH]
+  dsx aws status WORKSPACE [--root PATH] [--format text|json]
   dsx git status|diff|fetch|apply WORKSPACE [--repo MEMBER] [--root PATH] [--format text|json]
   dsx version [--json]
   dsx --version [--json]
@@ -63,6 +66,7 @@ type WorkspaceLifecycle interface {
 	Restart(context.Context, app.WorkspaceRestartRequest) (app.WorkspaceResult, error)
 	Remove(context.Context, app.WorkspaceRemoveRequest) (app.WorkspaceRemoveResult, error)
 	List(context.Context, app.WorkspaceListRequest) (app.WorkspaceListResult, error)
+	AttachInfo(context.Context, app.WorkspaceAttachInfoRequest) (app.WorkspaceAttachInfo, error)
 }
 
 type WorkspaceGit interface {
@@ -84,8 +88,18 @@ type AuthManager interface {
 	Refresh(context.Context, app.AuthRefreshRequest) (app.AuthImportResult, error)
 	Purge(context.Context, app.AuthPurgeRequest) error
 }
+
+type AWSWorkspaceManager interface {
+	Enable(context.Context, app.AWSWorkspaceRequest) (app.AWSWorkspaceResult, error)
+	Disable(context.Context, app.AWSWorkspaceRequest) (app.AWSWorkspaceResult, error)
+	Status(context.Context, app.AWSWorkspaceRequest) (app.AWSWorkspaceResult, error)
+}
 type WorkspaceInventory interface {
 	ListAllManifests(context.Context) ([]state.Manifest, error)
+}
+
+type VSCodeLauncher interface {
+	OpenSettings(context.Context) error
 }
 
 type Dependencies struct {
@@ -95,8 +109,10 @@ type Dependencies struct {
 	Git           WorkspaceGit
 	Agents        AgentRunner
 	Auth          AuthManager
+	AWS           AWSWorkspaceManager
 	Inventory     WorkspaceInventory
 	TUI           TUIRunner
+	VSCode        VSCodeLauncher
 	Stdin         io.Reader
 	IsTTY         func(io.Reader, io.Writer) bool
 	TerminalState terminal.TerminalState
@@ -146,6 +162,8 @@ func (dispatcher *Dispatcher) Execute(ctx context.Context, args []string, stdout
 		return dispatcher.executeAgent(ctx, args[1:], stdout, stderr)
 	case "auth":
 		return dispatcher.executeAuth(ctx, args[1:], stdout, stderr)
+	case "aws":
+		return dispatcher.executeAWS(ctx, args[1:], stdout, stderr)
 	case "git":
 		return dispatcher.executeGit(ctx, args[1:], stdout, stderr)
 	default:

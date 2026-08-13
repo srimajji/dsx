@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"path/filepath"
@@ -58,6 +59,60 @@ func TestBrowserRuntimeContractIsNetworkOnly(t *testing.T) {
 	snapshot.Mounts = []runtime.Mount{{Target: "/workspace"}}
 	if err := verifyBrowserSnapshot(record, snapshot, network, browserTestDigest, true); err == nil {
 		t.Fatal("browser snapshot with a source mount was accepted")
+	}
+}
+
+func TestBrowserSpecificationCategoricallyExcludesHostAWS(t *testing.T) {
+	service, access, fake := browserSessionFixture(t)
+	hostSource := filepath.Join(access.Manifest.CanonicalRoot, "host-aws-source")
+	mirrorPath := filepath.Join(access.Manifest.CanonicalRoot, "state", "host-aws-workspaces", "publication")
+	access.Plan.AWS = plan.AWSCapability{
+		Mode: plan.AWSModeHostDefault, SourceDirectory: hostSource, Destination: plan.AWSGuestDestination,
+	}
+	for key, value := range map[string]string{
+		"AWS_DEFAULT_PROFILE":         "default",
+		"AWS_CONFIG_FILE":             filepath.Join(hostSource, "config"),
+		"AWS_SHARED_CREDENTIALS_FILE": filepath.Join(hostSource, "credentials"),
+		"AWS_PROFILE":                 "default",
+	} {
+		t.Setenv(key, value)
+	}
+
+	session, err := service.createBrowserSession(context.Background(), access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, found := manifestResourceIndex(access.Manifest.Resources, runtime.ResourceBrowser)
+	if !found {
+		t.Fatal("browser creation intent missing")
+	}
+	if err := service.deleteBrowserWithAccess(context.Background(), access, index); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(fake.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+		plan.AWSGuestDestination, hostSource, mirrorPath,
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("browser specification contains forbidden AWS authority %q: %s", forbidden, encoded)
+		}
+	}
+	if session == nil || len(fake.spec.Env) != 0 {
+		t.Fatalf("browser received environment: session=%#v env=%#v", session, fake.spec.Env)
+	}
+
+	for _, contaminated := range []runtime.BrowserSpec{
+		{Entrypoint: append([]string(nil), browserEntrypoint...), Env: []string{"AWS_CONFIG_FILE=" + plan.AWSGuestDestination + "/current/config"}},
+		{Entrypoint: append(append([]string(nil), browserEntrypoint...), mirrorPath)},
+		{Entrypoint: append(append([]string(nil), browserEntrypoint...), hostSource)},
+	} {
+		if err := validateBrowserSpec(contaminated); err == nil {
+			t.Fatalf("contaminated browser specification was accepted: %#v", contaminated)
+		}
 	}
 }
 

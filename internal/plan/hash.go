@@ -23,6 +23,7 @@ type ExecutablePlanV2 struct {
 	Auth         AuthPlan               `json:"auth"`
 	Ports        []executablePort       `json:"ports"`
 	Browser      *BrowserPlan           `json:"browser"`
+	AWS          AWSCapability          `json:"aws"`
 	Bridges      []BridgeGrant          `json:"bridges"`
 	Limits       ResourceLimits         `json:"limits"`
 }
@@ -86,8 +87,8 @@ type executablePort struct {
 }
 
 // ExecutableProjection returns a normalized copy of the authority-bearing
-// fields in plan. It deliberately omits identities, ownership-derived names,
-// provenance, display-only data, run IDs, and secret values.
+// fields in plan. It deliberately omits project and workspace identities,
+// ownership-derived names, provenance, display-only data, run IDs, and secrets.
 func ExecutableProjection(plan ExecutionPlan) ExecutablePlanV2 {
 	projection := ExecutablePlanV2{
 		Agents:    AgentPlan{Allowed: append([]string(nil), plan.Agents.Allowed...), Default: plan.Agents.Default},
@@ -101,6 +102,7 @@ func ExecutableProjection(plan ExecutionPlan) ExecutablePlanV2 {
 		Bridges:   append([]BridgeGrant(nil), plan.Bridges...),
 		Limits:    plan.Limits,
 		Browser:   cloneBrowser(plan.Browser),
+		AWS:       plan.AWS,
 	}
 	projection.Repositories = make([]executableRepository, len(plan.Repositories))
 	for index, repository := range plan.Repositories {

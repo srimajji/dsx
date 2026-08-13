@@ -61,9 +61,9 @@ func TestDashboardRendersPeerWorkspaceStatesAndAgents(t *testing.T) {
 
 func TestDashboardActionsAreStateAware(t *testing.T) {
 	tests := []struct {
-		state      string
-		present    []string
-		absent     []string
+		state   string
+		present []string
+		absent  []string
 	}{
 		{state: "running", present: []string{"[Enter] Open", "[a] Open agent", "[u] Update", "[s] Stop", "[r] Restart", "[g] Review Git", "[d] Remove"}},
 		{state: "stopped", present: []string{"[Enter] Open", "[u] Update", "[s] Start", "[r] Restart", "[g] Review Git", "[d] Remove"}, absent: []string{"[a] Open agent"}},
@@ -77,10 +77,14 @@ func TestDashboardActionsAreStateAware(t *testing.T) {
 		t.Run(test.state, func(t *testing.T) {
 			view := ansi.Strip(NewDashboardModel(dashboardFixture(test.state)).View().Content)
 			for _, expected := range test.present {
-				if !strings.Contains(view, expected) { t.Fatalf("%s view omitted %q:\n%s", test.state, expected, view) }
+				if !strings.Contains(view, expected) {
+					t.Fatalf("%s view omitted %q:\n%s", test.state, expected, view)
+				}
 			}
 			for _, unexpected := range test.absent {
-				if strings.Contains(view, unexpected) { t.Fatalf("%s view included %q:\n%s", test.state, unexpected, view) }
+				if strings.Contains(view, unexpected) {
+					t.Fatalf("%s view included %q:\n%s", test.state, unexpected, view)
+				}
 			}
 		})
 	}
@@ -104,12 +108,18 @@ func TestDashboardDisablesUpdateAndRestartDuringMutation(t *testing.T) {
 	model := NewDashboardModel(data)
 	view := ansi.Strip(model.View().Content)
 	for _, expected := range []string{"Update unavailable while lifecycle change runs", "Restart unavailable while lifecycle change runs"} {
-		if !strings.Contains(view, expected) { t.Fatalf("mutating view omitted %q:\n%s", expected, view) }
+		if !strings.Contains(view, expected) {
+			t.Fatalf("mutating view omitted %q:\n%s", expected, view)
+		}
 	}
 	for _, key := range []string{"u", "r"} {
 		updated, command := dashboardPress(t, NewDashboardModel(data), textKey(key))
-		if command != nil { t.Fatalf("disabled %q action exited", key) }
-		if intent, found := updated.Intent(); found { t.Fatalf("disabled %q emitted %#v", key, intent) }
+		if command != nil {
+			t.Fatalf("disabled %q action exited", key)
+		}
+		if intent, found := updated.Intent(); found {
+			t.Fatalf("disabled %q emitted %#v", key, intent)
+		}
 	}
 }
 
@@ -164,22 +174,50 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 		model, _ = dashboardPress(t, model, textKey("c"))
 		view := ansi.Strip(model.View().Content)
 		for _, expected := range []string{"Create workspace", "Name", "Starting point", "feat/branch-1 @ abc123 (immutable)", "Default agent", "OMP — inherited from project", "Create and open", "Create in background"} {
-			if !strings.Contains(view, expected) { t.Fatalf("create form omitted %q:\n%s", expected, view) }
+			if !strings.Contains(view, expected) {
+				t.Fatalf("create form omitted %q:\n%s", expected, view)
+			}
 		}
+
 		for _, forbidden := range []string{"Authentication", "Prompt", "Browser", "Workspace mode", "Live", "Clone"} {
-			if strings.Contains(strings.ToLower(view), strings.ToLower(forbidden)) { t.Fatalf("create form included forbidden %q:\n%s", forbidden, view) }
+			if strings.Contains(strings.ToLower(view), strings.ToLower(forbidden)) {
+				t.Fatalf("create form included forbidden %q:\n%s", forbidden, view)
+			}
 		}
-		for _, r := range "feature-new" { model, _ = dashboardPress(t, model, textKey(string(r))) }
+		for _, r := range "feature-new" {
+			model, _ = dashboardPress(t, model, textKey(string(r)))
+		}
 		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
-		if !open { model, _ = dashboardPress(t, model, specialKey(tea.KeyTab)) }
+		if !open {
+			model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+		}
 		model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
 		intent, found := model.Intent()
 		want := Intent{
 			Action: "workspace-create", Root: "/tmp/tracking-chrome-extension", Workspace: "feature-new",
 			SourceBranch: "feat/branch-1", SourceRevision: "abc123", Agent: "omp", Open: open,
 		}
-		if command == nil || !found || intent != want { t.Fatalf("create intent = %#v, found=%t, command=%v; want %#v", intent, found, command, want) }
+		if command == nil || !found || intent != want {
+			t.Fatalf("create intent = %#v, found=%t, command=%v; want %#v", intent, found, command, want)
+		}
+	}
+}
+func TestDashboardVSCodeAttachOnlyForRunningWorkspace(t *testing.T) {
+	data := dashboardFixture("running")
+	data.Workspaces = []DashboardWorkspace{{Name: "running", State: "running"}, {Name: "stopped", State: "stopped"}}
+	model := NewDashboardModel(data)
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "[v] Attach with VS Code (experimental)") {
+		t.Fatalf("running actions omit VS Code attach: %s", view)
+	}
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
+	if updated.(*DashboardModel).intent == nil || updated.(*DashboardModel).intent.Action != "vscode-attach" || cmd == nil {
+		t.Fatalf("running v intent = %#v", updated.(*DashboardModel).intent)
+	}
+	model = NewDashboardModel(data)
+	model.selected = 1
+	if view := ansi.Strip(model.View().Content); strings.Contains(view, "[v] Attach with VS Code (experimental)") {
+		t.Fatalf("stopped actions expose VS Code attach: %s", view)
 	}
 }
 
@@ -205,15 +243,27 @@ func TestCreateFormSelectsOnlyApprovedDefaultAgents(t *testing.T) {
 func TestCreateFormValidatesNameAndCancellationIsSideEffectFree(t *testing.T) {
 	model := NewDashboardModel(dashboardFixture("running"))
 	model, _ = dashboardPress(t, model, textKey("c"))
-	for _, r := range "Bad-" { model, _ = dashboardPress(t, model, textKey(string(r))) }
+	for _, r := range "Bad-" {
+		model, _ = dashboardPress(t, model, textKey(string(r)))
+	}
 	model.focus = 2
 	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
-	if command != nil { t.Fatal("invalid name exited") }
-	if _, found := model.Intent(); found { t.Fatal("invalid name emitted intent") }
-	if !strings.Contains(ansi.Strip(model.View().Content), "1–24 lowercase") { t.Fatalf("validation guidance missing: %s", model.View().Content) }
+	if command != nil {
+		t.Fatal("invalid name exited")
+	}
+	if _, found := model.Intent(); found {
+		t.Fatal("invalid name emitted intent")
+	}
+	if !strings.Contains(ansi.Strip(model.View().Content), "1–24 lowercase") {
+		t.Fatalf("validation guidance missing: %s", model.View().Content)
+	}
 	model, _ = dashboardPress(t, model, specialKey(tea.KeyEscape))
-	if model.screen != dashboardHome { t.Fatalf("cancel left screen %d", model.screen) }
-	if _, found := model.Intent(); found { t.Fatal("cancel emitted intent") }
+	if model.screen != dashboardHome {
+		t.Fatalf("cancel left screen %d", model.screen)
+	}
+	if _, found := model.Intent(); found {
+		t.Fatal("cancel emitted intent")
+	}
 }
 
 func TestAgentFormContainsOnlyAgentAndSessionBrowser(t *testing.T) {
@@ -223,10 +273,14 @@ func TestAgentFormContainsOnlyAgentAndSessionBrowser(t *testing.T) {
 	model, _ = dashboardPress(t, model, textKey("a"))
 	view := ansi.Strip(model.View().Content)
 	for _, expected := range []string{"Open agent", "Agent", "Codex", "Enable isolated browser for this session only"} {
-		if !strings.Contains(view, expected) { t.Fatalf("agent form omitted %q:\n%s", expected, view) }
+		if !strings.Contains(view, expected) {
+			t.Fatalf("agent form omitted %q:\n%s", expected, view)
+		}
 	}
 	for _, forbidden := range []string{"Authentication", "Profile", "Prompt", "Workspace mode"} {
-		if strings.Contains(strings.ToLower(view), strings.ToLower(forbidden)) { t.Fatalf("agent form included forbidden %q:\n%s", forbidden, view) }
+		if strings.Contains(strings.ToLower(view), strings.ToLower(forbidden)) {
+			t.Fatalf("agent form included forbidden %q:\n%s", forbidden, view)
+		}
 	}
 	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 	model, _ = dashboardPress(t, model, textKey(" "))
@@ -234,11 +288,13 @@ func TestAgentFormContainsOnlyAgentAndSessionBrowser(t *testing.T) {
 	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
 	want := Intent{Action: "agent-run", Root: data.Root, Workspace: "feature-a", Agent: "codex", Browser: true}
 	intent, found := model.Intent()
-	if command == nil || !found || intent != want { t.Fatalf("agent intent = %#v, found=%t, command=%v; want %#v", intent, found, command, want) }
+	if command == nil || !found || intent != want {
+		t.Fatalf("agent intent = %#v, found=%t, command=%v; want %#v", intent, found, command, want)
+	}
 }
 
 func TestDashboardEmitsEveryStateAwareIntent(t *testing.T) {
-	tests := []struct { state, key, action string }{
+	tests := []struct{ state, key, action string }{
 		{"running", "enter", "workspace-open"}, {"running", "u", "workspace-update"},
 		{"running", "s", "workspace-stop"}, {"stopped", "s", "workspace-start"},
 		{"running", "r", "workspace-restart"},
@@ -247,10 +303,16 @@ func TestDashboardEmitsEveryStateAwareIntent(t *testing.T) {
 		t.Run(test.action, func(t *testing.T) {
 			model := NewDashboardModel(dashboardFixture(test.state))
 			var key tea.KeyPressMsg
-			if test.key == "enter" { key = specialKey(tea.KeyEnter) } else { key = textKey(test.key) }
+			if test.key == "enter" {
+				key = specialKey(tea.KeyEnter)
+			} else {
+				key = textKey(test.key)
+			}
 			model, command := dashboardPress(t, model, key)
 			intent, found := model.Intent()
-			if command == nil || !found || intent.Action != test.action || intent.Workspace != "feature-a" { t.Fatalf("intent = %#v, found=%t", intent, found) }
+			if command == nil || !found || intent.Action != test.action || intent.Workspace != "feature-a" {
+				t.Fatalf("intent = %#v, found=%t", intent, found)
+			}
 		})
 	}
 	for key, action := range map[string]string{"s": "git-status", "d": "git-diff", "f": "git-fetch", "a": "git-apply"} {
@@ -258,7 +320,9 @@ func TestDashboardEmitsEveryStateAwareIntent(t *testing.T) {
 		model, _ = dashboardPress(t, model, textKey("g"))
 		model, command := dashboardPress(t, model, textKey(key))
 		intent, found := model.Intent()
-		if command == nil || !found || intent.Action != action { t.Fatalf("git %s intent = %#v, found=%t", key, intent, found) }
+		if command == nil || !found || intent.Action != action {
+			t.Fatalf("git %s intent = %#v, found=%t", key, intent, found)
+		}
 	}
 	cancelled := NewDashboardModel(dashboardFixture("stopped"))
 	cancelled, _ = dashboardPress(t, cancelled, textKey("d"))
@@ -274,7 +338,91 @@ func TestDashboardEmitsEveryStateAwareIntent(t *testing.T) {
 	model, _ = dashboardPress(t, model, textKey("d"))
 	model, command = dashboardPress(t, model, textKey("y"))
 	intent, found := model.Intent()
-	if command == nil || !found || intent.Action != "workspace-remove" { t.Fatalf("remove intent = %#v, found=%t", intent, found) }
+	if command == nil || !found || intent.Action != "workspace-remove" {
+		t.Fatalf("remove intent = %#v, found=%t", intent, found)
+	}
+}
+
+func TestDashboardAWSActionsRequireExplicitConfirmationAndEmitOnlyIntent(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		enabled bool
+		action  string
+		label   string
+	}{
+		{name: "enable", action: intentAWSEnable, label: "Enable AWS"},
+		{name: "disable", enabled: true, action: intentAWSDisable, label: "Disable AWS"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := dashboardFixture("running")
+			data.AWSCapability = "host-default"
+			data.Workspaces[0].AWSEnabled = test.enabled
+			data.Workspaces[0].AWSHostAvailability = "available"
+			data.Workspaces[0].AWSMirrorHealth = "current"
+			model := NewDashboardModel(data)
+			model.accessible = true
+			model.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+			if view := ansi.Strip(model.View().Content); !strings.Contains(view, test.label) || !strings.Contains(view, "Host: Available") {
+				t.Fatalf("AWS dashboard omitted state/action:\n%s", view)
+			}
+			model, command := dashboardPress(t, model, textKey("w"))
+			if command != nil {
+				t.Fatal("opening AWS confirmation exited")
+			}
+			if intent, found := model.Intent(); found {
+				t.Fatalf("opening AWS confirmation emitted %#v", intent)
+			}
+			confirmation := ansi.Strip(model.View().Content)
+			confirmationCompact := strings.Join(strings.Fields(confirmation), "")
+			if test.enabled {
+				if !strings.Contains(confirmationCompact, "revokedimmediately") || !strings.Contains(confirmationCompact, "otherworkspacesareunchanged") {
+					t.Fatalf("disable confirmation incomplete:\n%s", confirmation)
+				}
+			} else {
+				for _, expected := range []string{"continuously", "approval", "restart", "Named", "unavailable", "Other", "workspaces"} {
+					if !strings.Contains(confirmationCompact, strings.Join(strings.Fields(expected), "")) {
+						t.Fatalf("enable confirmation omitted %q:\n%s", expected, confirmation)
+					}
+				}
+			}
+			model, command = dashboardPress(t, model, textKey("y"))
+			intent, found := model.Intent()
+			if command == nil || !found || intent.Action != test.action || intent.Workspace != "feature-a" {
+				t.Fatalf("AWS intent = %#v, found=%t, command=%v", intent, found, command)
+			}
+		})
+	}
+}
+
+func TestDashboardAWSUnavailableGuidanceIsSafeAndCancellationHasNoIntent(t *testing.T) {
+	data := dashboardFixture("stopped")
+	data.AWSCapability = "host-default"
+	data.Workspaces[0].AWSHostAvailability = "credential-secret-must-not-render"
+	data.Workspaces[0].AWSMirrorHealth = "raw-host-file-content"
+	data.Workspaces[0].AWSFailureCode = "another-secret"
+	model := NewDashboardModel(data)
+	model.accessible = true
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	model, _ = dashboardPress(t, model, textKey("w"))
+	view := ansi.Strip(model.View().Content)
+	viewCompact := strings.Join(strings.Fields(view), "")
+	for _, expected := range []string{"Unavailable", "Leapp", "provider", "[default]"} {
+		if !strings.Contains(viewCompact, strings.Join(strings.Fields(expected), "")) {
+			t.Fatalf("unavailable AWS confirmation omitted %q:\n%s", expected, view)
+		}
+	}
+	for _, forbidden := range []string{"credential-secret-must-not-render", "raw-host-file-content", "another-secret"} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("AWS confirmation exposed %q:\n%s", forbidden, view)
+		}
+	}
+	model, command := dashboardPress(t, model, textKey("n"))
+	if command != nil || model.screen != dashboardHome {
+		t.Fatalf("AWS cancellation = screen %d, command %v", model.screen, command)
+	}
+	if intent, found := model.Intent(); found {
+		t.Fatalf("AWS cancellation emitted %#v", intent)
+	}
 }
 
 func TestDashboardSanitizesBoundsNoColorAndResizes(t *testing.T) {
@@ -288,12 +436,18 @@ func TestDashboardSanitizesBoundsNoColorAndResizes(t *testing.T) {
 		updated, _ := dashboardPress(t, model, tea.KeyPressMsg{})
 		updated.Update(tea.WindowSizeMsg{Width: width, Height: 16})
 		view := updated.View().Content
-		if strings.Contains(view, "\x1b[") { t.Fatalf("NO_COLOR emitted SGR: %q", view) }
+		if strings.Contains(view, "\x1b[") {
+			t.Fatalf("NO_COLOR emitted SGR: %q", view)
+		}
 		assertTerminalSafe(t, view)
 		for _, line := range strings.Split(ansi.Strip(view), "\n") {
-			if terminal.Width(line) > width { t.Fatalf("width %d line overflow: %q", width, line) }
+			if terminal.Width(line) > width {
+				t.Fatalf("width %d line overflow: %q", width, line)
+			}
 		}
-		if len(view) > 16*1024 { t.Fatalf("dashboard view is unbounded: %d bytes", len(view)) }
+		if len(view) > 16*1024 {
+			t.Fatalf("dashboard view is unbounded: %d bytes", len(view))
+		}
 	}
 	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
 	intent, found := model.Intent()
@@ -327,6 +481,48 @@ func TestRunnerLoadsFreshDashboardAndAccessibleModeRestoresWithoutIntent(t *test
 		t.Fatalf("accessible dashboard output = %q", output.String())
 	}
 	assertTerminalSafe(t, output.String())
+}
+
+func TestRunnerForceSetupApprovesExistingConfiguration(t *testing.T) {
+	preview := app.SetupPreview{
+		Hash:                strings.Repeat("a", 64),
+		ConfigContentDigest: strings.Repeat("b", 64),
+		ProjectState:        strings.Repeat("c", 64),
+	}
+	application := &setupApplicationStub{
+		bareState: app.BareState{Screen: app.BareDashboard, ConfigExists: true},
+		preview:   preview,
+	}
+	var output bytes.Buffer
+	probe := NewExistingApprovalModel(context.Background(), application, "/tmp/project", preview, true)
+	pageCount := len(reviewPages(probe.review, outputWidth(&output), 24))
+	input := strings.NewReader(strings.Repeat("\n", pageCount-1) + "y\nq\n")
+	runner := &Runner{Application: application, Input: input, Output: &output}
+
+	intent, found, err := runner.Run(context.Background(), RunRequest{
+		Root: "/tmp/project", ForceSetup: true, Accessible: true,
+		LoadDashboard: func(context.Context, string) (DashboardData, error) {
+			return dashboardFixture("running"), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found || intent != (Intent{}) {
+		t.Fatalf("reapproval returned intent %#v, found=%t", intent, found)
+	}
+	if application.existingPreviews != 1 || application.previews != 0 {
+		t.Fatalf("preview calls = existing %d, setup %d", application.existingPreviews, application.previews)
+	}
+	if application.approvals != 1 || application.initializes != 0 {
+		t.Fatalf("approval calls = %d, setup calls = %d", application.approvals, application.initializes)
+	}
+	if !application.request.Confirmed || application.request.ExpectedHash != preview.Hash {
+		t.Fatalf("approval request = %#v", application.request)
+	}
+	if !strings.Contains(output.String(), "DSX configuration approval") || !strings.Contains(output.String(), "Local checkout") {
+		t.Fatalf("reapproval output = %q", output.String())
+	}
 }
 
 func TestAccessibleCreateFormEmitsReviewedWorkspaceIntent(t *testing.T) {

@@ -10,21 +10,23 @@ func TestManualsDescribeOnlyNamedWorkspaceWorkflows(t *testing.T) {
 	root := "../.."
 	manuals := map[string]string{
 		"getting started": readContractFile(t, root+"/docs/manual/getting-started.md"),
-		"user guide":     readContractFile(t, root+"/docs/manual/user-guide.md"),
+		"user guide":      readContractFile(t, root+"/docs/manual/user-guide.md"),
 	}
 
 	for name, manual := range manuals {
 		name, manual := name, manual
 		t.Run(name, func(t *testing.T) {
 			forbidden := map[string]*regexp.Regexp{
-				"old top-level lifecycle command": regexp.MustCompile(`(?m)(?:^|[[:space:]` + "`" + `])dsx (?:shell|run|start|stop|clean|list|ls)(?:[[:space:]` + "`" + `]|$)`),
-				"old mode flag":                  regexp.MustCompile(`--mode(?:[ =]|$)`),
-				"old sandbox flag":               regexp.MustCompile(`--sandbox(?:[ =]|$)`),
-				"old profile flag":               regexp.MustCompile(`--profile(?:[ =]|$)`),
-				"old auth profile config":        regexp.MustCompile(`authProfiles`),
-				"creation browser config":        regexp.MustCompile(`browser\.enabled`),
-				"old clone concurrency config":   regexp.MustCompile(`maxConcurrentClones`),
-				"old sandbox volume scope":       regexp.MustCompile(`"scope"[[:space:]]*:[[:space:]]*"sandbox"`),
+				"old top-level lifecycle command":  regexp.MustCompile(`(?m)(?:^|[[:space:]` + "`" + `])dsx (?:shell|run|start|stop|clean|list|ls)(?:[[:space:]` + "`" + `]|$)`),
+				"old mode flag":                    regexp.MustCompile(`--mode(?:[ =]|$)`),
+				"old sandbox flag":                 regexp.MustCompile(`--sandbox(?:[ =]|$)`),
+				"legacy profile command example":   regexp.MustCompile(`(?m)^\$[[:space:]]+dsx[^\n]*--profile(?:[ =]|$)`),
+				"old auth profile config":          regexp.MustCompile(`authProfiles`),
+				"creation browser config":          regexp.MustCompile(`browser\.enabled`),
+				"old clone concurrency config":     regexp.MustCompile(`maxConcurrentClones`),
+				"old sandbox volume scope":         regexp.MustCompile(`"scope"[[:space:]]*:[[:space:]]*"sandbox"`),
+				"legacy AWS configuration example": regexp.MustCompile(`(?m)^[[:space:]]*"mode"[[:space:]]*:[[:space:]]*"leapp"`),
+				"legacy AWS mode as current":       regexp.MustCompile(`(?i)aws\.mode:[^\n]*leapp[^\n]*(?:opt-in|supported|imports|copies|exposes)`),
 			}
 			for contract, pattern := range forbidden {
 				if match := pattern.FindString(manual); match != "" {
@@ -57,6 +59,23 @@ func TestManualsDescribeOnlyNamedWorkspaceWorkflows(t *testing.T) {
 		"agents.default",
 		"auth.imports",
 		"maxConcurrentWorkspaces",
+		`"mode": "host-default"`,
+		`"mode": "none"`,
+		"dsx aws status feature-a",
+		"dsx aws enable feature-a",
+		"dsx aws disable feature-a",
+		"selected workspaces only",
+		"Every new workspace starts with AWS access disabled.",
+		"Leapp Desktop (or a compatible provider)",
+		"switching the host default changes every AWS-enabled running workspace without another DSX approval or workspace restart",
+		"reserved guest destination `/run/dsx/aws`",
+		"`dynamic-host-default` authority model",
+		"No profile name is configurable in this increment.",
+		"Named profiles are unavailable",
+		"The workspace grant persists across stop and restart.",
+		"An AWS-disabled workspace has no AWS files, AWS environment, mirror helper, or host-source access.",
+		"Browser VMs never receive AWS state",
+		"TUI actions record intent",
 		"git rebase --continue",
 		"git rebase --abort",
 		"Needs resolution",

@@ -8,22 +8,22 @@ import (
 	"time"
 )
 
-// RunLeappMirrorCommand dispatches the single hidden, pipe-only Leapp mirror
-// entry point. Start and authenticated control requests share this command so
-// no credential-bearing value can enter argv or environment.
-func RunLeappMirrorCommand() int {
+// RunHostAWSMirrorCommand dispatches the single hidden, pipe-only host AWS
+// workspace helper entry point. Start and authenticated control requests share
+// this command so no credential-bearing value can enter argv or environment.
+func RunHostAWSMirrorCommand() int {
 	stdinInfo, err := os.Stdin.Stat()
 	if err != nil || stdinInfo.Mode()&os.ModeNamedPipe == 0 || stdinInfo.Mode()&os.ModeCharDevice != 0 {
 		return 2
 	}
-	var command leappMirrorCommand
-	if err := decodeBoundedJSON(os.Stdin, MaxHelperInputBytes, &command); err != nil || command.Version != 1 {
+	var hostAWSCommand leappMirrorCommand
+	if err := decodeBoundedJSON(os.Stdin, MaxHelperInputBytes, &hostAWSCommand); err != nil || hostAWSCommand.Version != 1 {
 		return 2
 	}
-	if command.Action == "start" {
-		return runLeappMirrorStart(command)
+	if hostAWSCommand.Action == "start" {
+		return runLeappMirrorStart(hostAWSCommand)
 	}
-	return runLeappMirrorControl(command)
+	return runLeappMirrorControl(hostAWSCommand)
 }
 
 func runLeappMirrorControl(request leappMirrorCommand) int {

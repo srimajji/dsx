@@ -66,6 +66,51 @@ func TestInspectJSONCallsApplicationOnce(t *testing.T) {
 	}
 }
 
+func TestInspectTextRendersDefaultOnlyAWSCapability(t *testing.T) {
+	inspector := &fakeInspector{result: app.InspectResult{
+		Facts: app.ProjectFacts{CanonicalRoot: "/tmp/project", ConfigExists: true, ConfigPath: ".dsx/config.jsonc"},
+		Plan: plan.ExecutionPlan{
+			ContractVersion: plan.ContractVersion,
+			ExecutableHash:  strings.Repeat("a", 64),
+			AWS: plan.AWSCapability{
+				Mode: "host-default", SourceDirectory: "/Users/sri/.aws", SourceIdentity: "dev=1;ino=2",
+				Destination: "/run/dsx/aws", ReadOnly: true, EligibleProfile: "default",
+				WorkspaceDefaultEnabled: false, AuthorityModel: "dynamic-host-default",
+			},
+		},
+	}}
+	dispatcher := NewDispatcher(Dependencies{Inspector: inspector})
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.Execute(context.Background(), []string{"inspect", "--format", "text"}, &stdout, &stderr); exit != 0 {
+		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+	}
+	for _, expected := range []string{
+		"AWS capability:", "Mode: host-default", "Source: /Users/sri/.aws", "Source identity: dev=1;ino=2",
+		"Destination: /run/dsx/aws", "Access: read-only", "Eligible profile: default only",
+		"Default for new workspaces: Disabled", "Authority model: dynamic-host-default",
+		"Status only, not approval authority", "selected workspaces only", "new workspaces start with AWS access disabled",
+		"temporary default session active for enablement and rotation", "Only AWS-enabled running workspaces",
+		"without another approval or workspace restart", "Named host profiles are unavailable",
+		"Executable hash: " + strings.Repeat("a", 64),
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("inspect text omitted %q:\n%s", expected, stdout.String())
+		}
+	}
+}
+
+func TestInspectTextRendersDisabledAWSCapability(t *testing.T) {
+	inspector := &fakeInspector{result: app.InspectResult{Plan: plan.ExecutionPlan{ContractVersion: plan.ContractVersion}}}
+	dispatcher := NewDispatcher(Dependencies{Inspector: inspector})
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.Execute(context.Background(), []string{"inspect"}, &stdout, &stderr); exit != 0 {
+		t.Fatalf("exit = %d, stderr = %q", exit, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "AWS capability:\n  Mode: none\n  Status: Disabled") {
+		t.Fatalf("inspect text omitted disabled AWS capability:\n%s", stdout.String())
+	}
+}
+
 func TestInspectErrorUsesTypedExit(t *testing.T) {
 	inspector := &fakeInspector{
 		result: app.InspectResult{Diagnostics: []config.Diagnostic{{Severity: "error", Code: "unsupported", Message: "unsafe field"}}},

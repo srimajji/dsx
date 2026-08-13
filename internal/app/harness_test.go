@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"path"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/srimajji/dsx/internal/bridge"
 	"github.com/srimajji/dsx/internal/harness"
 	"github.com/srimajji/dsx/internal/model"
+	"github.com/srimajji/dsx/internal/runtime"
+	"github.com/srimajji/dsx/internal/state"
 )
 
 const fixtureAgentImageReference = "ghcr.io/example/dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -73,6 +77,32 @@ func (fakeHarnessAdapter) RedactionRules() harness.RedactionRules {
 	return harness.RedactionRules{EnvironmentKeys: []string{"FAKE_TOKEN"}}
 }
 
+type harnessHostAWSManager struct {
+	status      bridge.HostAWSMirrorStatus
+	statusCalls int
+}
+
+func (*harnessHostAWSManager) Prepare(context.Context, bridge.LeaseIdentity) (string, error) {
+	return "", errors.New("unexpected Prepare")
+}
+
+func (*harnessHostAWSManager) Enable(context.Context, bridge.LeaseIdentity, bridge.HostAWSAuthority) (string, error) {
+	return "", errors.New("unexpected Enable")
+}
+
+func (*harnessHostAWSManager) Disable(context.Context, bridge.LeaseIdentity) error {
+	return errors.New("unexpected Disable")
+}
+
+func (*harnessHostAWSManager) Remove(context.Context, bridge.LeaseIdentity) error {
+	return errors.New("unexpected Remove")
+}
+
+func (manager *harnessHostAWSManager) Status(context.Context, bridge.LeaseIdentity) (bridge.HostAWSMirrorStatus, error) {
+	manager.statusCalls++
+	return manager.status, nil
+}
+
 func TestResolveAgentPrecedenceAndAllowlist(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -123,6 +153,14 @@ func TestSelectedHarnessEnvironmentContainsOnlyItsCredentialRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for key, value := range map[string]string{
+		"AWS_CONFIG_FILE":             "/host/aws/config",
+		"AWS_SHARED_CREDENTIALS_FILE": "/host/aws/credentials",
+		"AWS_PROFILE":                 "default",
+		"AWS_DEFAULT_PROFILE":         "default",
+	} {
+		t.Setenv(key, value)
+	}
 	roots := harnessRoots(runID)
 	environment := rootEnvironment(roots, fakeHarnessAdapter{name: harness.Codex}.AuthLayout())
 	if environment["FAKE_AUTH"] != roots.Auth {
@@ -131,9 +169,99 @@ func TestSelectedHarnessEnvironmentContainsOnlyItsCredentialRoot(t *testing.T) {
 	if environment["HOME"] != roots.Home {
 		t.Fatalf("agent HOME = %q, want ephemeral %q", environment["HOME"], roots.Home)
 	}
-	for _, forbidden := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENCODE_CONFIG", "AWS_SHARED_CREDENTIALS_FILE"} {
+	for _, forbidden := range []string{
+		"CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENCODE_CONFIG",
+		"AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+	} {
 		if _, found := environment[forbidden]; found {
 			t.Fatalf("credential environment leaked unrelated key %q: %#v", forbidden, environment)
 		}
 	}
+}
+
+func TestHarnessEnvironmentUsesOnlyTypedReadyWorkspaceAWSGrant(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, err := model.NewProjectID(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := state.Manifest{
+		ProjectID: projectID, CanonicalRoot: root, Workspace: model.WorkspaceName("agent-aws"),
+		RunID: model.RunID("01890f5c-7b00-7000-8000-000000000061"),
+	}
+	ambient := []string{
+		"SAFE_AGENT_SETTING=kept",
+		"AWS_CONFIG_FILE=/host/aws/config",
+		"AWS_SHARED_CREDENTIALS_FILE=/host/aws/credentials",
+		"AWS_PROFILE=named",
+		"AWS_DEFAULT_PROFILE=named",
+	}
+	for _, assignment := range ambient[1:] {
+		key, value, _ := strings.Cut(assignment, "=")
+		t.Setenv(key, value)
+	}
+
+	t.Run("enabled and current", func(t *testing.T) {
+		manager := &harnessHostAWSManager{status: bridge.HostAWSMirrorStatus{State: AWSMirrorCurrent}}
+		workspaces := NewWorkspaceService(WorkspaceDependencies{HostAWS: manager})
+		enabled := manifest
+		enabled.AWSGrant = &state.AWSGrantRecord{Enabled: true}
+		prepared, err := workspaces.PrepareWorkspaceExecution(context.Background(), enabled, runtime.ExecSpec{Env: append([]string(nil), ambient...)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		environment, err := environmentMap(prepared.Env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{
+			"SAFE_AGENT_SETTING":          "kept",
+			"AWS_CONFIG_FILE":             bridge.HostAWSConfigGuestPath,
+			"AWS_SHARED_CREDENTIALS_FILE": bridge.HostAWSCredentialsGuestPath,
+		}
+		if !reflect.DeepEqual(environment, want) || manager.statusCalls != 1 {
+			t.Fatalf("enabled harness environment = %#v, status calls %d; want %#v, 1", environment, manager.statusCalls, want)
+		}
+	})
+
+	t.Run("enabled but not current", func(t *testing.T) {
+		manager := &harnessHostAWSManager{status: bridge.HostAWSMirrorStatus{State: AWSMirrorStopped}}
+		workspaces := NewWorkspaceService(WorkspaceDependencies{HostAWS: manager})
+		enabled := manifest
+		enabled.AWSGrant = &state.AWSGrantRecord{Enabled: true}
+		prepared, err := workspaces.PrepareWorkspaceExecution(context.Background(), enabled, runtime.ExecSpec{Env: append([]string(nil), ambient...)})
+		if err == nil {
+			t.Fatal("enabled harness accepted a non-current AWS publication")
+		}
+		environment, mapErr := environmentMap(prepared.Env)
+		if mapErr != nil {
+			t.Fatal(mapErr)
+		}
+		want := map[string]string{"SAFE_AGENT_SETTING": "kept"}
+		if !reflect.DeepEqual(environment, want) || manager.statusCalls != 1 {
+			t.Fatalf("non-current harness environment = %#v, status calls %d; want %#v, 1", environment, manager.statusCalls, want)
+		}
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		manager := &harnessHostAWSManager{status: bridge.HostAWSMirrorStatus{State: AWSMirrorCurrent}}
+		workspaces := NewWorkspaceService(WorkspaceDependencies{HostAWS: manager})
+		disabled := manifest
+		disabled.AWSGrant = &state.AWSGrantRecord{}
+		prepared, err := workspaces.PrepareWorkspaceExecution(context.Background(), disabled, runtime.ExecSpec{Env: append([]string(nil), ambient...)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		environment, err := environmentMap(prepared.Env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{"SAFE_AGENT_SETTING": "kept"}
+		if !reflect.DeepEqual(environment, want) || manager.statusCalls != 0 {
+			t.Fatalf("disabled harness environment = %#v, status calls %d; want %#v, 0", environment, manager.statusCalls, want)
+		}
+	})
 }

@@ -24,6 +24,10 @@ func TestSanitizeExplicitCLIRendering(t *testing.T) {
 			Agents:          plan.AgentPlan{Default: hostile},
 			Image:           plan.ResolvedImage{Reference: hostile},
 			ExecutableHash:  hostile,
+			AWS: plan.AWSCapability{
+				Mode: hostile, SourceDirectory: hostile, SourceIdentity: hostile,
+				Destination: hostile, EligibleProfile: hostile, AuthorityModel: hostile, ReadOnly: true,
+			},
 		},
 	}, "text"); err != nil {
 		t.Fatalf("renderInspect() error = %v", err)
@@ -71,12 +75,18 @@ func TestSanitizeCompleteInspectPlanTail(t *testing.T) {
 	err := renderInspect(&output, app.InspectResult{Plan: plan.ExecutionPlan{
 		ContractVersion: plan.ContractVersion,
 		Bridges:         bridges,
+		AWS: plan.AWSCapability{
+			Mode: "host-default", SourceDirectory: "/Users/sri/.aws", SourceIdentity: "dev=1;ino=2",
+			Destination: "/run/dsx/aws", ReadOnly: true, EligibleProfile: "default",
+			AuthorityModel: "dynamic-host-default",
+		},
 	}}, "text")
 	if err != nil {
 		t.Fatalf("render complete inspect plan: %v", err)
 	}
-	if output.Len() <= 16*1024 || !strings.Contains(output.String(), tailGrant) {
-		t.Fatalf("inspect output truncated tail grant: length=%d", output.Len())
+	if output.Len() <= 16*1024 || !strings.Contains(output.String(), tailGrant) ||
+		!strings.Contains(output.String(), "Named host profiles are unavailable") {
+		t.Fatalf("inspect output truncated complete authority: length=%d", output.Len())
 	}
 	assertCLITerminalSafe(t, output.String())
 }
