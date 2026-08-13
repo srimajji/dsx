@@ -143,6 +143,41 @@ Structured `argv` is executed directly. It is not converted to a host shell stri
 
 Reviewed host-directory grants, where supported for narrow integrations, must be canonical and read-only. Semantic validation denies host home, project source, runtime sockets, SSH/GPG agents, Keychain, Tailscale state, browser profiles, temporary/runtime directories, symlink escapes, and the reserved `dsx-guest` target.
 
+#### Repository-local Git configuration
+
+DSX runs host Git to create restrictive source bundles and to fetch and apply workspace results. Repository-local Git configuration is an input to those operations, so it is security-relevant: Git configuration can run commands, load further configuration, or acquire objects over unexpected transports.
+
+DSX therefore accepts only reviewed, inert repository-local keys: repository format facts, identity and preference scalars, and common branch and remote metadata. The four additional supported metadata shapes are exactly:
+
+```text
+branch.<branch>.vscode-merge-base
+branch.<branch>.github-pr-owner-number
+branch.<branch>.gh-merge-base
+remote.<remote>.gh-resolved
+```
+
+These cover VS Code merge bases, GitHub pull-request numbers, and GitHub CLI merge-base and default-repository annotations. Their values must still be safe non-empty scalars; similarly named or command-oriented leaves are not accepted.
+
+During a repository-configuration validation, DSX performs a filesystem preflight before starting the Git command associated with that validation. A physical `.git` directory selects its `config`. Otherwise, DSX accepts only a non-symlink regular gitfile of at most 64 KiB containing exactly one `gitdir: ` line with an optional LF or CRLF terminator; a relative target is repository-relative and must resolve to a canonical physical directory. An optional `commondir`, when present, has the same file, size, and one-line terminator constraints, resolves relative paths from the Git directory, and must also name a canonical physical directory. When `commondir` is absent, DSX race-revalidates that absence and uses the Git directory. DSX performs a bounded stable read of the resulting common `config` when it exists, stripping exactly one leading UTF-8 BOM there; gitfiles and `commondir` files do not accept a BOM. An absent resolved common `config` is a legitimate empty repository-local configuration only after DSX revalidates the Git directory, any present `commondir` pointer and target, and the configuration's continued absence. DSX inspects actual `path` assignments in direct `[include]` and `[includeIf "..."]` sections, never resolves, opens, or reads an include target, and does not treat an empty include section header alone as a policy violation. It does not rely on `--no-includes` as a listing-level defense, because Git may process repository configuration while setting up the repository command.
+
+The same bounded common-config snapshot is checked for `extensions.worktreeConfig`, including its valueless implicit-true form. Direct include path assignments retain the first-error precedence described below. Once none remain, configuration that enables the extension is rejected during filesystem preflight, without starting the Git command for that validation. For repository-controlled static input, this prevents Git from activating the unscanned `$GIT_DIR/config.worktree`. Disabled forms do not activate that file, but the key remains unsupported and is rejected through the normal aggregate allowlist path after preflight.
+
+The bounded snapshot and revalidation protect against repository-controlled static input and fail closed when a metadata or configuration mutation is observable during those checks. The local host user is trusted. DSX does not claim to defend against that user, or another process acting with that user's authority, concurrently replacing `.git` metadata after a check or while the following Git process starts.
+
+If actual direct include path assignments exist, DSX reports their keys first, sorted and deduplicated without values, and does not start Git for that validation. Remove all include assignments and retry. Other unsupported keys are intentionally not merged into that first error; after include removal, DSX aggregates every safely listable unsupported key in one sorted, deduplicated, value-free rejection:
+
+```console
+$ dsx workspace create feature
+dsx workspace create: repository-local Git configuration keys are not allowlisted: "include.path"; remove a key with: git config --local --unset-all <key>
+$ git config --local --unset-all include.path
+$ dsx workspace create feature
+dsx workspace create: repository-local Git configuration keys are not allowlisted: "core.fsmonitor", "credential.helper", "filter.lfs.process"; remove a key with: git config --local --unset-all <key>
+```
+
+Command-bearing and object-acquiring configuration stays blocked: credential helpers, clean/smudge and process filters, external diff commands and merge drivers, filesystem monitors and hooks, and command remote transports such as `ext::`. A common concrete case is `git lfs install --local`, which writes command-bearing `filter.lfs.*` entries that can run Git LFS and alter object acquisition. Run `git lfs install` globally instead.
+
+Remediate by removing an unsupported repository-local key or by moving a legitimate personal preference into your global Git configuration. Do not try to disable DSX validation. A missing required `.git` metadata entry or gitfile, a malformed `.git` gitfile or present `commondir` pointer, a missing referenced target, and symlinked, non-regular, replaced, unreadable, oversized, or non-canonical metadata paths and files are reported as structural errors rather than allowlist rejections. The only file-absence exception is the resolved common `config` described above; an absent optional `commondir` selects the Git directory, and both absences are race-revalidated.
+
 ## 3. Setup and TUI
 
 ### 3.1 Bare command and setup
