@@ -115,9 +115,16 @@ func TestSetupFormOffersOnlyDefaultAndCustomUbuntu(t *testing.T) {
 	model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
 	model.form.Init()
 	view := ansi.Strip(model.form.View())
-	for _, expected := range []string{"Ubuntu — Default settings", "Ubuntu — Custom", "6 CPUs", "6 GiB", "network allowed", "no browser", "AWS capability", "None — no host AWS access", "Follow host default — selected workspaces only"} {
+	for _, expected := range []string{"Ubuntu — Default settings", "Ubuntu — Custom", "6 CPUs", "6 GiB", "internet access", "no browser session"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("setup choice omitted %q:\n%s", expected, view)
+		}
+	}
+	model.form.NextGroup()
+	awsView := ansi.Strip(model.form.View())
+	for _, expected := range []string{"Will this project use AWS?", "None — no host AWS access", "Follow host default — selected workspaces only"} {
+		if !strings.Contains(awsView, expected) {
+			t.Fatalf("AWS choice omitted %q:\n%s", expected, awsView)
 		}
 	}
 	for _, forbidden := range []string{"Use another image", "Project Dockerfile", "Container image reference", "Coding assistant"} {
@@ -127,10 +134,17 @@ func TestSetupFormOffersOnlyDefaultAndCustomUbuntu(t *testing.T) {
 	}
 
 	model.setupChoice = "ubuntu-custom"
+	model.buildSetupForm()
 	model.form.Init()
 	model.form.NextGroup()
-	customView := ansi.Strip(model.form.View())
-	for _, expected := range []string{"Coding assistant", "Codex", "Claude Code", "OMP", "OpenCode", "Published guest ports", "CPU allocation", "Memory allocation"} {
+	model.form.NextGroup()
+	customViews := []string{ansi.Strip(model.form.View())}
+	for range 4 {
+		model.form.NextField()
+		customViews = append(customViews, ansi.Strip(model.form.View()))
+	}
+	customView := strings.Join(customViews, "\n")
+	for _, expected := range []string{"coding assistant", "Codex", "Claude Code", "OMP", "OpenCode", "app ports", "CPU", "memory"} {
 		if !strings.Contains(customView, expected) {
 			t.Fatalf("custom setup omitted %q:\n%s", expected, customView)
 		}
@@ -156,8 +170,9 @@ func TestSetupAWSCapabilityDefaultsOffAndAppliesHostDefaultDraft(t *testing.T) {
 	model.buildSetupForm()
 	model.form.Init()
 	model.form.NextGroup()
-	directoryView := ansi.Strip(model.form.View())
-	for _, expected := range []string{"Host AWS directory", "Leapp Desktop or a compatible provider", "Named profiles are unavailable"} {
+	model.form.NextGroup()
+	directoryView := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(model.form.View()), "┃", " ")), " ")
+	for _, expected := range []string{"Where are the host AWS files?", "Leapp Desktop or a compatible provider", "Named profiles are not shared"} {
 		if !strings.Contains(directoryView, expected) {
 			t.Fatalf("host-default directory form omitted %q:\n%s", expected, directoryView)
 		}
@@ -174,7 +189,7 @@ func TestSetupShowsManagedStandardBuildProgressAfterConfirmation(t *testing.T) {
 	model.stage = setupSaving
 	model.confirming = true
 	view := ansi.Strip(model.View().Content)
-	if !strings.Contains(view, "Building DSX Standard") || !strings.Contains(view, "building and verifying") {
+	if !strings.Contains(view, "Preparing the DSX workspace image") || !strings.Contains(view, "Building and verifying") {
 		t.Fatalf("managed standard progress view:\n%s", view)
 	}
 	model.stage = setupPreview
@@ -258,9 +273,15 @@ func TestSetupResourceScreenDefaultsAndAppliesSelections(t *testing.T) {
 	model.buildSetupForm()
 	model.form.Init()
 	model.form.NextGroup()
-	resourceView := ansi.Strip(model.form.View())
+	model.form.NextGroup()
+	resourceViews := []string{ansi.Strip(model.form.View())}
+	for range 4 {
+		model.form.NextField()
+		resourceViews = append(resourceViews, ansi.Strip(model.form.View()))
+	}
+	resourceView := strings.Join(resourceViews, "\n")
 	for _, expected := range []string{
-		"Published guest ports", "CPU allocation", "6 CPUs (Recommended)", "Memory allocation", "6GiB (Recommended)",
+		"app ports", "CPU", "6 CPUs (Recommended)", "memory", "6GiB (Recommended)",
 	} {
 		if !strings.Contains(resourceView, expected) {
 			t.Fatalf("custom resource screen omitted %q:\n%s", expected, resourceView)
@@ -318,8 +339,8 @@ func TestSetupReviewBackReturnsToEnvironmentWithSelections(t *testing.T) {
 	model.stage = setupPreview
 	model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	review := ansi.Strip(model.View().Content)
-	if !strings.Contains(review, "[b] back to environment") {
-		t.Fatalf("review omitted environment back action:\n%s", review)
+	if !strings.Contains(review, "[b] change choices") {
+		t.Fatalf("review omitted change-choices action:\n%s", review)
 	}
 
 	updated, command := model.Update(tea.KeyPressMsg(tea.Key{Text: "b", Code: 'b'}))
@@ -564,7 +585,7 @@ func TestCompleteReviewRequiresTailGrantAndRejectsOverBound(t *testing.T) {
 			if !tailVisible || !awsWarningVisible {
 				t.Fatalf("reached final confirmation without displaying complete authority: tail=%t aws-warning=%t", tailVisible, awsWarningVisible)
 			}
-			if !strings.Contains(content, "Final confirmation:") {
+			if !strings.Contains(content, "Ready to continue:") {
 				t.Fatal("final page did not expose confirmation")
 			}
 			break
@@ -595,6 +616,72 @@ func TestCompleteReviewRequiresTailGrantAndRejectsOverBound(t *testing.T) {
 	}
 	if _, command := refused.Update(tea.KeyPressMsg(tea.Key{Text: "y", Code: 'y'})); command != nil {
 		t.Fatal("over-bound review accepted confirmation")
+	}
+}
+
+func TestSetupFormFitsTerminalAtWideAndCompactSizes(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 40, Height: 18},
+		{Width: 80, Height: 24},
+		{Width: 156, Height: 45},
+	} {
+		model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", app.SetupPreview{}, false)
+		model.Update(size)
+		view := ansi.Strip(model.View().Content)
+		assertLinesFit(t, view, size.Width)
+		height := len(strings.Split(view, "\n"))
+		if height > size.Height {
+			t.Fatalf("%dx%d setup view uses %d lines:\n%s", size.Width, size.Height, height, view)
+		}
+		if size.Width >= 120 && height > 24 {
+			t.Fatalf("%dx%d setup card expands to %d lines instead of staying concise:\n%s", size.Width, size.Height, height, view)
+		}
+	}
+}
+
+func TestSetupReviewAndProgressFitTerminalAtWideAndCompactSizes(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	preview := app.SetupPreview{
+		Config: config.ConfigDocument{
+			SchemaVersion: 1,
+			Agents:        config.AgentConfig{Default: "codex", Allowed: []string{"codex"}},
+			Resources:     config.ResourceLimits{CPUs: 6, Memory: "6GiB"},
+		},
+		Hash: strings.Repeat("a", 64),
+	}
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 40, Height: 18},
+		{Width: 80, Height: 24},
+		{Width: 156, Height: 45},
+	} {
+		for _, stage := range []setupStage{setupPreview, setupSaving, setupDone} {
+			model := NewSetupModel(context.Background(), &setupApplicationStub{}, "/tmp/project", preview, false)
+			model.stage = stage
+			model.Update(size)
+			view := ansi.Strip(model.View().Content)
+			assertLinesFit(t, view, size.Width)
+			if height := len(strings.Split(strings.TrimRight(view, "\n"), "\n")); height > size.Height {
+				t.Fatalf("stage %d uses %d lines in a %dx%d terminal:\n%s", stage, height, size.Width, size.Height, view)
+			}
+		}
+
+		progress := newProgressModel(context.Background(), func() {}, ProgressRequest{
+			Title:   "Creating workspace",
+			Project: "/tmp/project",
+			Detail:  "DSX is creating the approved workspace and waiting until it is ready.",
+			Steps: []ProgressStep{
+				{ID: "validate", Label: "Validate approved project plan"},
+				{ID: "create", Label: "Create and start workspace"},
+				{ID: "ready", Label: "Workspace ready"},
+			},
+		}, func(context.Context, func(string)) error { return nil })
+		progress.Update(size)
+		view := ansi.Strip(progress.View().Content)
+		assertLinesFit(t, view, size.Width)
+		if height := len(strings.Split(strings.TrimRight(view, "\n"), "\n")); height > size.Height {
+			t.Fatalf("progress uses %d lines in a %dx%d terminal:\n%s", height, size.Width, size.Height, view)
+		}
 	}
 }
 

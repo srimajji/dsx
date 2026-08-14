@@ -41,6 +41,7 @@ type progressModel struct {
 	spinner   spinner.Model
 	current   int
 	width     int
+	height    int
 	color     bool
 	err       error
 	cancelled bool
@@ -50,7 +51,7 @@ func newProgressModel(ctx context.Context, cancel context.CancelFunc, request Pr
 	return &progressModel{
 		ctx: ctx, cancel: cancel, request: request, operation: operation,
 		updates: make(chan string), spinner: spinner.New(spinner.WithSpinner(spinner.Dot)),
-		width: 80, color: terminal.ColorEnabled(),
+		width: 80, height: 24, color: terminal.ColorEnabled(),
 	}
 }
 
@@ -91,6 +92,9 @@ func (model *progressModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.Width > 0 {
 			model.width = message.Width
 		}
+		if message.Height > 0 {
+			model.height = message.Height
+		}
 	case tea.KeyPressMsg:
 		if message.String() == "ctrl+c" || message.String() == "esc" || message.String() == "q" {
 			model.cancelled = true
@@ -117,7 +121,8 @@ func (model *progressModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model *progressModel) View() tea.View {
 	theme := newVisualTheme(model.color)
-	header := theme.header(model.request.Title, friendlyProjectName(model.request.Project), model.width)
+	width := tuiSetupWidth(model.width)
+	header := theme.header(model.request.Title, friendlyProjectName(model.request.Project), width)
 	body := terminal.SanitizeLine(model.request.Detail)
 	for index, step := range model.request.Steps {
 		marker := "[ ]"
@@ -132,10 +137,9 @@ func (model *progressModel) View() tea.View {
 		}
 		body += "\n\n" + marker + " " + label
 	}
-	body += "\n\n" + theme.muted.Render("DSX shows milestones here; command output stays hidden unless an error occurs.")
-	content := header + "\n\n" + theme.panel("Workspace progress", body, model.width, true)
-	content = terminal.Wrap(content, tuiContentWidth(model.width))
-	view := tea.NewView(theme.layout(content, model.width))
+	body += "\n\n" + theme.muted.Render("DSX shows clear milestones here. Command output stays hidden unless something fails.")
+	content := header + tuiGap(model.height) + theme.panel("Workspace progress", body, width, model.height, true)
+	view := tea.NewView(theme.layoutAt(content, model.width, width))
 	view.AltScreen = true
 	return view
 }

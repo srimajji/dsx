@@ -186,53 +186,53 @@ With a terminal, bare `dsx` opens setup for an unconfigured project or the dashb
 
 Setup is a three-step flow:
 
-1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default agent, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI. Setup also asks whether the project may allow selected workspaces to follow the host AWS `default`; this authorizes only the capability, never a workspace grant.
-2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. For `host-default`, it also shows the approved canonical source and identity, reserved read-only guest destination, eligible profile `default`, new-workspace default **Disabled**, and dynamic identity warning. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews scroll without truncation and cannot be approved before the complete content has been viewed.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default coding assistant, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI. Setup also asks whether the project may allow selected workspaces to follow the host AWS `default`; this authorizes only the capability, never a workspace grant. The environment step shows one bounded question group at a time.
+2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. For `host-default`, it also shows the approved canonical source and identity, reserved read-only guest destination, eligible profile `default`, new-workspace default **Disabled**, and dynamic identity warning. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews use complete bounded pages and cannot be approved before the final page has been viewed.
 3. Verify Apple Container, persist configuration and approval, prepare DSX Standard when required, and open the dashboard.
 
 Authentication import remains a separate explicit approval. Setup does not silently import credentials. No configuration, approval, credential, or runtime resource is persisted before final confirmation. A post-confirmation Apple runtime preflight must succeed before project mutation.
 
-Use `DSX_ACCESSIBLE=1` for accessible form mode. `NO_COLOR` is respected. Narrow terminals, resize, masked secret input, and terminal-safe rendering are part of the interface contract.
+Use `DSX_ACCESSIBLE=1` for accessible form mode. `NO_COLOR` is respected. Every resize recalculates terminal-cell wrapping and available height. Narrow or short terminals use focused-field forms rather than clipping later questions or controls.
 
 ### 3.2 Dashboard
 
-The dashboard shows:
+The dashboard uses a responsive master-detail layout:
 
-- canonical local checkout branch, commit, and cleanliness;
-- workspaces in deterministic order;
-- lifecycle state and active mutation;
-- source branch and revision;
-- workspace default and project-allowed agents;
-- final URLs and published ports;
-- unfetched or unresolved-work warnings;
-- AWS grant and non-secret availability state; and
-- `Legacy — cleanup only` resources.
+- on wide terminals, the deterministic workspace list sits beside the selected workspace’s status, coding assistant, AWS state, warnings, and actions;
+- on narrow or short terminals, the selected workspace and its currently available actions take priority;
+- all layouts show canonical local-checkout branch, commit, and cleanliness;
+- actions remain state-aware and unavailable actions are not presented as executable;
+- long text wraps to terminal cells instead of relying on terminal soft wrapping; and
+- legacy cleanup-only resources, unfetched or unresolved-work warnings, final URLs, and published ports appear when applicable.
 
 Actions for the selected workspace are state-aware:
 
 | Key | Action |
 |---|---|
-| **c** | Create a workspace. |
-| **Enter** | Open the selected workspace. |
-| **a** | Open the agent form. |
-| **u** | Update from the local checkout. |
+| **↑/↓** | Select a workspace. |
+| **c** | Create a new workspace. |
+| **Enter** | Open the selected workspace’s shell. |
+| **v** | Open the supported VS Code attachment guidance for a running workspace. |
+| **a** | Open the coding-assistant form. |
+| **u** | Update from this Mac’s local checkout. |
 | **s** | Start or stop. |
 | **r** | Restart. |
-| **g** | Review Git status or diff. |
-| **d** | Remove. |
+| **g** | Review Git status, diff, fetch, or apply. |
+| **w** | Enable or disable AWS when the project capability is approved. |
+| **d** | Remove safely. |
 | **q** | Quit. |
 
 The dashboard also exposes **Enable AWS** or **Disable AWS** for the selected workspace. These TUI actions record intent and use the same workspace lifecycle path as the CLI.
 
 Update and restart are disabled while another lifecycle mutation is active. A workspace needing conflict resolution remains openable.
 
-The create form contains the validated name, source branch and real parent revision, optional default agent selected from `agents.allowed`, and **Snapshot local changes**, which is off by default. Ordinary creation still requires a clean checkout. A dirty checkout may enter the form, but submission remains in-form until snapshot is selected.
+The create form contains the validated workspace name, source branch and real parent revision, optional coding assistant selected from `agents.allowed`, and **Include local changes**, which is off by default. Ordinary creation still requires a clean checkout. A dirty checkout may enter the form, but submission remains in-form until local changes are explicitly enabled.
 
-Snapshot selection opens a separate review of the workspace, real parent, included final tracked and nonignored untracked content, ignored-file behavior, rejection rules, and host non-mutation guarantee. Back navigation preserves the populated form. Confirmation alone emits the create intent. The form never asks for credentials, a task prompt, browser selection, or a workspace mode.
+Enabling **Include local changes** opens a separate snapshot review of the workspace, real parent, included final tracked and nonignored untracked content, ignored-file behavior, rejection rules, and host non-mutation guarantee. Back navigation preserves the populated form. Confirmation alone emits the create intent. The form never asks for credentials, a task prompt, browser selection, or a workspace mode.
 
-After either create action, the TUI remains on a bounded milestone screen while DSX validates the approved plan and creates, starts, and bootstraps the workspace. **Create and open** hands directly from completed progress to the workspace shell without exposing an idle host prompt. **Create in background** completes after the same progress without attaching a shell. Dashboard update remains clean-only; a dirty checkout points to `dsx workspace update NAME --snapshot`.
+After either create action, the TUI remains on a bounded milestone screen while DSX validates the approved plan and creates, starts, and bootstraps the workspace. **Create and open a shell** hands directly from completed progress to the workspace shell without exposing an idle host prompt. **Create in background** completes after the same progress without attaching a shell. Dashboard update remains clean-only; a dirty checkout points to `dsx workspace update NAME --snapshot`.
 
-The agent form contains only an agent selection and an **Enable isolated browser** checkbox. Browser selection is per session and is not stored as a workspace-creation default.
+The coding-assistant form contains only an assistant selection and an **Isolated browser** choice. Browser selection is per session and is not stored as a workspace-creation default.
 
 Before handing the terminal to an interactive workspace shell or agent, the TUI exits its alternate screen and restores normal terminal state. It may restore the dashboard after the child exits. Confirmed work shows bounded milestones rather than unbounded raw runtime logs.
 

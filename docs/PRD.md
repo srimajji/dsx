@@ -111,7 +111,7 @@ Dev Container declarations are not discovered, imported, parsed, or executed.
 
 The setup flow has three stages:
 
-1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. The default is 6 CPUs, 6 GiB of memory, internet allowed, no published ports, and no browser. Custom changes the coding agent, internet access, published guest ports, CPU, or memory. Alternate image configuration remains available through the configuration and CLI, not this onboarding screen.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. The default is 6 CPUs, 6 GiB of memory, internet allowed, no published ports, and no browser. Custom changes the coding agent, internet access, published guest ports, CPU, or memory. Alternate image configuration remains available through the configuration and CLI, not this onboarding screen. The environment stage presents one bounded question group at a time so the form never grows beyond the terminal viewport.
 2. Review one concise approval screen containing the effective Ubuntu environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default command or authority grant. Routine internal digests, discovery facts, and provenance priorities are omitted. Overflow remains complete, bounded, and must be viewed before approval.
 3. Verify the runtime, persist configuration and approval, prepare the Standard image when needed, and open the workspace dashboard.
 
@@ -174,22 +174,20 @@ The TUI creation form is:
 ```text
 Create workspace
 
-Name
+Workspace name
   feature-a
 
-Starting point
+Starting from
   feat/branch-1 @ abc123
 
-Default agent
-  OMP — inherited from project
+Coding assistant
+  OMP — project default
 
+Include local changes
+  [ ] Off — reviewed final working-tree content
 
-Snapshot local changes
-  [ ]
-Container
-  dsx-tracking-chrome-feature-a-workspace-a81f2c
-
-[Create and open]  [Create in background]
+> [Create and open a shell]
+  [Create in background]
 ```
 
 The form contains:
@@ -198,7 +196,7 @@ The form contains:
 - The real host source branch and revision.
 - An agent selector populated from `agents.allowed`.
 - The project default agent preselected.
-- An optional **Snapshot local changes** checkbox, defaulting to off.
+- An optional **Include local changes** choice, defaulting to off and using the separately reviewed snapshot path when enabled.
 
 The form does not contain:
 
@@ -345,27 +343,27 @@ DSX resolves the current project before selecting a screen:
 The dashboard is:
 
 ```text
-DSX PROJECT — tracking-chrome-extension
+DSX  WORKSPACES — tracking-chrome-extension
 
 Local checkout
-  feat/branch-1 @ abc123
-  Clean
+  feat/branch-1 @ abc123 · Ready
 
-Workspaces
+Workspaces                 Selected workspace
+> feature-a  Running       feature-a  Running
+  feature-b  Stopped       Assistant: OMP
+  tests      Needs review  AWS: Disabled
 
-> feature-a    Running             OMP · Codex
-  feature-b    Stopped             Codex
-  tests        Needs resolution    OMP · Codex
-
-[c] Create workspace
-[Enter] Open
-[a] Open agent
-[u] Update from local checkout
-[s] Start/stop
-[r] Restart
-[g] Review Git changes
-[d] Remove
-[q] Quit
+                            Actions
+                            [c] New workspace
+                            [Enter] Open shell
+                            [a] Open coding assistant
+                            [u] Update from this Mac
+                            [s] Start/stop
+                            [r] Restart
+                            [g] Review Git changes
+                            [w] Enable/disable AWS
+                            [d] Remove
+                            [q] Quit
 ```
 
 Actions are state-aware. Restart and update are unavailable while another lifecycle mutation is active.
@@ -797,17 +795,18 @@ Browser support must be opt-in per agent invocation:
 dsx agent feature-a --browser
 ```
 
-The TUI agent form is:
+The TUI coding-assistant form is:
 
 ```text
-Open agent
+Open coding assistant
 
-Agent
+Coding assistant
   OMP
 
-[ ] Enable isolated browser
+Isolated browser
+  [ ] Off — this session only
 
-[Open agent]
+[Open coding assistant]
 ```
 
 When enabled, DSX must:
@@ -1016,9 +1015,12 @@ Existing DSX-owned resources from the prior resource model:
 - The TUI must respect:
   - `NO_COLOR`.
   - Terminal resizing.
-  - Narrow layouts.
+  - Narrow and short layouts.
   - Accessible form mode.
   - Plain-output fallback where required.
+- Every rendered line must fit the current terminal width. Each interactive screen must remain within the current terminal height through bounded viewports, pagination, or a compact focused-field layout; controls and confirmation authority must not be clipped.
+- Setup and dashboard content must use plain-language labels and visible keyboard actions without changing the underlying application intents.
+- On wide terminals the dashboard must show the workspace list and selected-workspace details side by side. On compact terminals it must prioritize the selected workspace, safety state, and currently available actions without hiding non-secret AWS status.
 - Repository names, paths, process labels, configuration text, and runtime output must be treated as untrusted terminal content and escaped before rendering.
 - Secret values must never be displayed, and secret input must be masked.
 

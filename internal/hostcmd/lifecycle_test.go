@@ -580,7 +580,7 @@ func TestDashboardLoadsCleanAndDirtyGitCheckoutSummary(t *testing.T) {
 	}
 	cleanModel := tui.NewDashboardModel(clean)
 	updated, _ := cleanModel.Update(tea.KeyPressMsg(tea.Key{Text: "c", Code: 'c'}))
-	if !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Starting point") {
+	if !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Starting from") {
 		t.Fatal("clean checkout did not open create form")
 	}
 	updateModel := tui.NewDashboardModel(clean)
@@ -601,7 +601,12 @@ func TestDashboardLoadsCleanAndDirtyGitCheckoutSummary(t *testing.T) {
 	}
 	dirtyModel := tui.NewDashboardModel(dirty)
 	updated, _ = dirtyModel.Update(tea.KeyPressMsg(tea.Key{Text: "c", Code: 'c'}))
-	if !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Starting point") || !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Snapshot local changes") {
+	dirtyDashboard := updated.(*tui.DashboardModel)
+	startView := dirtyDashboard.View().Content
+	dirtyDashboard.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	dirtyDashboard.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	snapshotView := dirtyDashboard.View().Content
+	if !strings.Contains(startView, "Starting from") || !strings.Contains(snapshotView, "Include local changes") {
 		t.Fatal("dirty checkout did not expose reviewed snapshot create")
 	}
 	dirtyModel = tui.NewDashboardModel(dirty)

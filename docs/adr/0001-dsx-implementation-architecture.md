@@ -555,22 +555,20 @@ The TUI creation form is:
 ```text
 Create workspace
 
-Name
+Workspace name
   feature-a
 
-Starting point
+Starting from
   feat/branch-1 @ abc123
 
-Default agent
-  OMP — inherited from project
+Coding assistant
+  OMP — project default
 
-Snapshot local changes
-  [ ]
+Include local changes
+  [ ] Off — reviewed final working-tree content
 
-Container
-  dsx-tracking-chrome-feature-a-workspace-a81f2c
-
-[Create and open]  [Create in background]
+> [Create and open a shell]
+  [Create in background]
 ```
 
 The form contains:
@@ -579,7 +577,7 @@ The form contains:
 - The real host source branch and revision.
 - An agent selector populated from `agents.allowed`.
 - The project default agent preselected.
-- An optional **Snapshot local changes** checkbox, defaulting to off.
+- An optional **Include local changes** choice, defaulting to off and entering the separately reviewed snapshot path when enabled.
 
 The form does not contain:
 
@@ -850,17 +848,18 @@ Browser support is enabled only for an individual agent invocation:
 dsx agent feature-a --browser
 ```
 
-The TUI agent form is:
+The TUI coding-assistant form is:
 
 ```text
-Open agent
+Open coding assistant
 
-Agent
+Coding assistant
   OMP
 
-[ ] Enable isolated browser
+Isolated browser
+  [ ] Off — this session only
 
-[Open agent]
+[Open coding assistant]
 ```
 
 When enabled, DSX must:
@@ -1114,27 +1113,27 @@ When stdin and stdout are interactive terminals, bare `dsx` launches a TUI in th
 The workspace dashboard is:
 
 ```text
-DSX PROJECT — tracking-chrome-extension
+DSX  WORKSPACES — tracking-chrome-extension
 
 Local checkout
-  feat/branch-1 @ abc123
-  Clean
+  feat/branch-1 @ abc123 · Ready
 
-Workspaces
+Workspaces                 Selected workspace
+> feature-a  Running       feature-a  Running
+  feature-b  Stopped       Assistant: OMP
+  tests      Needs review  AWS: Disabled
 
-> feature-a    Running             OMP · Codex
-  feature-b    Stopped             Codex
-  tests        Needs resolution    OMP · Codex
-
-[c] Create workspace
-[Enter] Open
-[a] Open agent
-[u] Update from local checkout
-[s] Start/stop
-[r] Restart
-[g] Review Git changes
-[d] Remove
-[q] Quit
+                            Actions
+                            [c] New workspace
+                            [Enter] Open shell
+                            [a] Open coding assistant
+                            [u] Update from this Mac
+                            [s] Start/stop
+                            [r] Restart
+                            [g] Review Git changes
+                            [w] Enable/disable AWS
+                            [d] Remove
+                            [q] Quit
 ```
 
 Actions are state-aware:
@@ -1170,8 +1169,8 @@ TUI actions ───────────┘
 
 Onboarding uses three presentation stages:
 
-1. A first screen offers only **Ubuntu — Default settings** and **Ubuntu — Custom**. The default applies 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom changes the agent, network, ports, CPU, or memory. Other image sources remain valid configuration and CLI inputs but are not offered by this TUI.
-2. A single concise review screen shows the effective environment and every non-default executable or authority-bearing detail. Routine internal digests, project discovery facts, and provenance priorities are omitted, while the complete executable hash, commands, mounts, credential imports, network grants, ports, and volumes remain reviewable. Overflow scrolls within the same screen and approval remains locked until its tail is visible.
+1. A first stage offers only **Ubuntu — Default settings** and **Ubuntu — Custom**. The default applies 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom changes the agent, network, ports, CPU, or memory. Other image sources remain valid configuration and CLI inputs but are not offered by this TUI. Huh presents one bounded question group at a time inside a viewport sized from the terminal after header, step, panel, and help chrome are reserved.
+2. A single concise review screen shows the effective environment and every non-default executable or authority-bearing detail. Routine internal digests, project discovery facts, and provenance priorities are omitted, while the complete executable hash, commands, mounts, credential imports, network grants, ports, and volumes remain reviewable. Overflow is paginated within the same screen and approval remains locked until its tail is visible.
 3. A bounded progress screen performs runtime preflight, persistence, Standard-image preparation, and dashboard transition.
 The setup flow performs detection and planning without mutation. Final confirmation first performs a read-only Apple container-system status check. A missing CLI or any service state other than `running` fails before configuration or approval persistence.
 
@@ -1185,7 +1184,9 @@ The TUI:
 - Sanitizes untrusted repository names, paths, configuration text, process labels, and runtime output.
 - Strips or escapes ANSI and control sequences.
 - Respects `NO_COLOR`.
-- Supports narrow terminals and resize events.
+- Derives content width and bounded screen height from every resize event; it never relies on terminal soft wrapping.
+- Uses a side-by-side workspace-list/selected-workspace dashboard on wide terminals and a compact selected-workspace/action surface on narrow or short terminals.
+- Uses focused-field compact forms and bounded review/progress content rather than clipping controls below the viewport.
 - Restores terminal state on normal exit, cancellation, recoverable errors, and child-process handoff.
 - Exits its alternate screen before handing the terminal to an interactive guest or agent process.
 - May restore the dashboard after the child exits.

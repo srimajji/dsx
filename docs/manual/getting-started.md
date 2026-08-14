@@ -72,8 +72,8 @@ $ dsx init
 
 The setup flow has three steps:
 
-1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default means Codex, 6 CPUs, 6 GiB, network allowed, no published ports, and no browser. Custom exposes the coding assistant, internet access, ports, CPU, and memory.
-2. Review and approve one concise screen. DSX shows the effective environment and any non-default commands, mounts, credentials, network grants, ports, or volumes. It hides routine implementation digests and discovery noise while retaining the executable hash and every authority-bearing detail.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default means Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser session. Custom exposes the coding assistant, internet access, ports, CPU, and memory. DSX asks one bounded group of questions at a time, so the form and its controls stay inside the terminal.
+2. Review and approve one concise screen. DSX shows the effective environment and any non-default commands, mounts, credentials, network grants, ports, or volumes. It hides routine implementation digests and discovery noise while retaining the executable hash and every authority-bearing detail. Long reviews use complete, bounded pages; approval unlocks only after the final page.
 3. DSX verifies Apple Container, saves configuration and approval, prepares DSX Standard when needed, and opens the workspace dashboard.
 
 Alternate OCI and project images remain supported through configuration and CLI workflows, but are intentionally absent from onboarding.
@@ -154,12 +154,14 @@ In the TUI, press **c** on the dashboard. The create form contains only:
 
 - workspace name;
 - source branch and real parent revision;
-- an optional workspace default selected from `agents.allowed`; and
-- **Snapshot local changes**, which is off by default.
+- an optional workspace coding assistant selected from `agents.allowed`; and
+- **Include local changes**, which is off by default.
 
-Ordinary submission remains unavailable from a dirty checkout. Selecting **Snapshot local changes** opens a separate review showing the workspace, real parent, included and excluded content, rejection rules, and host non-mutation guarantee. No creation intent is emitted until that review is confirmed. Dirty dashboard update stays disabled and points to the explicit CLI command.
+Ordinary submission remains unavailable from a dirty checkout. Enabling **Include local changes** opens a separate snapshot review showing the workspace, real parent, included and excluded content, rejection rules, and host non-mutation guarantee. No creation intent is emitted until that review is confirmed. Dirty dashboard update stays disabled and points to the explicit CLI command.
 
-Choose **Create and open** to keep a bounded creation-progress screen visible until the workspace is ready, then hand the terminal directly to its shell. Choose **Create in background** to show the same progress without attaching a shell. DSX does not expose an idle host prompt between creation and shell attachment.
+Choose **Create and open a shell** to keep a bounded creation-progress screen visible until the workspace is ready, then hand the terminal directly to its shell. Choose **Create in background** to show the same progress without attaching a shell. DSX does not expose an idle host prompt between creation and shell attachment.
+
+The dashboard adapts to the terminal. Wide terminals place the workspace list beside the selected workspace’s status and actions. Narrow or short terminals show a compact selected-workspace view with the same state-aware actions. Text wraps to terminal cells, forms focus one field at a time when space is tight, and review/progress controls remain inside the viewport.
 
 ## Operate a workspace
 

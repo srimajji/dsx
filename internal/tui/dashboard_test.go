@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,11 +45,13 @@ func TestDashboardRendersPeerWorkspaceStatesAndAgents(t *testing.T) {
 		{Name: "feature-b", State: "stopped", DefaultAgent: "codex"},
 		{Name: "feature-a", State: "running"},
 	}
-	view := ansi.Strip(NewDashboardModel(data).View().Content)
+	model := NewDashboardModel(data)
+	model.Update(tea.WindowSizeMsg{Width: 128, Height: 40})
+	view := ansi.Strip(model.View().Content)
 	for _, expected := range []string{
-		"Local checkout", "feat/branch-1 @ abc123", "Clean", "feature-a", "Running",
-		"feature-b", "Stopped", "tests", "Needs resolution", "Default: OMP (project default)",
-		"Default: Codex", "Approved: Codex · OMP",
+		"Local checkout", "feat/branch-1 @ abc123", "Ready", "feature-a", "Running",
+		"feature-b", "Stopped", "tests", "Needs resolution", "Opens with OMP",
+		"Opens with Codex", "Available: Codex · OMP",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("dashboard omitted %q:\n%s", expected, view)
@@ -65,13 +68,13 @@ func TestDashboardActionsAreStateAware(t *testing.T) {
 		present []string
 		absent  []string
 	}{
-		{state: "running", present: []string{"[Enter] Open", "[a] Open agent", "[u] Update", "[s] Stop", "[r] Restart", "[g] Review Git", "[d] Remove"}},
-		{state: "stopped", present: []string{"[Enter] Open", "[u] Update", "[s] Start", "[r] Restart", "[g] Review Git", "[d] Remove"}, absent: []string{"[a] Open agent"}},
-		{state: "needs_resolution", present: []string{"[Enter] Open", "[s] Stop", "[g] Review Git", "[d] Remove"}, absent: []string{"[a] Open agent", "[u] Update", "[r] Restart"}},
-		{state: "failed", present: []string{"[g] Review Git", "[d] Remove"}, absent: []string{"[Enter] Open", "[a] Open agent", "[u] Update", "[s] Start", "[r] Restart"}},
-		{state: "planned", present: []string{"Update unavailable", "Restart unavailable"}, absent: []string{"[Enter] Open", "[a] Open agent", "[s] Start", "[g] Review Git", "[d] Remove"}},
-		{state: "creating", present: []string{"Update unavailable", "Restart unavailable"}, absent: []string{"[Enter] Open", "[a] Open agent", "[s] Start", "[g] Review Git", "[d] Remove"}},
-		{state: "cleaning", present: []string{"Update unavailable", "Restart unavailable"}, absent: []string{"[Enter] Open", "[a] Open agent", "[s] Start", "[g] Review Git", "[d] Remove"}},
+		{state: "running", present: []string{"[Enter] Open shell", "[a] Open coding assistant", "[u] Update from this Mac", "[s] Stop", "[r] Restart", "[g] Review Git changes", "[d] Remove"}},
+		{state: "stopped", present: []string{"[Enter] Open shell", "[u] Update from this Mac", "[s] Start", "[r] Restart", "[g] Review Git changes", "[d] Remove"}, absent: []string{"[a] Open coding assistant"}},
+		{state: "needs_resolution", present: []string{"[Enter] Open shell", "[s] Stop", "[g] Review Git changes", "[d] Remove"}, absent: []string{"[a] Open coding assistant", "[u] Update from this Mac", "[r] Restart"}},
+		{state: "failed", present: []string{"[g] Review Git changes", "[d] Remove"}, absent: []string{"[Enter] Open shell", "[a] Open coding assistant", "[u] Update from this Mac", "[s] Start", "[r] Restart"}},
+		{state: "planned", present: []string{"A lifecycle change is running"}, absent: []string{"[Enter] Open shell", "[a] Open coding assistant", "[s] Start", "[g] Review Git changes", "[d] Remove"}},
+		{state: "creating", present: []string{"A lifecycle change is running"}, absent: []string{"[Enter] Open shell", "[a] Open coding assistant", "[s] Start", "[g] Review Git changes", "[d] Remove"}},
+		{state: "cleaning", present: []string{"A lifecycle change is running"}, absent: []string{"[Enter] Open shell", "[a] Open coding assistant", "[s] Start", "[g] Review Git changes", "[d] Remove"}},
 	}
 	for _, test := range tests {
 		t.Run(test.state, func(t *testing.T) {
@@ -107,10 +110,9 @@ func TestDashboardDisablesUpdateAndRestartDuringMutation(t *testing.T) {
 	data.Workspaces[0].MutationActive = true
 	model := NewDashboardModel(data)
 	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Update unavailable while lifecycle change runs", "Restart unavailable while lifecycle change runs"} {
-		if !strings.Contains(view, expected) {
-			t.Fatalf("mutating view omitted %q:\n%s", expected, view)
-		}
+	normalizedView := strings.Join(strings.Fields(view), " ")
+	if !strings.Contains(normalizedView, "A lifecycle change is running. Conflicting actions are temporarily unavailable.") {
+		t.Fatalf("mutating view omitted lifecycle guidance:\n%s", view)
 	}
 	for _, key := range []string{"u", "r"} {
 		updated, command := dashboardPress(t, NewDashboardModel(data), textKey(key))
@@ -130,15 +132,15 @@ func TestDashboardAllowsReviewedCreateButBlocksOrdinaryUpdateForDirtyCheckout(t 
 	view := ansi.Strip(model.View().Content)
 	normalizedView := strings.Join(strings.Fields(strings.ReplaceAll(view, "│", " ")), " ")
 	for _, expected := range []string{
-		"Not clean — ordinary create/update require a commit; reviewed snapshots are available.",
-		"[c] Create workspace",
-		"Update unavailable — use dsx workspace update NAME --snapshot",
+		"feat/branch-1 @ abc123 · Local files changed",
+		"[c] New workspace",
+		"Update needs a clean checkout. Commit local work, or use dsx workspace update feature-a --snapshot.",
 	} {
 		if !strings.Contains(normalizedView, expected) {
 			t.Fatalf("dirty checkout view omitted %q:\nnormalized=%q\n%s", expected, normalizedView, view)
 		}
 	}
-	if strings.Contains(normalizedView, "Create unavailable") {
+	if strings.Contains(normalizedView, "New workspace unavailable") {
 		t.Fatalf("dirty checkout incorrectly disabled reviewed create:\n%s", view)
 	}
 	updated, command := dashboardPress(t, model, textKey("c"))
@@ -159,7 +161,7 @@ func TestDashboardFailsClosedWhenCheckoutIdentityIsUnavailable(t *testing.T) {
 	data.Branch, data.Revision = "", ""
 	model := NewDashboardModel(data)
 	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Local checkout", "Unavailable", "Source branch or revision unavailable", "Create unavailable", "Update unavailable"} {
+	for _, expected := range []string{"Local checkout", "Unavailable", "Source unavailable", "New workspace unavailable", "Update is unavailable"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("missing checkout view omitted %q:\n%s", expected, view)
 		}
@@ -179,8 +181,15 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 	for _, open := range []bool{true, false} {
 		model := NewDashboardModel(dashboardFixture("running"))
 		model, _ = dashboardPress(t, model, textKey("c"))
-		view := ansi.Strip(model.View().Content)
-		for _, expected := range []string{"Create workspace", "Name", "Starting point", "feat/branch-1 @ abc123", "Default agent", "OMP — inherited from project", "Snapshot local changes", "Create and open", "Create in background"} {
+		var views strings.Builder
+		for focus := range createFormFocusCount {
+			model.focus = focus
+			views.WriteString(ansi.Strip(model.View().Content))
+			views.WriteByte('\n')
+		}
+		model.focus = 0
+		view := views.String()
+		for _, expected := range []string{"Create workspace", "Workspace name", "feat/branch-1 @ abc123", "Coding assistant", "OMP — project default", "Include local changes", "Create and open a shell", "Create in background"} {
 			if !strings.Contains(view, expected) {
 				t.Fatalf("create form omitted %q:\n%s", expected, view)
 			}
@@ -281,7 +290,7 @@ func TestDirtyCreateWithoutSnapshotStaysInForm(t *testing.T) {
 	if _, found := model.Intent(); found {
 		t.Fatal("unchecked dirty create emitted an intent")
 	}
-	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "Select Snapshot local changes to create from a dirty checkout.") {
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "Enable Include local changes to create from a dirty checkout.") {
 		t.Fatalf("unchecked dirty create omitted guidance:\n%s", view)
 	}
 }
@@ -289,7 +298,7 @@ func TestDashboardVSCodeAttachOnlyForRunningWorkspace(t *testing.T) {
 	data := dashboardFixture("running")
 	data.Workspaces = []DashboardWorkspace{{Name: "running", State: "running"}, {Name: "stopped", State: "stopped"}}
 	model := NewDashboardModel(data)
-	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "[v] Attach with VS Code (experimental)") {
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "[v] Open in VS Code (experimental)") {
 		t.Fatalf("running actions omit VS Code attach: %s", view)
 	}
 	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
@@ -298,7 +307,7 @@ func TestDashboardVSCodeAttachOnlyForRunningWorkspace(t *testing.T) {
 	}
 	model = NewDashboardModel(data)
 	model.selected = 1
-	if view := ansi.Strip(model.View().Content); strings.Contains(view, "[v] Attach with VS Code (experimental)") {
+	if view := ansi.Strip(model.View().Content); strings.Contains(view, "[v] Open in VS Code (experimental)") {
 		t.Fatalf("stopped actions expose VS Code attach: %s", view)
 	}
 }
@@ -354,8 +363,15 @@ func TestAgentFormContainsOnlyAgentAndSessionBrowser(t *testing.T) {
 	data.Workspaces[0].DefaultAgent = "codex"
 	model := NewDashboardModel(data)
 	model, _ = dashboardPress(t, model, textKey("a"))
-	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Open agent", "Agent", "Codex", "Enable isolated browser for this session only"} {
+	var views strings.Builder
+	for focus := range agentFormFocusCount {
+		model.focus = focus
+		views.WriteString(ansi.Strip(model.View().Content))
+		views.WriteByte('\n')
+	}
+	model.focus = 0
+	view := views.String()
+	for _, expected := range []string{"Open coding assistant", "Coding assistant", "Codex", "Isolated browser", "assistant session"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("agent form omitted %q:\n%s", expected, view)
 		}
@@ -505,6 +521,58 @@ func TestDashboardAWSUnavailableGuidanceIsSafeAndCancellationHasNoIntent(t *test
 	}
 	if intent, found := model.Intent(); found {
 		t.Fatalf("AWS cancellation emitted %#v", intent)
+	}
+}
+
+func TestDashboardScreensFitTerminalAndUseWideMasterDetail(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	data := dashboardFixture("running")
+	data.AWSCapability = "host-default"
+	data.Workspaces[0].AWSHostAvailability = "available"
+	data.Workspaces[0].AWSMirrorHealth = "current"
+	screens := []struct {
+		name   string
+		screen dashboardScreen
+	}{
+		{name: "home", screen: dashboardHome},
+		{name: "create", screen: dashboardCreate},
+		{name: "snapshot review", screen: dashboardCreateSnapshotReview},
+		{name: "agent", screen: dashboardAgent},
+		{name: "Git", screen: dashboardGit},
+		{name: "remove", screen: dashboardRemove},
+		{name: "AWS", screen: dashboardAWS},
+	}
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 40, Height: 18},
+		{Width: 80, Height: 24},
+		{Width: 128, Height: 40},
+	} {
+		for _, screen := range screens {
+			t.Run(fmt.Sprintf("%s/%dx%d", screen.name, size.Width, size.Height), func(t *testing.T) {
+				model := NewDashboardModel(data)
+				model.screen = screen.screen
+				model.name = "feature-new"
+				model.Update(size)
+				view := ansi.Strip(model.View().Content)
+				assertLinesFit(t, view, size.Width)
+				if height := len(strings.Split(strings.TrimRight(view, "\n"), "\n")); height > size.Height {
+					t.Fatalf("%s uses %d lines in a %dx%d terminal:\n%s", screen.name, height, size.Width, size.Height, view)
+				}
+			})
+		}
+	}
+
+	wide := NewDashboardModel(data)
+	wide.Update(tea.WindowSizeMsg{Width: 128, Height: 40})
+	foundMasterDetailRow := false
+	for _, line := range strings.Split(ansi.Strip(wide.View().Content), "\n") {
+		if strings.Contains(line, "Workspaces") && strings.Contains(line, "Selected workspace") {
+			foundMasterDetailRow = true
+			break
+		}
+	}
+	if !foundMasterDetailRow {
+		t.Fatalf("wide dashboard did not render workspace list and selected details side by side:\n%s", wide.View().Content)
 	}
 }
 
