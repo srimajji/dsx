@@ -54,6 +54,88 @@ func TestPerformWorkspaceRebaseSuccessAndConflictPreserveBackup(t *testing.T) {
 	}
 }
 
+func TestPerformWorkspaceRebaseMovesAgentCommitsBetweenSyntheticSources(t *testing.T) {
+	host := filepath.Join(t.TempDir(), "host")
+	workspaceRunGit(t, "", "init", "--quiet", "--initial-branch=main", host)
+	workspaceRunGit(t, host, "config", "user.name", "DSX Test")
+	workspaceRunGit(t, host, "config", "user.email", "dsx@example.invalid")
+	if err := os.WriteFile(filepath.Join(host, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRunGit(t, host, "add", "base.txt")
+	workspaceRunGit(t, host, "commit", "-m", "base")
+	base := strings.TrimSpace(workspaceRunGit(t, host, "rev-parse", "HEAD"))
+
+	if err := os.WriteFile(filepath.Join(host, "captured.txt"), []byte("snapshot one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRunGit(t, host, "add", "captured.txt")
+	oldTree := strings.TrimSpace(workspaceRunGit(t, host, "write-tree"))
+	oldSynthetic := strings.TrimSpace(workspaceRunGit(t, host, "commit-tree", oldTree, "-p", base, "-m", "snapshot one"))
+	workspaceRunGit(t, host, "update-ref", "refs/heads/snapshot-old", oldSynthetic)
+	workspaceRunGit(t, host, "reset", "--hard", "main")
+
+	guest := filepath.Join(t.TempDir(), "guest")
+	workspaceRunGit(t, "", "clone", "--quiet", host, guest)
+	workspaceRunGit(t, guest, "config", "user.name", "DSX Test")
+	workspaceRunGit(t, guest, "config", "user.email", "dsx@example.invalid")
+	workspaceRunGit(t, guest, "checkout", "--quiet", "-b", "dsx/alpha", "origin/snapshot-old")
+	if err := os.WriteFile(filepath.Join(guest, "agent.txt"), []byte("agent result\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRunGit(t, guest, "add", "agent.txt")
+	workspaceRunGit(t, guest, "commit", "-m", "agent result")
+	before := strings.TrimSpace(workspaceRunGit(t, guest, "rev-parse", "HEAD"))
+
+	if err := os.WriteFile(filepath.Join(host, "real.txt"), []byte("real head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRunGit(t, host, "add", "real.txt")
+	workspaceRunGit(t, host, "commit", "-m", "real head advance")
+	newHead := strings.TrimSpace(workspaceRunGit(t, host, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(host, "captured.txt"), []byte("snapshot two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRunGit(t, host, "add", "captured.txt")
+	newTree := strings.TrimSpace(workspaceRunGit(t, host, "write-tree"))
+	newSynthetic := strings.TrimSpace(workspaceRunGit(t, host, "commit-tree", newTree, "-p", newHead, "-m", "snapshot two"))
+	privateRef := "refs/dsx/private/source/11111111111111111111111111111111"
+	workspaceRunGit(t, host, "update-ref", privateRef, newSynthetic)
+	bundle := filepath.Join(t.TempDir(), "snapshot.bundle")
+	workspaceRunGit(t, host, "bundle", "create", bundle, privateRef)
+	if err := os.Chmod(bundle, gitx.SourceBundleMode); err != nil {
+		t.Fatal(err)
+	}
+
+	record := state.GitRecord{
+		GuestPath: guest, SourceBranch: "main", SourceRevision: oldSynthetic,
+		SourceSnapshot: true, SourceHeadRevision: base, SourceTree: oldTree, WorkspaceBranch: "dsx/alpha",
+	}
+	artifact := gitx.SourceArtifact{
+		SourceBranch: "main", SourceRevision: newSynthetic, SourceSnapshot: true,
+		SourceHeadRevision: newHead, SourceTree: newTree, BundleRef: privateRef,
+	}
+	result, err := performWorkspaceRebase(context.Background(), "alpha", record, artifact, bundle, workspaceTestGitExecutor(t))
+	if err != nil {
+		t.Fatalf("synthetic performWorkspaceRebase() error = %v", err)
+	}
+	if result.Conflict || result.ResultCommit == before {
+		t.Fatalf("synthetic rebase result = %#v", result)
+	}
+	if backup := strings.TrimSpace(workspaceRunGit(t, guest, "rev-parse", result.BackupRef)); backup != before {
+		t.Fatalf("synthetic rebase backup = %s, want %s", backup, before)
+	}
+	workspaceRunGit(t, guest, "merge-base", "--is-ancestor", newSynthetic, result.ResultCommit)
+	captured, err := os.ReadFile(filepath.Join(guest, "captured.txt"))
+	if err != nil || string(captured) != "snapshot two\n" {
+		t.Fatalf("rebased snapshot content = %q, %v", captured, err)
+	}
+	agent, err := os.ReadFile(filepath.Join(guest, "agent.txt"))
+	if err != nil || string(agent) != "agent result\n" {
+		t.Fatalf("rebased agent content = %q, %v", agent, err)
+	}
+}
+
 func TestInspectWorkspaceRebaseResolutionContinueAbortAndMissingBackup(t *testing.T) {
 	for _, test := range []struct {
 		name   string

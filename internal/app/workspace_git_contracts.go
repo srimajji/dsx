@@ -10,6 +10,7 @@ import (
 type WorkspaceUpdateRequest struct {
 	Root      string
 	Workspace model.WorkspaceName
+	Snapshot  bool
 }
 
 type GitStatusRequest struct {

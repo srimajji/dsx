@@ -29,6 +29,20 @@ func (service *Service) PrepareApply(ctx context.Context, request ApplyRequest) 
 	if err := validateDigest(request.TrackedFingerprint); err != nil {
 		return nil, fmt.Errorf("tracked fingerprint: %w", err)
 	}
+	if request.SourceSnapshot {
+		if err := validateFullOID(request.SourceHeadRevision, "source head revision"); err != nil {
+			return nil, err
+		}
+		if err := validateFullOID(request.SourceTree, "source tree"); err != nil {
+			return nil, err
+		}
+		if len(request.SourceHeadRevision) != len(request.SourceRevision) || len(request.SourceTree) != len(request.SourceRevision) {
+			return nil, errors.New("snapshot source provenance uses inconsistent Git object formats")
+		}
+		if err := validateTempRoot(request.TempRoot); err != nil {
+			return nil, err
+		}
+	}
 	workspace, err := validateFetchedRef(request.FetchedRef)
 	if err != nil {
 		return nil, err
@@ -36,7 +50,7 @@ func (service *Service) PrepareApply(ctx context.Context, request ApplyRequest) 
 	if err := validateWorkspace(workspace); err != nil {
 		return nil, err
 	}
-	fetchedCommit, changedPaths, err := service.validateApplyState(ctx, request, "", nil)
+	hostHead, fetchedCommit, changedPaths, err := service.validateApplyState(ctx, request, "", "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -45,23 +59,24 @@ func (service *Service) PrepareApply(ctx context.Context, request ApplyRequest) 
 		return nil, fmt.Errorf("capture apply rollback state: %w", err)
 	}
 	return &applyTransaction{
-		service: service, request: request, fetchedCommit: fetchedCommit,
+		service: service, request: request, preparedHostHead: hostHead, fetchedCommit: fetchedCommit,
 		changedPaths: changedPaths, rollback: rollback,
 	}, nil
 }
 
 type applyTransaction struct {
-	mu              sync.Mutex
-	service         *Service
-	request         ApplyRequest
-	fetchedCommit   string
-	changedPaths    []string
-	rollback        *applyRollback
-	mutationStarted bool
-	committed       bool
+	mu               sync.Mutex
+	service          *Service
+	request          ApplyRequest
+	preparedHostHead string
+	fetchedCommit    string
+	changedPaths     []string
+	rollback         *applyRollback
+	mutationStarted  bool
+	committed        bool
 }
 
-func (transaction *applyTransaction) Commit(ctx context.Context) (ApplyResult, error) {
+func (transaction *applyTransaction) Commit(ctx context.Context) (result ApplyResult, returnErr error) {
 	transaction.mu.Lock()
 	defer transaction.mu.Unlock()
 	if transaction.committed {
@@ -73,7 +88,14 @@ func (transaction *applyTransaction) Commit(ctx context.Context) (ApplyResult, e
 	if err := transaction.service.validateLocalConfiguration(ctx, transaction.request.Repository.HostPath); err != nil {
 		return ApplyResult{}, fmt.Errorf("revalidate repository-local Git configuration: %w", err)
 	}
-	if _, _, err := transaction.service.validateApplyState(ctx, transaction.request, transaction.fetchedCommit, transaction.changedPaths); err != nil {
+	currentHead, _, _, err := transaction.service.validateApplyState(
+		ctx,
+		transaction.request,
+		transaction.preparedHostHead,
+		transaction.fetchedCommit,
+		transaction.changedPaths,
+	)
+	if err != nil {
 		return ApplyResult{}, fmt.Errorf("revalidate prepared apply at mutation boundary: %w", err)
 	}
 	if err := transaction.service.validateRepositoryIdentity(ctx, transaction.request.Repository); err != nil {
@@ -85,11 +107,59 @@ func (transaction *applyTransaction) Commit(ctx context.Context) (ApplyResult, e
 	if err := transaction.service.validateRepositoryIdentity(ctx, transaction.request.Repository); err != nil {
 		return ApplyResult{}, fmt.Errorf("revalidate repository identity immediately before mutation: %w", err)
 	}
+
+	mergeTarget := transaction.fetchedCommit
+	var mergeEnvironment []string
+	var quarantine *gitQuarantine
+	if transaction.request.SourceSnapshot {
+		quarantine, err = transaction.service.newGitQuarantine(ctx, transaction.request.Repository, transaction.request.TempRoot, false)
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("create snapshot apply quarantine: %w", err)
+		}
+		defer func() { returnErr = errors.Join(returnErr, quarantine.Close()) }()
+		resultTree, treeErr := transaction.service.resolveTree(ctx, transaction.request.Repository.HostPath, transaction.fetchedCommit)
+		if treeErr != nil {
+			return ApplyResult{}, fmt.Errorf("resolve fetched result tree: %w", treeErr)
+		}
+		timestamp, timestampErr := transaction.service.commitTimestamp(ctx, transaction.request.Repository.HostPath, currentHead)
+		if timestampErr != nil {
+			return ApplyResult{}, timestampErr
+		}
+		mergeEnvironment = quarantine.environment()
+		commitEnvironment := appendSnapshotCommitEnvironment(mergeEnvironment, timestamp)
+		bridgeBytes, bridgeErr := transaction.service.gitOutputWithEnvironment(
+			ctx,
+			transaction.request.Repository.HostPath,
+			commitEnvironment,
+			"commit-tree", resultTree, "-p", currentHead, "-m", "DSX snapshot result apply",
+		)
+		if bridgeErr != nil {
+			return ApplyResult{}, fmt.Errorf("create snapshot apply bridge commit: %w", bridgeErr)
+		}
+		mergeTarget = strings.TrimSpace(string(bridgeBytes))
+		if err := validateFullOID(mergeTarget, "snapshot apply bridge commit"); err != nil {
+			return ApplyResult{}, err
+		}
+		bridgePaths, pathErr := transaction.service.changedPathsWithEnvironment(
+			ctx,
+			transaction.request.Repository.HostPath,
+			currentHead,
+			mergeTarget,
+			mergeEnvironment,
+		)
+		if pathErr != nil {
+			return ApplyResult{}, pathErr
+		}
+		if !equalStrings(bridgePaths, transaction.changedPaths) {
+			return ApplyResult{}, errors.New("snapshot apply bridge paths differ from prepared workspace result paths")
+		}
+	}
+
 	transaction.mutationStarted = true
-	mergeErr := transaction.service.runGit(ctx, transaction.request.Repository.HostPath, nil,
+	mergeErr := transaction.service.runGitWithEnvironment(ctx, transaction.request.Repository.HostPath, mergeEnvironment, nil,
 		"-c", "rerere.enabled=false",
 		"-c", "rerere.autoupdate=false",
-		"merge", "--squash", "--no-commit", transaction.fetchedCommit,
+		"merge", "--squash", "--no-commit", mergeTarget,
 	)
 	if err := transaction.rollback.captureMutatedState(); err != nil {
 		return ApplyResult{}, errors.Join(
@@ -104,8 +174,8 @@ func (transaction *applyTransaction) Commit(ctx context.Context) (ApplyResult, e
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("resolve host HEAD after squash apply: %w", err)
 	}
-	if current != transaction.request.SourceRevision {
-		return ApplyResult{}, fmt.Errorf("host HEAD changed during squash apply: got %q, want %q", current, transaction.request.SourceRevision)
+	if current != transaction.preparedHostHead {
+		return ApplyResult{}, fmt.Errorf("host HEAD changed during squash apply: got %q, want %q", current, transaction.preparedHostHead)
 	}
 	pathsOutput, err := transaction.service.gitOutput(ctx, transaction.request.Repository.HostPath, "diff", "--cached", "--name-only", "-z", "--")
 	if err != nil {
@@ -140,59 +210,104 @@ func (transaction *applyTransaction) Rollback(ctx context.Context) error {
 	return nil
 }
 
-func (service *Service) validateApplyState(ctx context.Context, request ApplyRequest, expectedCommit string, expectedPaths []string) (string, []string, error) {
+func (service *Service) validateApplyState(
+	ctx context.Context,
+	request ApplyRequest,
+	expectedHostHead string,
+	expectedCommit string,
+	expectedPaths []string,
+) (string, string, []string, error) {
 	if err := service.validateWorkTree(ctx, request.Repository.HostPath); err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	current, err := service.resolveCommit(ctx, request.Repository.HostPath, "HEAD")
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve host HEAD: %w", err)
+		return "", "", nil, fmt.Errorf("resolve host HEAD: %w", err)
 	}
-	if current != request.SourceRevision {
-		return "", nil, fmt.Errorf("host advanced from source revision %s to %s", request.SourceRevision, current)
+	if expectedHostHead != "" && current != expectedHostHead {
+		return "", "", nil, fmt.Errorf("host HEAD changed from %s to %s after apply preparation", expectedHostHead, current)
+	}
+	if !request.SourceSnapshot && current != request.SourceRevision {
+		return "", "", nil, fmt.Errorf("host advanced from source revision %s to %s", request.SourceRevision, current)
+	}
+	unmerged, err := service.gitOutput(ctx, request.Repository.HostPath, "ls-files", "--unmerged", "-z")
+	if err != nil {
+		return "", "", nil, fmt.Errorf("inspect host unmerged paths: %w", err)
+	}
+	if len(unmerged) != 0 {
+		return "", "", nil, errors.New("host repository has unmerged paths")
 	}
 	state, err := service.inspectRepositoryState(ctx, request.Repository.HostPath)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	if state.trackedDirty {
-		return "", nil, errors.New("host index or tracked work tree is not clean")
+		return "", "", nil, errors.New("host index or tracked work tree is not clean")
+	}
+	if request.SourceSnapshot {
+		currentTree, treeErr := service.resolveTree(ctx, request.Repository.HostPath, current)
+		if treeErr != nil {
+			return "", "", nil, fmt.Errorf("resolve host HEAD tree: %w", treeErr)
+		}
+		if currentTree != request.SourceTree {
+			return "", "", nil, errors.New("host HEAD tree does not match snapshot source tree; update the workspace snapshot or commit the captured baseline before apply")
+		}
 	}
 	fingerprint, err := service.trackedFingerprint(ctx, request.Repository.HostPath)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	if fingerprint != request.TrackedFingerprint {
-		return "", nil, errors.New("host tracked fingerprint changed since source preparation")
+		return "", "", nil, errors.New("host tracked fingerprint changed since source preparation")
 	}
 	fetchedCommit, err := service.resolveCommit(ctx, request.Repository.HostPath, request.FetchedRef)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve fetched result ref: %w", err)
+		return "", "", nil, fmt.Errorf("resolve fetched result ref: %w", err)
 	}
 	if fetchedCommit != request.ExpectedCommit {
-		return "", nil, fmt.Errorf("fetched result ref resolved to %s, want recorded result %s", fetchedCommit, request.ExpectedCommit)
+		return "", "", nil, fmt.Errorf("fetched result ref resolved to %s, want recorded result %s", fetchedCommit, request.ExpectedCommit)
 	}
 	if expectedCommit != "" && fetchedCommit != expectedCommit {
-		return "", nil, fmt.Errorf("fetched result changed from %s to %s", expectedCommit, fetchedCommit)
+		return "", "", nil, fmt.Errorf("fetched result changed from %s to %s", expectedCommit, fetchedCommit)
+	}
+	if request.SourceSnapshot {
+		sourceCommit, sourceErr := service.resolveCommit(ctx, request.Repository.HostPath, request.SourceRevision)
+		if sourceErr != nil || sourceCommit != request.SourceRevision {
+			return "", "", nil, errors.Join(errors.New("resolve synthetic snapshot source from fetched result history"), sourceErr)
+		}
+		parent, parentErr := service.resolveCommit(ctx, request.Repository.HostPath, request.SourceRevision+"^")
+		if parentErr != nil {
+			return "", "", nil, fmt.Errorf("resolve snapshot source parent: %w", parentErr)
+		}
+		if parent != request.SourceHeadRevision {
+			return "", "", nil, fmt.Errorf("snapshot source parent %s does not match recorded host head %s", parent, request.SourceHeadRevision)
+		}
+		sourceTree, treeErr := service.resolveTree(ctx, request.Repository.HostPath, request.SourceRevision)
+		if treeErr != nil {
+			return "", "", nil, fmt.Errorf("resolve snapshot source tree: %w", treeErr)
+		}
+		if sourceTree != request.SourceTree {
+			return "", "", nil, fmt.Errorf("snapshot source tree %s does not match recorded tree %s", sourceTree, request.SourceTree)
+		}
 	}
 	if err := service.runGit(ctx, request.Repository.HostPath, nil, "merge-base", "--is-ancestor", request.SourceRevision, fetchedCommit); err != nil {
-		return "", nil, fmt.Errorf("fetched result is not descended from the prepared source: %w", err)
+		return "", "", nil, fmt.Errorf("fetched result is not descended from the prepared source: %w", err)
 	}
 	changedPaths, err := service.changedPaths(ctx, request.Repository.HostPath, request.SourceRevision, fetchedCommit)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	if expectedPaths != nil && !equalStrings(changedPaths, expectedPaths) {
-		return "", nil, errors.New("fetched result paths changed after apply preparation")
+		return "", "", nil, errors.New("fetched result paths changed after apply preparation")
 	}
 	for _, untracked := range state.untracked {
 		for _, changed := range changedPaths {
 			if gitPathsOverlap(untracked, changed) {
-				return "", nil, fmt.Errorf("untracked or ignored path %q collides with result path %q", untracked, changed)
+				return "", "", nil, fmt.Errorf("untracked or ignored path %q collides with result path %q", untracked, changed)
 			}
 		}
 	}
-	return fetchedCommit, changedPaths, nil
+	return current, fetchedCommit, changedPaths, nil
 }
 
 func equalStrings(left, right []string) bool {
@@ -219,7 +334,11 @@ func validateFetchedRef(ref string) (string, error) {
 }
 
 func (service *Service) changedPaths(ctx context.Context, repositoryPath, baseCommit, headCommit string) ([]string, error) {
-	output, err := service.gitOutput(ctx, repositoryPath, "diff", "--name-status", "-z", "--find-renames", baseCommit, headCommit, "--")
+	return service.changedPathsWithEnvironment(ctx, repositoryPath, baseCommit, headCommit, nil)
+}
+
+func (service *Service) changedPathsWithEnvironment(ctx context.Context, repositoryPath, baseCommit, headCommit string, environment []string) ([]string, error) {
+	output, err := service.gitOutputWithEnvironment(ctx, repositoryPath, environment, "diff", "--name-status", "-z", "--find-renames", baseCommit, headCommit, "--")
 	if err != nil {
 		return nil, fmt.Errorf("inspect result paths: %w", err)
 	}

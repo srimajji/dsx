@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/srimajji/dsx/internal/app"
+	"github.com/srimajji/dsx/internal/gitx"
 	"github.com/srimajji/dsx/internal/harness"
 	"github.com/srimajji/dsx/internal/model"
 	"github.com/srimajji/dsx/internal/plan"
@@ -267,14 +268,65 @@ func TestWorkspaceCommandsTargetExactNamedWorkspace(t *testing.T) {
 			t.Fatalf("%q exit=%d stderr=%q", command, exit, stderr.String())
 		}
 	}
-	if len(workspaces.creates) != 1 || workspaces.creates[0].Workspace != "feature-a" || workspaces.creates[0].Root != "/project" || workspaces.creates[0].DefaultAgent != "codex" {
+	if len(workspaces.creates) != 1 || workspaces.creates[0].Workspace != "feature-a" || workspaces.creates[0].Root != "/project" || workspaces.creates[0].DefaultAgent != "codex" || workspaces.creates[0].Snapshot {
 		t.Fatalf("create requests=%#v", workspaces.creates)
 	}
 	if len(workspaces.opens) != 1 || workspaces.opens[0].Workspace != "feature-a" || len(workspaces.starts) != 1 || workspaces.starts[0].Workspace != "feature-a" || len(workspaces.stops) != 1 || workspaces.stops[0].Workspace != "feature-a" || len(workspaces.restarts) != 1 || workspaces.restarts[0].Workspace != "feature-a" {
 		t.Fatalf("named lifecycle requests not exact: %#v %#v %#v %#v", workspaces.opens, workspaces.starts, workspaces.stops, workspaces.restarts)
 	}
-	if len(git.updates) != 1 || git.updates[0].Workspace != "feature-a" || len(workspaces.removes) != 1 || workspaces.removes[0].Workspace != "feature-a" || !workspaces.removes[0].Confirmed || !workspaces.removes[0].DiscardUnfetched {
+	if len(git.updates) != 1 || git.updates[0].Workspace != "feature-a" || git.updates[0].Snapshot || len(workspaces.removes) != 1 || workspaces.removes[0].Workspace != "feature-a" || !workspaces.removes[0].Confirmed || !workspaces.removes[0].DiscardUnfetched {
 		t.Fatalf("update=%#v remove=%#v", git.updates, workspaces.removes)
+	}
+}
+
+func TestWorkspaceSnapshotFlagsReachCreateAndUpdateServices(t *testing.T) {
+	workspaces := &workspaceStub{}
+	git := &gitStub{}
+	dispatcher := NewDispatcher(Dependencies{Workspaces: workspaces, Git: git})
+	for _, args := range [][]string{
+		{"workspace", "create", "dirty-work", "--root", "/project", "--snapshot"},
+		{"workspace", "update", "dirty-work", "--root", "/project", "--snapshot"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if exit := dispatcher.Execute(context.Background(), args, &stdout, &stderr); exit != 0 {
+			t.Fatalf("%q exit=%d stderr=%q", args, exit, stderr.String())
+		}
+	}
+	if len(workspaces.creates) != 1 || !workspaces.creates[0].Snapshot {
+		t.Fatalf("snapshot create request = %#v", workspaces.creates)
+	}
+	if len(git.updates) != 1 || !git.updates[0].Snapshot {
+		t.Fatalf("snapshot update request = %#v", git.updates)
+	}
+	var stdout, stderr bytes.Buffer
+	if exit := dispatcher.Execute(context.Background(), []string{"workspace", "open", "dirty-work", "--snapshot"}, &stdout, &stderr); exit != 2 {
+		t.Fatalf("unrelated snapshot flag exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+	if len(workspaces.opens) != 0 {
+		t.Fatalf("unrelated snapshot flag reached open: %#v", workspaces.opens)
+	}
+}
+
+func TestSnapshotProvenanceAppearsInWorkspaceAndGitStatusText(t *testing.T) {
+	var workspaceOutput bytes.Buffer
+	if err := renderWorkspaceList(&workspaceOutput, app.WorkspaceListResult{Workspaces: []app.WorkspaceSummary{{
+		Workspace: "dirty-work", SourceBranch: "refs/heads/main", SourceRevision: strings.Repeat("1", 40), SourceSnapshot: true,
+	}}}, "text"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(workspaceOutput.String(), "source_snapshot=true") {
+		t.Fatalf("workspace list omitted snapshot provenance: %q", workspaceOutput.String())
+	}
+
+	var gitOutput bytes.Buffer
+	if err := renderGitStatus(&gitOutput, app.GitStatusResult{Workspace: "dirty-work", Repositories: []gitx.Status{{
+		Repository: "workspace", Workspace: "dirty-work", SourceBranch: "refs/heads/main",
+		SourceRevision: strings.Repeat("1", 40), SourceSnapshot: true,
+	}}}, "text"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gitOutput.String(), "source_snapshot=true") {
+		t.Fatalf("Git status omitted snapshot provenance: %q", gitOutput.String())
 	}
 }
 
@@ -284,7 +336,7 @@ func TestTUICreateAndOpenKeepsProgressUntilInteractiveHandoff(t *testing.T) {
 	runner := &tuiRunnerStub{
 		intents: []tui.Intent{{
 			Action: "workspace-create", Root: "/project", Workspace: "feature-a",
-			SourceBranch: "main", SourceRevision: strings.Repeat("a", 40), Agent: "codex", Open: true,
+			SourceBranch: "main", SourceRevision: strings.Repeat("a", 40), Snapshot: true, Agent: "codex", Open: true,
 		}},
 		events: &events,
 	}
@@ -305,7 +357,7 @@ func TestTUICreateAndOpenKeepsProgressUntilInteractiveHandoff(t *testing.T) {
 	if got := strings.Join(events, ","); got != wantEvents {
 		t.Fatalf("events = %q, want %q", got, wantEvents)
 	}
-	if len(workspaces.creates) != 1 || workspaces.creates[0].Open || workspaces.creates[0].RunInteractive != nil {
+	if len(workspaces.creates) != 1 || workspaces.creates[0].Open || workspaces.creates[0].RunInteractive != nil || !workspaces.creates[0].Snapshot {
 		t.Fatalf("create request = %#v", workspaces.creates)
 	}
 	if len(workspaces.opens) != 1 || !workspaces.opens[0].Terminal || workspaces.opens[0].RunInteractive == nil {
@@ -549,9 +601,10 @@ func TestDashboardLoadsCleanAndDirtyGitCheckoutSummary(t *testing.T) {
 	}
 	dirtyModel := tui.NewDashboardModel(dirty)
 	updated, _ = dirtyModel.Update(tea.KeyPressMsg(tea.Key{Text: "c", Code: 'c'}))
-	if strings.Contains(updated.(*tui.DashboardModel).View().Content, "Starting point") || !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Create unavailable") {
-		t.Fatal("dirty checkout did not gate create")
+	if !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Starting point") || !strings.Contains(updated.(*tui.DashboardModel).View().Content, "Snapshot local changes") {
+		t.Fatal("dirty checkout did not expose reviewed snapshot create")
 	}
+	dirtyModel = tui.NewDashboardModel(dirty)
 	dirtyModel.Update(tea.KeyPressMsg(tea.Key{Text: "u", Code: 'u'}))
 	if intent, found := dirtyModel.Intent(); found {
 		t.Fatalf("dirty checkout emitted intent %#v", intent)

@@ -157,6 +157,7 @@ func (service *Service) Status(ctx context.Context, request StatusRequest) (Stat
 		Workspace:              request.Workspace,
 		SourceBranch:           request.SourceBranch,
 		SourceRevision:         request.SourceRevision,
+		SourceSnapshot:         request.SourceSnapshot,
 		WorkspaceBranch:        request.WorkspaceBranch,
 		ResultCommit:           request.ResultCommit,
 		HostCommit:             current,

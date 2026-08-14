@@ -19,13 +19,13 @@ import (
 )
 
 const workspaceHelp = `Usage:
-  dsx workspace create NAME [--root PATH] [--default-agent AGENT] [--approve-config HASH] [--open]
+  dsx workspace create NAME [--root PATH] [--default-agent AGENT] [--approve-config HASH] [--snapshot] [--open]
   dsx workspace list [--root PATH] [--format text|json]
   dsx workspace open NAME [--root PATH]
   dsx workspace start NAME [--root PATH]
   dsx workspace stop NAME [--root PATH]
   dsx workspace restart NAME [--root PATH]
-  dsx workspace update NAME [--root PATH]
+  dsx workspace update NAME [--root PATH] [--snapshot]
   dsx workspace remove NAME [--root PATH] [--force]
   dsx workspace remove --all|--legacy-resources [--root PATH] [--force]
 `
@@ -73,6 +73,7 @@ func (dispatcher *Dispatcher) executeWorkspaceCreate(ctx context.Context, args [
 	root := flags.String("root", ".", "project root")
 	defaultAgent := flags.String("default-agent", "", "workspace default agent")
 	approval := flags.String("approve-config", "", "exact executable configuration hash")
+	snapshot := flags.Bool("snapshot", false, "create from tracked working-tree changes and nonignored untracked files")
 	open := flags.Bool("open", false, "open the workspace after creation")
 	if exit, done := parseFlags(flags, args[1:], stdout, stderr, workspaceHelp); done {
 		return exit
@@ -97,7 +98,7 @@ func (dispatcher *Dispatcher) executeWorkspaceCreate(ctx context.Context, args [
 	if dispatcher == nil || dispatcher.dependencies.Workspaces == nil {
 		return reportError(stderr, "dsx workspace create", model.NewError(model.CodeUnavailable, "workspace service is unavailable", nil))
 	}
-	result, err := dispatcher.dependencies.Workspaces.Create(ctx, app.WorkspaceCreateRequest{Root: *root, Workspace: workspace, DefaultAgent: *defaultAgent, ApproveConfig: *approval, Open: *open, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr, RunInteractive: dispatcher.runInteractive})
+	result, err := dispatcher.dependencies.Workspaces.Create(ctx, app.WorkspaceCreateRequest{Root: *root, Workspace: workspace, DefaultAgent: *defaultAgent, ApproveConfig: *approval, Snapshot: *snapshot, Open: *open, Stdin: dispatcher.dependencies.Stdin, Stdout: stdout, Stderr: stderr, RunInteractive: dispatcher.runInteractive})
 	if err != nil {
 		return reportError(stderr, "dsx workspace create", err)
 	}
@@ -147,6 +148,10 @@ func (dispatcher *Dispatcher) executeNamedWorkspace(ctx context.Context, operati
 	}
 	flags := newFlagSet("workspace " + operation)
 	root := flags.String("root", ".", "project root")
+	var snapshot *bool
+	if operation == "update" {
+		snapshot = flags.Bool("snapshot", false, "update from tracked working-tree changes and nonignored untracked files")
+	}
 	if exit, done := parseFlags(flags, args[1:], stdout, stderr, workspaceHelp); done {
 		return exit
 	}
@@ -160,7 +165,7 @@ func (dispatcher *Dispatcher) executeNamedWorkspace(ctx context.Context, operati
 		if dispatcher == nil || dispatcher.dependencies.Git == nil {
 			return reportError(stderr, command, model.NewError(model.CodeUnavailable, "workspace Git service is unavailable", nil))
 		}
-		result, err := dispatcher.dependencies.Git.Update(ctx, app.WorkspaceUpdateRequest{Root: *root, Workspace: workspace})
+		result, err := dispatcher.dependencies.Git.Update(ctx, app.WorkspaceUpdateRequest{Root: *root, Workspace: workspace, Snapshot: snapshot != nil && *snapshot})
 		if err != nil {
 			return reportError(stderr, command, err)
 		}
@@ -421,7 +426,7 @@ func (dispatcher *Dispatcher) executeTUIWorkspaceCreate(ctx context.Context, req
 		report("workspace")
 		_, createErr := dispatcher.dependencies.Workspaces.Create(operationCtx, app.WorkspaceCreateRequest{
 			Root: root, Workspace: workspace, SourceBranch: intent.SourceBranch, SourceRevision: intent.SourceRevision,
-			DefaultAgent: intent.Agent, Open: false,
+			Snapshot: intent.Snapshot, DefaultAgent: intent.Agent, Open: false,
 		})
 		if createErr == nil {
 			report("ready")
@@ -500,7 +505,7 @@ func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Inte
 	case "workspace-create":
 		result, err := dispatcher.dependencies.Workspaces.Create(ctx, app.WorkspaceCreateRequest{
 			Root: root, Workspace: workspace, SourceBranch: intent.SourceBranch, SourceRevision: intent.SourceRevision,
-			DefaultAgent: intent.Agent, Open: intent.Open, Stdin: dispatcher.dependencies.Stdin,
+			Snapshot: intent.Snapshot, DefaultAgent: intent.Agent, Open: intent.Open, Stdin: dispatcher.dependencies.Stdin,
 			Stdout: stdout, Stderr: stderr, RunInteractive: dispatcher.runInteractive,
 		})
 		if err != nil {
@@ -534,7 +539,11 @@ func (dispatcher *Dispatcher) executeIntent(ctx context.Context, intent tui.Inte
 	case "workspace-restart":
 		return dispatcher.executeNamedWorkspace(ctx, "restart", []string{string(workspace), "--root", root}, stdout, stderr)
 	case "workspace-update":
-		return dispatcher.executeNamedWorkspace(ctx, "update", []string{string(workspace), "--root", root}, stdout, stderr)
+		args := []string{string(workspace), "--root", root}
+		if intent.Snapshot {
+			args = append(args, "--snapshot")
+		}
+		return dispatcher.executeNamedWorkspace(ctx, "update", args, stdout, stderr)
 	case "workspace-remove":
 		return dispatcher.removeWorkspace(ctx, root, workspace, false, false, stdout, stderr)
 	case "agent-run":
@@ -628,7 +637,7 @@ func renderWorkspaceList(writer io.Writer, result app.WorkspaceListResult, forma
 		return err
 	}
 	for _, workspace := range workspaces {
-		if _, err := fmt.Fprintf(writer, "Workspace %q: state=%q run=%q source=%q@%q default_agent=%q resources=%d mutating=%t legacy=%t\n", terminal.SanitizeLine(string(workspace.Workspace)), terminal.SanitizeLine(string(workspace.State)), terminal.SanitizeLine(string(workspace.RunID)), terminal.SanitizeLine(workspace.SourceBranch), terminal.SanitizeLine(workspace.SourceRevision), terminal.SanitizeLine(workspace.DefaultAgent), workspace.Resources, workspace.MutationActive, workspace.Legacy); err != nil {
+		if _, err := fmt.Fprintf(writer, "Workspace %q: state=%q run=%q source=%q@%q source_snapshot=%t default_agent=%q resources=%d mutating=%t legacy=%t\n", terminal.SanitizeLine(string(workspace.Workspace)), terminal.SanitizeLine(string(workspace.State)), terminal.SanitizeLine(string(workspace.RunID)), terminal.SanitizeLine(workspace.SourceBranch), terminal.SanitizeLine(workspace.SourceRevision), workspace.SourceSnapshot, terminal.SanitizeLine(workspace.DefaultAgent), workspace.Resources, workspace.MutationActive, workspace.Legacy); err != nil {
 			return model.Wrap(model.CodeInternal, "write workspace list", err)
 		}
 		for _, warning := range workspace.Warnings {

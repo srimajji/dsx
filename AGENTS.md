@@ -28,7 +28,7 @@ Primary flow:
 6. `internal/runtime/apple` invokes Apple `container` with structured argv and re-inspects ownership before mutation.
 7. `internal/app/guest_client.go` communicates with `cmd/dsx-guest` using the bounded, versioned `internal/guestproto` protocol.
 
-The local checkout is the source and integration point, not a DSX workspace. Workspace creation transfers clean committed revisions through bounded verified Git bundles into guest-owned volumes without shared Git objects or host source/home mounts. Every lifecycle and Git operation names its workspace; workspace, agent, authentication, and browser-session lifecycles remain separate. Results return through verified bundles and guarded fetch/apply transactions. A browser receives only the selected workspace's private network—never source, auth, AWS, host paths, or published host control ports—and is deleted with its agent session.
+The local checkout is the source and integration point, not a DSX workspace. Clean committed ingress is the default; explicit reviewed final-working-tree snapshot ingress is the alternative for tracked changes and nonignored untracked files. Both transfer bounded verified Git bundles into guest-owned private clones without shared Git objects or host source/home mounts. Every lifecycle and Git operation names its workspace; workspace, agent, authentication, and browser-session lifecycles remain separate. Results return through verified bundles and guarded fetch/apply transactions. A browser receives only the selected workspace's private network—never source, auth, AWS, host paths, or published host control ports—and is deleted with its agent session.
 
 Interactive onboarding is intentionally narrow: choose Ubuntu default or custom settings, review the complete effective authority, then run bounded setup progress. The default is Codex with 6 CPUs, 6 GiB, internet access, no published ports, and no browser session. TUI models continue to emit intents only; `internal/hostcmd` owns workspace-creation progress and the direct terminal handoff for **Create and open**.
 
@@ -100,7 +100,7 @@ There is no repository-specific linter or schema generator. Do not invent `golan
 - `cmd/dsx/main.go`: production composition root and hidden leased-helper modes.
 - `internal/hostcmd/execute.go`: command surface and dependency interfaces.
 - `internal/app/workspace.go`: named-workspace create/open/start/stop/restart/remove/list transactions and ownership-safe rollback.
-- `internal/app/workspace_update_rebase.go`, `internal/app/workspace_git.go`: committed-source update/rebase and guarded Git result recovery.
+- `internal/app/workspace_update_rebase.go`, `internal/app/workspace_git.go`: committed or snapshot source update/rebase and guarded Git result recovery.
 - `internal/app/harness.go`, `internal/app/auth.go`, `internal/app/browser.go`: workspace-targeted agent sessions, canonical/project credential handling, isolated copies, and disposable per-session browsers.
 - `internal/plan/hash.go`: reusable project-default executable projection and approval-hash contract.
 - `internal/state/manifest.go`: durable workspace ownership/resource/Git record validation.
@@ -140,4 +140,4 @@ For every TUI or onboarding change, MUST build the host binary and manually sani
 
 Never casually enable destructive Apple tests. `DSX_RUN_APPLE_TESTS=1` is for a dedicated physical Apple-silicon host. Fault and performance suites require additional evidence/run variables and ownership-safe recovery. They must inventory unrelated resources, use unique labeled run IDs, clean exact proven resources twice, preserve the Apple builder/default network, and quarantine on ambiguity—never prune broadly.
 
-When an observable CLI/config/security contract changes, update the relevant tests and `docs/manual/`. Change the PRD for product requirements, the ADR for architecture decisions, and `docs/runner-operations.md` plus runner schemas/scripts together for physical-runner protocol changes. Implementation or local observation alone is not release evidence.
+When an observable CLI/config/security contract changes, update the relevant tests and `docs/manual/`. Change the PRD for product requirements, the ADR for architecture decisions, and `docs/operations/runner-operations.md` plus runner schemas/scripts together for physical-runner protocol changes. Implementation or local observation alone is not release evidence.

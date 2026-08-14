@@ -1,7 +1,7 @@
 # Review: PRD + ADR 0001 pressure test
 
 - **Date:** 2026-08-09
-- **Scope:** [PRD.md](./PRD.md), [ADR 0001](./adr/0001-dsx-implementation-architecture.md)
+- **Scope:** [PRD.md](../PRD.md), [ADR 0001](../adr/0001-dsx-implementation-architecture.md)
 - **Status:** Feedback only — no changes made to the originals
 - **Reviewer note:** Findings ordered by severity. Item 6 was revised after discussion (see inline).
 

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,6 +34,9 @@ func TestWorkspaceCreatePersistsIntentBeforeMutationAndNeverMountsHostSource(t *
 	}
 	if !fixture.runtime.intentBeforeEveryCreate {
 		t.Fatal("runtime mutation preceded durable resource intent")
+	}
+	if !fixture.runtime.sourceProvenanceBeforeEveryCreate {
+		t.Fatal("runtime mutation preceded durable source provenance")
 	}
 	if got, want := fixture.locks.events[:2], []string{"workspace:alpha", "project"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("lock order = %#v, want %#v", got, want)
@@ -78,6 +82,150 @@ func TestWorkspaceCreatePersistsIntentBeforeMutationAndNeverMountsHostSource(t *
 	if len(fixture.runtime.execs) == 0 || !reflect.DeepEqual(fixture.runtime.execs[0].Argv, workspaceInitializationArgv) ||
 		fixture.runtime.execs[0].User != "0:0" || fixture.runtime.execs[0].WorkingDir != "/workspace" {
 		t.Fatalf("first workspace exec is not exact volume initialization: %#v", fixture.runtime.execs)
+	}
+}
+
+func TestInitializeWorkspaceVolumesReportsSafeGuestDiagnostic(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	code := 1
+	fixture.runtime.execExit = runtime.Exit{Code: &code}
+	fixture.runtime.execStderr = "dsx-guest initialize-workspace: open owned workspace \"/var/lib/dsx\": permission denied\x1b[31m\n"
+
+	err := fixture.service.initializeWorkspaceVolumes(context.Background(), runtime.ResourceSnapshot{})
+	if model.ErrorCodeOf(err) != model.CodeUnavailable {
+		t.Fatalf("initialize error = %v", err)
+	}
+	message := err.Error()
+	if !strings.Contains(message, `open owned workspace "/var/lib/dsx": permission denied`) || strings.ContainsRune(message, '\x1b') {
+		t.Fatalf("initialize error omitted or failed to sanitize guest diagnostic: %q", message)
+	}
+}
+
+func TestWorkspaceCreateSnapshotPropagatesAndPersistsProvenance(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	result, err := fixture.service.Create(context.Background(), WorkspaceCreateRequest{
+		Root: fixture.root, Workspace: "snapshot", Snapshot: true,
+		SourceBranch: "refs/heads/main", SourceRevision: strings.Repeat("1", 40),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.git.sourceRequests) != 1 || !fixture.git.sourceRequests[0].Snapshot {
+		t.Fatalf("source requests = %#v", fixture.git.sourceRequests)
+	}
+	wantWarning := "workspace: source snapshot included final tracked content and nonignored untracked files"
+	if !slices.Contains(result.Warnings, wantWarning) || !slices.Contains(result.Warnings, "workspace: ignored files were not transferred") {
+		t.Fatalf("snapshot warnings = %#v", result.Warnings)
+	}
+	manifest := fixture.manifest("snapshot")
+	record := manifest.Git[0]
+	if !record.SourceSnapshot || record.SourceRevision != strings.Repeat("5", 40) ||
+		record.SourceHeadRevision != strings.Repeat("1", 40) || record.SourceTree != strings.Repeat("4", 40) {
+		t.Fatalf("durable snapshot provenance = %#v", record)
+	}
+	if !fixture.runtime.sourceProvenanceBeforeEveryCreate {
+		t.Fatal("runtime mutation preceded durable snapshot provenance")
+	}
+	wantCheckout := []string{"/usr/bin/git", "-C", "/workspace", "checkout", "-B", "dsx/snapshot", strings.Repeat("5", 40)}
+	foundCheckout := false
+	for _, spec := range fixture.runtime.execs {
+		if reflect.DeepEqual(spec.Argv, wantCheckout) {
+			foundCheckout = true
+			break
+		}
+	}
+	if !foundCheckout {
+		t.Fatalf("snapshot guest bootstrap checkout missing from %#v", fixture.runtime.execs)
+	}
+	listed, err := fixture.service.List(context.Background(), WorkspaceListRequest{Root: fixture.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Workspaces) != 1 || !listed.Workspaces[0].SourceSnapshot {
+		t.Fatalf("workspace list snapshot provenance = %#v", listed.Workspaces)
+	}
+}
+
+func TestWorkspaceUpdatePropagatesSnapshotAndRecordedProvenance(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	if _, err := fixture.service.Create(context.Background(), WorkspaceCreateRequest{
+		Root: fixture.root, Workspace: "update-snapshot", Snapshot: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("stop after update preparation")
+	fixture.git.updateError = injected
+	_, err := fixture.service.Update(context.Background(), WorkspaceUpdateRequest{
+		Root: fixture.root, Workspace: "update-snapshot", Snapshot: true,
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("Update snapshot error = %v", err)
+	}
+	if len(fixture.git.updateRequests) != 1 {
+		t.Fatalf("update requests = %#v", fixture.git.updateRequests)
+	}
+	request := fixture.git.updateRequests[0]
+	if !request.Snapshot ||
+		request.SourceRevision != strings.Repeat("5", 40) ||
+		request.SourceHeadRevision != strings.Repeat("1", 40) ||
+		request.SourceTree != strings.Repeat("4", 40) {
+		t.Fatalf("snapshot update request = %#v", request)
+	}
+}
+
+func TestSecureCopiedWorkspaceFileUsesNonInteractiveSudoForPrivateOwnership(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	guest := "/tmp/dsx-update-run/source-0.bundle"
+	if err := fixture.service.secureCopiedWorkspaceFile(context.Background(), runtime.ResourceSnapshot{}, guest); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.runtime.execs) != 2 {
+		t.Fatalf("secure file commands = %#v", fixture.runtime.execs)
+	}
+	wantArgv := [][]string{
+		{"/usr/bin/sudo", "--non-interactive", "/bin/chmod", "0600", guest},
+		{"/usr/bin/sudo", "--non-interactive", "/bin/chown", standardWorkspaceUser, guest},
+	}
+	for index, spec := range fixture.runtime.execs {
+		if spec.User != standardWorkspaceUser || spec.WorkingDir != "/workspace" || !slices.Equal(spec.Argv, wantArgv[index]) {
+			t.Fatalf("secure file command %d = %#v", index, spec)
+		}
+	}
+}
+
+func TestGitApplyPassesSnapshotProvenanceAndTemporaryRoot(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	if _, err := fixture.service.Create(context.Background(), WorkspaceCreateRequest{
+		Root: fixture.root, Workspace: "apply-snapshot", Snapshot: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fixture.manifest("apply-snapshot")
+	manifest.Git[0].ResultCommit = strings.Repeat("6", 40)
+	manifest.Git[0].ResultBundleDigest = strings.Repeat("7", 64)
+	manifest.Git[0].FetchedCommit = manifest.Git[0].ResultCommit
+	manifest.Git[0].FetchedHostRef = gitx.RefNamespace + "apply-snapshot"
+	if err := fixture.manifests.ReplaceManifest(context.Background(), manifest, manifest.Generation); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("stop after apply preparation")
+	fixture.git.applyError = injected
+	_, err := fixture.service.GitApply(context.Background(), GitApplyRequest{
+		Root: fixture.root, Workspace: "apply-snapshot",
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("GitApply snapshot error = %v", err)
+	}
+	if len(fixture.git.applyRequests) != 1 {
+		t.Fatalf("apply requests = %#v", fixture.git.applyRequests)
+	}
+	request := fixture.git.applyRequests[0]
+	if !request.SourceSnapshot ||
+		request.SourceRevision != strings.Repeat("5", 40) ||
+		request.SourceHeadRevision != strings.Repeat("1", 40) ||
+		request.SourceTree != strings.Repeat("4", 40) ||
+		request.TempRoot == "" {
+		t.Fatalf("snapshot apply request = %#v", request)
 	}
 }
 
@@ -506,6 +654,7 @@ type workspaceFixture struct {
 	manifests *memoryWorkspaceManifests
 	locks     *recordingWorkspaceLocks
 	runtime   *recordingWorkspaceRuntime
+	git       *workspaceGitFake
 	service   *WorkspaceService
 	execution *plan.ExecutionPlan
 }
@@ -522,13 +671,13 @@ func newWorkspaceFixture(t *testing.T) *workspaceFixture {
 	}
 	manifests := &memoryWorkspaceManifests{values: map[string]state.Manifest{}}
 	locks := &recordingWorkspaceLocks{}
-	fakeRuntime := &recordingWorkspaceRuntime{resources: map[runtime.ResourceID]runtime.ResourceSnapshot{}, inspectErrors: map[runtime.ResourceID]error{}, manifests: manifests, projectID: projectID, intentBeforeEveryCreate: true}
+	fakeRuntime := &recordingWorkspaceRuntime{resources: map[runtime.ResourceID]runtime.ResourceSnapshot{}, inspectErrors: map[runtime.ResourceID]error{}, manifests: manifests, projectID: projectID, intentBeforeEveryCreate: true, sourceProvenanceBeforeEveryCreate: true}
 	git := &workspaceGitFake{t: t, root: root}
 	execution := &plan.ExecutionPlan{ContractVersion: plan.ContractVersion, Project: plan.ProjectIdentity{ID: projectID, CanonicalRoot: root}, Agents: plan.AgentPlan{Allowed: []string{"codex", "omp"}, Default: "codex"}, Image: plan.ResolvedImage{Reference: "example.invalid/dev@sha256:" + strings.Repeat("a", 64)}, Repositories: []plan.RepositoryPlan{{Name: "workspace", HostPath: root, GuestPath: "/workspace"}}, Limits: plan.ResourceLimits{CPUs: 2, MemoryBytes: 1 << 30, MaxConcurrentWorkspaces: 3}, ExecutableHash: strings.Repeat("b", 64)}
 	service := NewWorkspaceService(WorkspaceDependencies{ResolvePlan: func(context.Context, string) (plan.ExecutionPlan, error) { return *execution, nil }, Manifests: manifests, Locks: locks, Runtime: fakeRuntime, Git: git, TempRoot: t.TempDir(), NewRunID: sequentialRunIDs(), GuestHelperSource: func() (runtime.HostPath, error) {
 		return runtime.HostPath(filepath.Join(t.TempDir(), "dsx-guest")), nil
 	}, RemovalGuard: func(context.Context, state.Manifest, runtime.ResourceSnapshot) ([]string, error) { return nil, nil }})
-	return &workspaceFixture{root: root, projectID: projectID, manifests: manifests, locks: locks, runtime: fakeRuntime, service: service, execution: execution}
+	return &workspaceFixture{root: root, projectID: projectID, manifests: manifests, locks: locks, runtime: fakeRuntime, git: git, service: service, execution: execution}
 }
 
 func (fixture *workspaceFixture) manifest(name model.WorkspaceName) state.Manifest {
@@ -679,18 +828,22 @@ func (lock *recordingWorkspaceLock) Unlock() error {
 }
 
 type recordingWorkspaceRuntime struct {
-	resources                  map[runtime.ResourceID]runtime.ResourceSnapshot
-	inspectErrors              map[runtime.ResourceID]error
-	manifests                  *memoryWorkspaceManifests
-	projectID                  model.ProjectID
-	workspaceSpecs             map[string]runtime.WorkspaceSpec
-	failCreateKind             runtime.ResourceKind
-	intentBeforeEveryCreate    bool
-	execs                      []runtime.ExecSpec
-	starts, stops, deleteCalls int
-	startError, stopError      error
-	startMutatesBeforeError    bool
-	startHook                  func()
+	resources                         map[runtime.ResourceID]runtime.ResourceSnapshot
+	inspectErrors                     map[runtime.ResourceID]error
+	manifests                         *memoryWorkspaceManifests
+	projectID                         model.ProjectID
+	workspaceSpecs                    map[string]runtime.WorkspaceSpec
+	failCreateKind                    runtime.ResourceKind
+	intentBeforeEveryCreate           bool
+	sourceProvenanceBeforeEveryCreate bool
+	execs                             []runtime.ExecSpec
+	execExit                          runtime.Exit
+	execError                         error
+	execStderr                        string
+	starts, stops, deleteCalls        int
+	startError, stopError             error
+	startMutatesBeforeError           bool
+	startHook                         func()
 }
 
 func (fake *recordingWorkspaceRuntime) Probe(context.Context) (runtime.Capabilities, error) {
@@ -705,7 +858,13 @@ func (fake *recordingWorkspaceRuntime) create(name string, kind runtime.Resource
 	}
 	manifests, _ := fake.manifests.ListProjectManifests(context.Background(), fake.projectID)
 	found := false
+	provenance := false
 	for _, manifest := range manifests {
+		for _, gitRecord := range manifest.Git {
+			if gitRecord.SourceHeadRevision != "" && gitRecord.SourceTree != "" {
+				provenance = true
+			}
+		}
 		for _, record := range manifest.Resources {
 			if record.ExpectedID == name && !record.Created {
 				found = true
@@ -713,6 +872,7 @@ func (fake *recordingWorkspaceRuntime) create(name string, kind runtime.Resource
 		}
 	}
 	fake.intentBeforeEveryCreate = fake.intentBeforeEveryCreate && found
+	fake.sourceProvenanceBeforeEveryCreate = fake.sourceProvenanceBeforeEveryCreate && provenance
 	resource := runtime.Resource{ID: runtime.ResourceID(name), Name: name, Kind: kind}
 	fake.resources[resource.ID] = runtime.ResourceSnapshot{Resource: resource, State: "created", Labels: append([]runtime.Label(nil), labels...)}
 	return resource, nil
@@ -772,8 +932,17 @@ func (fake *recordingWorkspaceRuntime) StartAuthLogin(context.Context, runtime.R
 func (fake *recordingWorkspaceRuntime) PrepareExec(context.Context, runtime.ResourceSnapshot, runtime.ExecSpec) (runtime.ProcessSpec, error) {
 	return runtime.ProcessSpec{}, errors.New("unexpected")
 }
-func (fake *recordingWorkspaceRuntime) Exec(_ context.Context, _ runtime.ResourceSnapshot, s runtime.ExecSpec, _ runtime.ExecIO) (runtime.Exit, error) {
+func (fake *recordingWorkspaceRuntime) Exec(_ context.Context, _ runtime.ResourceSnapshot, s runtime.ExecSpec, streams runtime.ExecIO) (runtime.Exit, error) {
 	fake.execs = append(fake.execs, s)
+	if streams.Stderr != nil && fake.execStderr != "" {
+		_, _ = io.WriteString(streams.Stderr, fake.execStderr)
+	}
+	if fake.execError != nil {
+		return runtime.Exit{}, fake.execError
+	}
+	if fake.execExit.Code != nil || fake.execExit.Signal != "" {
+		return fake.execExit, nil
+	}
 	code := 0
 	return runtime.Exit{Code: &code}, nil
 }
@@ -825,21 +994,40 @@ func (fake *recordingWorkspaceRuntime) Delete(_ context.Context, s runtime.Resou
 }
 
 type workspaceGitFake struct {
-	t    *testing.T
-	root string
+	t              *testing.T
+	root           string
+	sourceRequests []gitx.SourceRequest
+	updateRequests []gitx.UpdateSourceRequest
+	applyRequests  []gitx.ApplyRequest
+	updateError    error
+	applyError     error
 }
 
 func (fake *workspaceGitFake) ValidateRepository(context.Context, gitx.Repository) error { return nil }
 func (fake *workspaceGitFake) PrepareSource(_ context.Context, request gitx.SourceRequest) (gitx.SourceArtifact, error) {
+	fake.sourceRequests = append(fake.sourceRequests, request)
 	bundle := filepath.Join(fake.t.TempDir(), "source.bundle")
 	if err := os.WriteFile(bundle, []byte("bundle"), 0o600); err != nil {
 		return gitx.SourceArtifact{}, err
 	}
 	repository := request.Repository
 	repository.Identity = workspaceRepositoryIdentity(fake.t, fake.root)
-	return gitx.SourceArtifact{Repository: repository, SourceBranch: "refs/heads/main", SourceRevision: strings.Repeat("1", 40), TrackedFingerprint: strings.Repeat("2", 64), BundlePath: bundle, BundleDigest: strings.Repeat("3", 64), BundleRef: "refs/dsx/source"}, nil
+	sourceRevision := strings.Repeat("1", 40)
+	if request.Snapshot {
+		sourceRevision = strings.Repeat("5", 40)
+	}
+	return gitx.SourceArtifact{
+		Repository: repository, SourceBranch: "refs/heads/main", SourceRevision: sourceRevision,
+		SourceSnapshot: request.Snapshot, SourceHeadRevision: strings.Repeat("1", 40), SourceTree: strings.Repeat("4", 40),
+		TrackedFingerprint: strings.Repeat("2", 64), WarnIgnored: request.Snapshot,
+		BundlePath: bundle, BundleDigest: strings.Repeat("3", 64), BundleRef: "refs/dsx/source",
+	}, nil
 }
-func (fake *workspaceGitFake) PrepareUpdateSource(context.Context, gitx.UpdateSourceRequest) (gitx.SourceArtifact, error) {
+func (fake *workspaceGitFake) PrepareUpdateSource(_ context.Context, request gitx.UpdateSourceRequest) (gitx.SourceArtifact, error) {
+	fake.updateRequests = append(fake.updateRequests, request)
+	if fake.updateError != nil {
+		return gitx.SourceArtifact{}, fake.updateError
+	}
 	return gitx.SourceArtifact{}, errors.New("unexpected")
 }
 func (fake *workspaceGitFake) VerifyBundle(context.Context, string, string) error { return nil }
@@ -852,7 +1040,11 @@ func (fake *workspaceGitFake) Status(context.Context, gitx.StatusRequest) (gitx.
 func (fake *workspaceGitFake) Diff(context.Context, gitx.DiffRequest) (gitx.DiffResult, error) {
 	return gitx.DiffResult{}, errors.New("unexpected")
 }
-func (fake *workspaceGitFake) PrepareApply(context.Context, gitx.ApplyRequest) (gitx.ApplyTransaction, error) {
+func (fake *workspaceGitFake) PrepareApply(_ context.Context, request gitx.ApplyRequest) (gitx.ApplyTransaction, error) {
+	fake.applyRequests = append(fake.applyRequests, request)
+	if fake.applyError != nil {
+		return nil, fake.applyError
+	}
 	return nil, errors.New("unexpected")
 }
 func (fake *workspaceGitFake) RemoveArtifact(name string) error {

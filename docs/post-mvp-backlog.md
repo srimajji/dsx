@@ -1,9 +1,9 @@
 # DSX MVP closeout and post-MVP backlog
 
 - **Status:** Living backlog after MVP implementation
-- **Date:** 2026-08-10
-- **Authority:** [PRD v0.3](./PRD.md) and [ADR 0001](./adr/0001-dsx-implementation-architecture.md)
-- **Completed execution plan:** [DSX MVP implementation plan](./implementation-plan.md)
+- **Date:** 2026-08-14
+- **Authority:** [PRD v0.5](./PRD.md) and [ADR 0001](./adr/0001-dsx-implementation-architecture.md)
+- **Completed execution plan:** [DSX MVP implementation plan](./plans/implementation-plan.md)
 
 ## 1. Purpose and status language
 
@@ -57,7 +57,13 @@ These are completion-evidence gaps, not permission to add fake success paths or 
 | MVP-SKIP-006 | Automated publication | Release tooling builds and verifies but does not publish. Registry, signing, notarization, physical acceptance, and human release ownership remain explicit gates. |
 | MVP-SKIP-007 | Native Docker/Compose/Testcontainers adoption | DSX imports only allowlisted declarative project facts and never exposes a Docker/Podman/runtime socket to a workspace. Unsupported lifecycle semantics fail rather than being inferred or executed. |
 
-## 5. Post-MVP feature candidates discussed
+## 5. Delivered post-MVP work
+
+| ID | Delivered capability | Contract |
+|---|---|---|
+| POST-MVP-009 | Snapshot-commit source ingress | Explicit `--snapshot` create/update and reviewed TUI creation capture final tracked content plus nonignored untracked files in an isolated synthetic commit, preserve real-parent/tree provenance, use the existing verified bundle and guest-owned clone, rebase workspace-only results across snapshot updates, and bridge guarded apply only when a clean host `HEAD` tree exactly matches the captured baseline. Host branch, `HEAD`, index, worktree, durable refs, object database, configuration, and hooks remain unchanged. |
+
+## 6. Post-MVP feature candidates discussed
 
 These are candidates, not commitments. Each requires PRD prioritization and, where it changes a locked decision, an ADR update before implementation.
 
@@ -71,14 +77,16 @@ These are candidates, not commitments. Each requires PRD prioritization and, whe
 | POST-MVP-006 | Optional background scheduler/daemon | Queued work, monitoring, and recovery without an attached terminal. | New threat model, install/update/uninstall lifecycle, idle-resource budget, authenticated IPC, crash recovery, and ownership model; the current daemonless invariant remains until then. |
 | POST-MVP-007 | Explicit host-service bridge | Reuse selected host databases or development services when duplication is impractical. | Permit only typed destination grants with clear mutation authority; never adopt ambient host loopback or expose a generic proxy. |
 | POST-MVP-008 | Additional Apple and harness versions | Support newer Apple 1.2.x patches and independent harness upgrades. | Treat every runtime patch and harness artifact as a compatibility event with pinned provenance, canary evidence, and no widening of the current allowlist by version range alone. |
+| POST-MVP-010 | Reviewed ignored-file injection allowlist | Per-project allowlist of gitignored files (for example `.env`, `*.tfvars`) injected into workspaces so applications boot without manual reconstruction. Reviewed and approved once through the same explicit-approval flow as executable declarations; never implicit. | Relaxes the no-ignored-files-cross invariant, so it requires a PRD change. Must define approval records, per-file content hashing on approval, redaction in logs, exclusion from result egress, refresh-on-change behavior, and interaction with the credential-import trust model. |
+| POST-MVP-011 | Workspace stats and agent-state TUI view | A btop-style interactive view in the existing context-aware TUI: per-workspace CPU, memory, and disk graphs plus DSX-level state the runtime cannot report — harness running/exited/blocked, git diffstat against the seed commit, and unfetched-result status. Complements rather than recreates `container list`/`inspect`. | Data sources must be defined without new authorization surface: runtime inspection for lifecycle, `dsx-guest` sampling `/proc` for resource metrics, and existing Git plumbing for diffstat. Bounded sampling rate and output, read-only, no arbitrary exec; stays within the MVP-SKIP-005 narrowing unless process-level detail is added, which falls under POST-MVP-003. |
 
-## 6. Explicitly not carried into the backlog
+## 7. Explicitly not carried into the backlog
 
 The following remain product non-goals or rejected security boundaries, not hidden future commitments: Kubernetes, nested containers, Rosetta/amd64 execution, arbitrary Nix or host shell interpretation, generic VPN/SOCKS/CONNECT proxying, prompt coordination, merge automation, remote execution, host Git worktrees as the sandbox boundary, complete host-home mounts, agent access to runtime control sockets, and deletion/adoption of unrelated Apple resources.
 
 Moving any of these into product scope requires an explicit PRD change and usually a new ADR.
 
-## 7. Recommended closure order
+## 8. Recommended closure order
 
 1. Secure production registry ownership, pinned image references, signing identity, and notarization credentials.
 2. Pin the two reference workspaces and provision protected macOS 26/27 physical runners.

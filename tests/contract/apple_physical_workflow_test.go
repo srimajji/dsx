@@ -154,7 +154,7 @@ func TestPhysicalRunnerConfigAndDocumentationAreExplicitlyUnexecuted(t *testing.
 		}
 	}
 
-	doc := readContractFile(t, filepath.Join(root, "docs", "runner-operations.md"))
+	doc := readContractFile(t, filepath.Join(root, "docs", "operations", "runner-operations.md"))
 	for _, statement := range []string{
 		"No physical macOS 26 or macOS 27 runner has been provisioned, registered, or exercised",
 		"No canary, destructive suite, sweeper, quarantine drill, or recovery drill has run here.",

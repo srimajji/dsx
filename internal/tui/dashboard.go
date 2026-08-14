@@ -20,7 +20,7 @@ const (
 	maxVisibleWorkspaceRows   = 12
 	dashboardNonWorkspaceRows = 14
 	workspaceDisplayRowHeight = 2
-	createFormFocusCount      = 4
+	createFormFocusCount      = 5
 	agentFormFocusCount       = 3
 	dashboardActionGap        = "   "
 	intentAWSEnable           = "aws-enable"
@@ -55,6 +55,7 @@ type Intent struct {
 	Workspace      string
 	SourceBranch   string
 	SourceRevision string
+	Snapshot       bool
 	Agent          string
 	Browser        bool
 	Open           bool
@@ -65,6 +66,7 @@ type dashboardScreen uint8
 const (
 	dashboardHome dashboardScreen = iota
 	dashboardCreate
+	dashboardCreateSnapshotReview
 	dashboardAgent
 	dashboardGit
 	dashboardRemove
@@ -72,18 +74,20 @@ const (
 )
 
 type DashboardModel struct {
-	data       DashboardData
-	intent     *Intent
-	width      int
-	height     int
-	accessible bool
-	selected   int
-	screen     dashboardScreen
-	focus      int
-	name       string
-	agentIndex int
-	browser    bool
-	notice     string
+	data              DashboardData
+	intent            *Intent
+	width             int
+	height            int
+	accessible        bool
+	selected          int
+	screen            dashboardScreen
+	focus             int
+	name              string
+	agentIndex        int
+	browser           bool
+	snapshot          bool
+	pendingCreateOpen bool
+	notice            string
 }
 
 func NewDashboardModel(data DashboardData) *DashboardModel {
@@ -146,6 +150,8 @@ func (model *DashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch model.screen {
 	case dashboardCreate:
 		return model.updateCreate(key, pressed)
+	case dashboardCreateSnapshotReview:
+		return model.updateCreateSnapshotReview(pressed)
 	case dashboardAgent:
 		return model.updateAgent(pressed)
 	case dashboardGit:
@@ -169,9 +175,10 @@ func (model *DashboardModel) updateHome(pressed string) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		model.moveSelection(1)
 	case "c":
-		if model.sourceReady() {
+		if model.sourceIdentityReady() {
 			model.screen, model.focus, model.name = dashboardCreate, 0, ""
 			model.agentIndex = model.defaultAgentIndex("")
+			model.snapshot, model.pendingCreateOpen = false, false
 		}
 	case "enter":
 		if workspace := model.selectedWorkspace(); workspace != nil && canOpen(*workspace) {
@@ -230,10 +237,19 @@ func (model *DashboardModel) updateCreate(key tea.KeyPressMsg, pressed string) (
 	case "left", "k":
 		if model.focus == 1 {
 			model.moveAgent(-1)
+		} else if model.focus == 0 && pressed == "k" && len(model.name)+len(key.Text) <= maxWorkspaceNameBytes {
+			model.name += key.Text
 		}
 	case "right", "j":
 		if model.focus == 1 {
 			model.moveAgent(1)
+		} else if model.focus == 0 && pressed == "j" && len(model.name)+len(key.Text) <= maxWorkspaceNameBytes {
+			model.name += key.Text
+		}
+	case " ", "space":
+		if model.focus == 2 {
+			model.snapshot = !model.snapshot
+			model.notice = ""
 		}
 	case "backspace":
 		if model.focus == 0 && model.name != "" {
@@ -241,8 +257,12 @@ func (model *DashboardModel) updateCreate(key tea.KeyPressMsg, pressed string) (
 			model.name = model.name[:len(model.name)-size]
 		}
 	case "enter":
-		if model.focus == 2 || model.focus == 3 {
-			return model.submitCreate(model.focus == 2)
+		switch model.focus {
+		case 2:
+			model.snapshot = !model.snapshot
+			model.notice = ""
+		case 3, 4:
+			return model.submitCreate(model.focus == 3)
 		}
 	default:
 		if model.focus == 0 && key.Text != "" && len(model.name)+len(key.Text) <= maxWorkspaceNameBytes {
@@ -264,12 +284,38 @@ func (model *DashboardModel) submitCreate(open bool) (tea.Model, tea.Cmd) {
 			return model, nil
 		}
 	}
+	if !model.data.Clean && !model.snapshot {
+		model.notice = "Select Snapshot local changes to create from a dirty checkout."
+		return model, nil
+	}
+	if model.snapshot {
+		model.pendingCreateOpen = open
+		model.screen = dashboardCreateSnapshotReview
+		model.notice = ""
+		return model, nil
+	}
 	model.intent = &Intent{
 		Action: "workspace-create", Root: model.data.Root, Workspace: string(name),
 		SourceBranch: model.data.Branch, SourceRevision: model.data.Revision,
 		Agent: model.selectedAgent(), Open: open,
 	}
 	return model, tea.Quit
+}
+
+func (model *DashboardModel) updateCreateSnapshotReview(pressed string) (tea.Model, tea.Cmd) {
+	switch pressed {
+	case "esc", "n":
+		model.screen = dashboardCreate
+		model.focus = 2
+	case "enter", "y":
+		model.intent = &Intent{
+			Action: "workspace-create", Root: model.data.Root, Workspace: model.name,
+			SourceBranch: model.data.Branch, SourceRevision: model.data.Revision,
+			Snapshot: true, Agent: model.selectedAgent(), Open: model.pendingCreateOpen,
+		}
+		return model, tea.Quit
+	}
+	return model, nil
 }
 
 func (model *DashboardModel) updateAgent(pressed string) (tea.Model, tea.Cmd) {
@@ -358,6 +404,7 @@ func (model *DashboardModel) emit(action string, workspace DashboardWorkspace) (
 
 func (model *DashboardModel) cancelForm() {
 	model.screen, model.focus, model.notice, model.browser = dashboardHome, 0, "", false
+	model.snapshot, model.pendingCreateOpen = false, false
 }
 func (model *DashboardModel) moveSelection(delta int) {
 	if len(model.data.Workspaces) != 0 {
@@ -402,6 +449,8 @@ func (model *DashboardModel) View() tea.View {
 	switch model.screen {
 	case dashboardCreate:
 		content = model.renderCreate(theme)
+	case dashboardCreateSnapshotReview:
+		content = model.renderCreateSnapshotReview(theme)
 	case dashboardAgent:
 		content = model.renderAgent(theme)
 	case dashboardGit:
@@ -426,8 +475,8 @@ func (model *DashboardModel) renderHome(theme visualTheme) string {
 	checkout := theme.value.Render(model.checkoutLabel())
 	cleanliness := theme.success.Render("Clean")
 	if !model.data.Clean {
-		cleanliness = theme.warning.Render("Not clean — commit tracked changes before creating or updating")
-	} else if !model.sourceReady() {
+		cleanliness = theme.warning.Render("Not clean — ordinary create/update require a commit; reviewed snapshots are available.")
+	} else if !model.sourceIdentityReady() {
 		cleanliness = theme.warning.Render("Source branch or revision unavailable")
 	}
 	if model.height < defaultDashboardHeight {
@@ -485,7 +534,7 @@ func (model *DashboardModel) renderWorkspaceList(theme visualTheme) string {
 
 func (model *DashboardModel) renderActions(theme visualTheme) string {
 	actions := []string{"[c] Create workspace"}
-	if !model.sourceReady() {
+	if !model.sourceIdentityReady() {
 		actions[0] = "[c] Create unavailable — " + model.sourceBlockedReason()
 	}
 	workspace := model.selectedWorkspace()
@@ -503,8 +552,10 @@ func (model *DashboardModel) renderActions(theme visualTheme) string {
 			actions = append(actions, "[u] Update from local checkout")
 		} else if workspace.MutationActive {
 			actions = append(actions, "[u] Update unavailable while lifecycle change runs")
-		} else if !model.sourceReady() && (workspace.State == "running" || workspace.State == "stopped") {
+		} else if canUpdate(*workspace) && !model.sourceIdentityReady() {
 			actions = append(actions, "[u] Update unavailable — "+model.sourceBlockedReason())
+		} else if canUpdate(*workspace) && !model.data.Clean {
+			actions = append(actions, "[u] Update unavailable — use dsx workspace update NAME --snapshot")
 		}
 		if !workspace.MutationActive && (workspace.State == "running" || workspace.State == "needs_resolution") {
 			actions = append(actions, "[s] Stop")
@@ -556,13 +607,14 @@ func (model *DashboardModel) renderActions(theme visualTheme) string {
 }
 
 func (model *DashboardModel) sourceReady() bool {
-	return model.data.Clean && model.data.Branch != "" && model.data.Revision != ""
+	return model.data.Clean && model.sourceIdentityReady()
+}
+
+func (model *DashboardModel) sourceIdentityReady() bool {
+	return model.data.Branch != "" && model.data.Revision != ""
 }
 
 func (model *DashboardModel) sourceBlockedReason() string {
-	if !model.data.Clean {
-		return "commit tracked changes first"
-	}
 	return "source branch or revision is unavailable"
 }
 
@@ -587,12 +639,33 @@ func (model *DashboardModel) renderCreate(theme visualTheme) string {
 	if agent == model.data.DefaultAgent {
 		inherited = " — inherited from project"
 	}
-	body := formRow(theme, model.focus == 0, "Name", name) + "\n\n" + formRow(theme, false, "Starting point", boundedLine(model.data.Branch)+" @ "+boundedLine(model.data.Revision)+" (immutable)") + "\n\n" + formRow(theme, model.focus == 1, "Default agent", displayAgent+inherited) + "\n\n" + formChoice(theme, model.focus == 2, "Create and open") + "\n" + formChoice(theme, model.focus == 3, "Create in background")
+	check := "[ ]"
+	if model.snapshot {
+		check = "[x]"
+	}
+	body := formRow(theme, model.focus == 0, "Name", name) + "\n\n" +
+		formRow(theme, false, "Starting point", boundedLine(model.data.Branch)+" @ "+boundedLine(model.data.Revision)) + "\n\n" +
+		formRow(theme, model.focus == 1, "Default agent", displayAgent+inherited) + "\n\n" +
+		formRow(theme, model.focus == 2, "Snapshot local changes", check+" Include reviewed final working-tree content") + "\n\n" +
+		formChoice(theme, model.focus == 3, "Create and open") + "\n" +
+		formChoice(theme, model.focus == 4, "Create in background")
 	if model.notice != "" {
 		body += "\n\n" + theme.warning.Render(boundedLine(model.notice))
 	}
-	body += "\n\n" + theme.help("[Tab] Next field", "[←/→] Select agent", "[Enter] Choose action", "[Esc] Cancel")
+	body += "\n\n" + theme.help("[Tab] Next field", "[←/→] Select agent", "[Space] Toggle snapshot", "[Enter] Choose action", "[Esc] Cancel")
 	return theme.panel("Create workspace", body, model.width, true)
+}
+
+func (model *DashboardModel) renderCreateSnapshotReview(theme visualTheme) string {
+	body := theme.warning.Render("Create workspace from a source snapshot?") +
+		"\n\nWorkspace\n  " + boundedLine(model.name) +
+		"\n\nReal parent\n  " + boundedLine(model.data.Branch) + " @ " + boundedLine(model.data.Revision) +
+		"\n\nIncludes final tracked file content and nonignored untracked files." +
+		"\nIgnored untracked files stay on the host; tracked files remain included." +
+		"\nUnmerged paths and Git submodules are rejected." +
+		"\nYour branch, HEAD, index, worktree, and durable refs are not changed." +
+		"\n\n" + theme.help("[y/Enter] Create snapshot workspace", "[n/Esc] Back")
+	return theme.panel("Review source snapshot", body, model.width, true)
 }
 
 func (model *DashboardModel) renderAgent(theme visualTheme) string {

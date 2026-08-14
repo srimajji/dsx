@@ -1,15 +1,15 @@
 # DSX Product Requirements Document
 
 - **Status:** Draft
-- **Version:** 0.4
-- **Date:** 2026-08-11
+- **Version:** 0.5
+- **Date:** 2026-08-14
 - **Audience:** DSX users and maintainers
 
 This PRD defines the approved product contract for the DSX multi-workspace redesign. It specifies required behavior and acceptance criteria; it does not assert implementation or release evidence.
 
 ## 1. Product summary
 
-DSX is a fast, local, command-line development environment for macOS on Apple silicon. From an existing local Git checkout, a developer can create multiple named, isolated Linux workspaces, run supported coding-agent harnesses, run project applications and local infrastructure, publish selected ports, test through an isolated browser, transfer committed revisions between the host and each workspace, and safely remove DSX-owned resources.
+DSX is a fast, local, command-line development environment for macOS on Apple silicon. From an existing local Git checkout, a developer can create multiple named, isolated Linux workspaces, run supported coding-agent harnesses, run project applications and local infrastructure, publish selected ports, test through an isolated browser, transfer clean commits or explicitly reviewed final-working-tree snapshots between the host and each workspace, and safely remove DSX-owned resources.
 
 DSX uses Apple’s `container` runtime. It does not replace the project’s build system or infer arbitrary lifecycle commands.
 
@@ -18,9 +18,9 @@ DSX has exactly one workspace type: a named, isolated Apple microVM containing a
 ```mermaid
 flowchart TB
     L[Local Git checkout<br/>source and integration point]
-    L -->|committed snapshot| W1[feature-a]
-    L -->|committed snapshot| W2[feature-b]
-    L -->|committed snapshot| W3[tests]
+    L -->|verified source bundle| W1[feature-a]
+    L -->|verified source bundle| W2[feature-b]
+    L -->|verified source bundle| W3[tests]
 
     H[Host harness credentials] -->|reviewed import| P[DSX project credentials]
     P -->|isolated copy| W1
@@ -38,7 +38,7 @@ The product model has these constraints:
 - Every workspace is a named peer containing a private clone.
 - Multiple workspaces may run concurrently.
 - Workspace lifecycle and agent lifecycle are separate.
-- DSX requires Git and transfers committed revisions through verified Git bundles.
+- DSX requires Git and transfers clean committed revisions by default or explicitly requested final-working-tree snapshots through verified Git bundles.
 - Workspaces do not share Git objects or writable authentication state.
 
 ## 2. User problem
@@ -64,7 +64,7 @@ The user needs a tool that:
 2. **Separate lifecycles:** creating, starting, stopping, updating, or restarting a workspace does not implicitly create or restore an agent session.
 3. **Fast by reuse:** reuse pulled images, build layers, approved authentication, and explicitly persistent state.
 4. **Explicit over clever:** inspect existing project declarations, but do not silently invent or execute lifecycle commands.
-5. **Committed source transfer:** use verified Git bundles rather than host source mounts or shared Git objects.
+5. **Explicit source transfer:** use verified Git bundles for clean committed ingress by default and reviewed final-working-tree snapshot ingress when explicitly requested, never host source mounts or shared Git objects.
 6. **Project-scoped authority:** expose only the selected workspace, approved credentials, network paths, and ports.
 7. **Reviewed authentication:** detect only supported portable artifacts and never import credentials silently.
 8. **Owned cleanup:** delete only resources DSX can prove it owns and protect unfetched work from accidental deletion.
@@ -166,6 +166,7 @@ Imported artifacts become canonical project credentials separated by harness.
 ```console
 dsx workspace create feature-a
 dsx workspace create feature-b --default-agent codex
+dsx workspace create dirty-work --snapshot
 ```
 
 The TUI creation form is:
@@ -182,6 +183,9 @@ Starting point
 Default agent
   OMP — inherited from project
 
+
+Snapshot local changes
+  [ ]
 Container
   dsx-tracking-chrome-feature-a-workspace-a81f2c
 
@@ -191,9 +195,10 @@ Container
 The form contains:
 
 - A validated workspace name.
-- The committed source branch and revision.
+- The real host source branch and revision.
 - An agent selector populated from `agents.allowed`.
 - The project default agent preselected.
+- An optional **Snapshot local changes** checkbox, defaulting to off.
 
 The form does not contain:
 
@@ -202,18 +207,22 @@ The form does not contain:
 - Browser selection.
 - Workspace-mode selection.
 
-Workspace creation must:
+Ordinary workspace creation must:
 
 1. Inspect the local Git checkout.
-2. Require a clean tracked working tree.
+2. Require a clean tracked working tree and index.
 3. Warn that ignored and untracked files are excluded.
-4. Record the checked-out source branch and commit.
-5. Create and verify a restrictive Git bundle.
+4. Record the checked-out source branch and real host commit.
+5. Create and verify a restrictive Git bundle for that commit.
 6. Create the workspace VM and private volumes.
 7. Clone into guest-owned storage without shared Git objects.
 8. Create and check out `dsx/<workspace-name>`.
 9. Start only the DSX guest control process as the long-lived guest process.
 10. Optionally open a shell.
+
+`dsx workspace create NAME --snapshot` is an explicit alternative. The TUI exposes the same operation only after a separate review. Snapshot capture creates a deterministic synthetic child of the real host `HEAD`. Its tree contains the final working-tree version of every tracked path, including tracked paths matching ignore rules, plus every nonignored untracked path. It flattens staged and unstaged distinctions: later working-tree bytes win. Ignored untracked paths remain excluded. Unmerged paths, submodule gitlinks, and newly embedded Git repositories are rejected.
+
+Snapshot capture must not mutate the host branch, `HEAD`, index, worktree, durable refs, or object database. DSX may create only private temporary index, object, and ref artifacts and the registered mode-`0600` source bundle. Race detection, bounded input and bundle limits, bundle verification, guest-owned clone storage, ownership-safe cleanup, and rollback remain mandatory.
 
 Any approved setup work is executed through the DSX guest control process and must not implicitly start an agent, browser, project application, watcher, database, or other persistent project process.
 
@@ -245,9 +254,10 @@ DSX provides isolation and result transfer. It does not schedule, coordinate, se
 
 ```console
 dsx workspace update feature-a
+dsx workspace update feature-a --snapshot
 ```
 
-This command means **Update from local checkout**.
+This command means **Update from local checkout**. The ordinary form requires a clean tracked state and a newer real host commit. `--snapshot` explicitly captures the current final working-tree tree; the real host `HEAD` may be unchanged only when that captured tree changed. In both forms, the real host `HEAD` must equal or descend from the previously recorded real host head, and the checked-out branch must still match.
 
 Before:
 
@@ -279,6 +289,8 @@ git rebase --abort
 ```
 
 DSX does not silently stash files, invent commits, or attempt semantic conflict resolution.
+
+Update records the exact transferred source revision, its real host parent/head, its source tree, and whether it is synthetic. Rebase still uses the exact old and new transferred revisions, so clean and snapshot sources share the same backup, conflict, abort, reconciliation, and result-state guarantees. The TUI keeps dirty update unavailable and directs the user to `dsx workspace update NAME --snapshot`; it never snapshots new files implicitly.
 
 ### 5.6 Integrating workspace results
 
@@ -313,6 +325,8 @@ A recommended parallel workflow is:
 7. Fetch and merge `feature-b`.
 
 Cleanup refuses to destroy unfetched commits or other unexported work unless loss is explicitly confirmed.
+
+Status and workspace-list output identify snapshot baselines with `source_snapshot`. Fetch and diff continue to use the exact transferred source revision. For an ordinary source, guarded apply retains the exact-commit and tracked-fingerprint checks. For a snapshot source, apply additionally requires a clean host whose current `HEAD` tree exactly equals the recorded snapshot tree. The user must `git add -A` and commit the exact captured baseline, or update and capture a new snapshot, before apply. A mismatch refuses without mutation. When equivalent, DSX creates only a temporary isolated bridge object and stages only the workspace-result delta; the recorded applied revision remains the real fetched workspace result.
 
 ### 5.7 Bare-command dashboard
 
@@ -457,9 +471,12 @@ DSX is unreleased, so there are no deprecated compatibility aliases.
 ### R3. Git source creation
 
 - DSX must require Git.
-- Workspace creation must require a clean tracked local working tree.
-- DSX must warn that ignored and untracked files are excluded from source transfer.
-- DSX must record the checked-out local source branch and commit.
+- Ordinary workspace creation must require a clean tracked local working tree and index, use host `HEAD` as its source commit, and exclude all untracked files whether ignored or not.
+- Explicit `--snapshot` creation must produce a deterministic synthetic child of host `HEAD` whose tree contains final working-tree versions of all tracked paths plus nonignored untracked paths.
+- Snapshot capture must include tracked paths even when ignore rules match them, exclude ignored untracked paths, flatten staged and unstaged content to final working-tree bytes, and reject unmerged paths, gitlinks, and embedded Git repositories.
+- Snapshot capture must not mutate the host branch, `HEAD`, index, worktree, durable refs, or object database; only private temporary index/object/ref artifacts and the registered mode-`0600` bundle may be created.
+- DSX must warn that ignored and untracked files are excluded from ordinary source transfer, and that ignored untracked files remain excluded from snapshot transfer.
+- DSX must record the checked-out local source branch, exact transferred source revision, real host head, source tree, and snapshot kind.
 - Source transfer must use a generated, restrictive, verified Git bundle.
 - DSX must create the private clone in guest-owned storage.
 - Clone creation must prohibit shared object hardlinks and other shared Git-object storage.
@@ -477,6 +494,8 @@ DSX is unreleased, so there are no deprecated compatibility aliases.
 
 The CLI and TUI may offer an explicit create-and-open action, but workspace creation must not launch an agent or browser.
 
+`--snapshot` is a per-invocation source-ingress choice, not project configuration or executable authority. The TUI must default it off and require a bounded explicit review before emitting snapshot creation.
+
 #### R4.2 List
 
 `dsx workspace list` must report, at minimum:
@@ -485,6 +504,7 @@ The CLI and TUI may offer an explicit create-and-open action, but workspace crea
 - Ownership and project identity.
 - Running, stopped, failed, mutating, or `Needs resolution` state.
 - Recorded source branch and revision.
+- Whether the recorded source is a snapshot.
 - Workspace default and allowed agents.
 - Published port mappings and final URLs when active.
 - Unfetched or otherwise unexported work.
@@ -541,13 +561,14 @@ Only the DSX guest control process starts automatically afterward. Restarting on
 
 `dsx workspace update NAME` must mean **Update from local checkout** and must:
 
-1. Require all relevant local tracked changes to be committed.
-2. Verify that the local checkout remains on the workspace’s recorded source branch.
-3. Transfer the latest local revision through a restrictive, verified Git bundle.
-4. Create a workspace backup ref before rewriting the workspace branch.
-5. Rebase `dsx/<workspace-name>` onto the transferred local revision.
-6. Report conflicts without semantic resolution.
-
+1. For ordinary update, require a clean tracked state and an advanced real host commit.
+2. For explicit `--snapshot` update, capture a changed final working-tree tree even when the real host commit is unchanged.
+3. Verify that the local checkout remains on the workspace’s recorded source branch and that real host history has not moved behind or sideways from the recorded real host head.
+4. Transfer the latest clean or snapshot source through a restrictive, verified Git bundle.
+5. Create a workspace backup ref before rewriting the workspace branch.
+6. Rebase `dsx/<workspace-name>` from the old exact transferred source revision onto the new exact transferred source revision.
+7. Persist source revision, real host head, source tree, snapshot kind, fingerprint, and digest atomically.
+8. Report conflicts without semantic resolution.
 If uncommitted workspace changes prevent a safe rebase, DSX must stop before rewriting the branch and instruct the user to commit, discard, or otherwise handle those files. DSX must not silently stash them.
 
 On a rebase conflict, DSX must:
@@ -835,18 +856,21 @@ OAuth and interactive agent-login URLs may open in the macOS browser through a t
 ### R14. Git update and result integration
 
 - `dsx git status WORKSPACE` must report:
-  - Recorded source branch and commit.
+  - Recorded source branch, exact transferred commit, and snapshot kind.
   - Workspace result branch.
   - Dirty state.
   - Rebase and conflict state.
   - Host project fingerprint.
   - Last fetched revision.
   - Unfetched or otherwise unexported work.
-- `dsx git diff WORKSPACE` must safely render committed and uncommitted changes.
+- `dsx git diff WORKSPACE` must safely render committed and uncommitted changes relative to the exact transferred source revision.
 - `dsx git fetch WORKSPACE` must import committed workspace history through a generated, restrictive, verified Git bundle.
 - The host destination must be `refs/remotes/dsx/<workspace-name>`.
 - Fetch must not automatically merge the result.
 - `dsx git apply WORKSPACE` must support a guarded squashed working-tree application, including applicable uncommitted workspace changes.
+- Ordinary apply must retain exact source-commit, fingerprint, ancestry, collision, and mutation-safety checks.
+- Snapshot apply must additionally require a clean host `HEAD` tree equal to the recorded snapshot tree, verify the synthetic parent/tree and result ancestry, and refuse tree mismatch without host mutation.
+- Snapshot apply may use only an apply-local object quarantine for its bridge commit and must stage only the workspace-result delta.
 - Result transfer must preserve new, deleted, renamed, and binary files.
 - Composite workspaces must support explicit `--repo MEMBER` targeting.
 - DSX must never silently merge parallel results.
@@ -1124,9 +1148,9 @@ The MVP does not:
 19. Workspace restart preserves the private clone, commits, uncommitted files, dependencies, service volumes, authentication copies, configuration, ownership, and rebase state.
 20. Workspace restart relaunches no agent, `pnpm dev`, watcher, manually started database, background command, or project application process.
 21. Restarting, stopping, updating, or removing one workspace does not affect siblings.
-22. `dsx workspace update NAME` requires committed local changes, verifies the recorded source branch, transfers the latest revision through a verified bundle, creates a backup ref, and rebases the workspace branch.
-23. A rebase conflict leaves the workspace in `Needs resolution` with a valid Git rebase state for `git rebase --continue` or `git rebase --abort`.
-24. Update never silently stashes files, invents commits, or attempts semantic conflict resolution.
+22. Ordinary `dsx workspace update NAME` requires committed local changes; explicit `--snapshot` captures changed final working-tree content. Both verify recorded branch and real-host lineage, transfer through a verified bundle, create a backup ref, and rebase the workspace branch between exact transferred source revisions.
+23. Snapshot create/update includes final tracked content and nonignored untracked files, excludes ignored untracked files, rejects unmerged paths and gitlinks, and leaves host branch, `HEAD`, index, worktree, durable refs, and object database unchanged.
+24. A rebase conflict leaves the workspace in `Needs resolution` with its requested source kind and a valid Git rebase state for `git rebase --continue` or `git rebase --abort`.
 25. OMP host import accepts exactly a consistent closed `agent.db` snapshot plus optional WAL and no complete OMP directory.
 26. Codex host import accepts exactly the approved portable `auth.json`.
 27. Claude host authentication and macOS Keychain state are never imported; Claude uses explicit DSX login.
@@ -1150,10 +1174,10 @@ The MVP does not:
 45. Reconfiguring ports affects only the selected workspace and preserves its private clone and DSX-owned persistent state.
 46. Host or private-network access is unavailable without an explicit, reviewed trust grant.
 47. Temporary host proxies are scoped to the selected workspace and removed on stop or cleanup.
-48. `dsx git status` and `dsx git diff` safely report committed, uncommitted, conflict, and fetch state.
+48. `dsx git status` and `dsx git diff` safely report committed, uncommitted, conflict, fetch, and source-snapshot state.
 49. `dsx git fetch` imports committed workspace history into `refs/remotes/dsx/<workspace-name>` through a verified Git bundle without merging it.
-50. Workspace results can be fetched and merged independently.
-51. `dsx git apply` can apply guarded new, deleted, renamed, binary, and applicable uncommitted workspace changes.
+50. Workspace results can be fetched and merged independently across clean and synthetic source baselines.
+51. `dsx git apply` can apply guarded new, deleted, renamed, binary, and applicable uncommitted workspace changes; snapshot apply requires a clean host `HEAD` tree exactly matching the captured baseline and otherwise leaves the host byte-identical.
 52. Cleanup refuses to destroy unfetched commits or other unexported work without explicit confirmation.
 53. Removing one workspace removes all proven DSX-owned resources for that workspace while preserving sibling workspaces, unrelated projects, Apple runtime-owned builders, and canonical authentication.
 54. Explicit all-workspace cleanup removes all proven DSX-owned workspace resources in scope while preserving unrelated resources.

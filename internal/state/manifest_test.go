@@ -31,6 +31,101 @@ func TestManifestV2ValidatesWorkspaceGitAndIndependentVolumes(t *testing.T) {
 	}
 }
 
+func TestManifestV2GitProvenanceCompatibilityAndStrictRoundTrips(t *testing.T) {
+	legacyClean := manifestV2Fixture(t)
+	legacyData, err := json.Marshal(legacyClean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"source_snapshot", "source_head_revision", "source_tree", "conflict_source_snapshot"} {
+		if strings.Contains(string(legacyData), `"`+field+`"`) {
+			t.Fatalf("legacy v2 manifest unexpectedly persisted %q: %s", field, legacyData)
+		}
+	}
+	decodedLegacy, err := DecodeManifest(legacyData)
+	if err != nil {
+		t.Fatalf("decode legacy v2 manifest: %v", err)
+	}
+	if decodedLegacy.Git[0].SourceSnapshot || decodedLegacy.Git[0].SourceHeadRevision != "" || decodedLegacy.Git[0].SourceTree != "" {
+		t.Fatalf("legacy v2 provenance = %#v", decodedLegacy.Git[0])
+	}
+
+	clean := manifestV2Fixture(t)
+	clean.Git[0].SourceHeadRevision = strings.Repeat("1", 40)
+	clean.Git[0].SourceTree = strings.Repeat("4", 40)
+	cleanData, err := json.Marshal(clean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedClean, err := DecodeManifest(cleanData)
+	if err != nil {
+		t.Fatalf("decode clean provenance: %v", err)
+	}
+	if decodedClean.Git[0].SourceSnapshot ||
+		decodedClean.Git[0].SourceHeadRevision != clean.Git[0].SourceHeadRevision ||
+		decodedClean.Git[0].SourceTree != clean.Git[0].SourceTree {
+		t.Fatalf("clean provenance round-trip = %#v", decodedClean.Git[0])
+	}
+
+	snapshot := clean
+	snapshot.Git = append([]GitRecord(nil), clean.Git...)
+	snapshot.Git[0].SourceSnapshot = true
+	snapshot.Git[0].SourceRevision = strings.Repeat("5", 40)
+	snapshot.Git[0].Conflict = true
+	snapshot.Git[0].ConflictSourceRevision = strings.Repeat("6", 40)
+	snapshot.Git[0].ConflictSourceSnapshot = true
+	snapshot.Git[0].ConflictBundleDigest = strings.Repeat("7", 64)
+	snapshotData, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedSnapshot, err := DecodeManifest(snapshotData)
+	if err != nil {
+		t.Fatalf("decode snapshot provenance: %v", err)
+	}
+	record := decodedSnapshot.Git[0]
+	if !record.SourceSnapshot || !record.ConflictSourceSnapshot ||
+		record.SourceHeadRevision != snapshot.Git[0].SourceHeadRevision ||
+		record.SourceTree != snapshot.Git[0].SourceTree {
+		t.Fatalf("snapshot provenance round-trip = %#v", record)
+	}
+
+	for name, mutate := range map[string]func(*GitRecord){
+		"head without tree": func(record *GitRecord) {
+			record.SourceHeadRevision = strings.Repeat("1", 40)
+		},
+		"tree without head": func(record *GitRecord) {
+			record.SourceTree = strings.Repeat("4", 40)
+		},
+		"snapshot without provenance": func(record *GitRecord) {
+			record.SourceSnapshot = true
+		},
+		"head wrong object format": func(record *GitRecord) {
+			record.SourceHeadRevision = strings.Repeat("1", 64)
+			record.SourceTree = strings.Repeat("4", 40)
+		},
+		"tree wrong object format": func(record *GitRecord) {
+			record.SourceHeadRevision = strings.Repeat("1", 40)
+			record.SourceTree = strings.Repeat("4", 64)
+		},
+		"invalid head": func(record *GitRecord) {
+			record.SourceHeadRevision = strings.Repeat("g", 40)
+			record.SourceTree = strings.Repeat("4", 40)
+		},
+		"conflict snapshot without conflict": func(record *GitRecord) {
+			record.ConflictSourceSnapshot = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			manifest := manifestV2Fixture(t)
+			mutate(&manifest.Git[0])
+			if err := ValidateManifest(manifest); err == nil {
+				t.Fatalf("invalid provenance accepted: %#v", manifest.Git[0])
+			}
+		})
+	}
+}
+
 func TestManifestAWSGrantDefaultsOffAndRoundTrips(t *testing.T) {
 	manifest := manifestV2Fixture(t)
 	if manifest.AWSGrant != nil {

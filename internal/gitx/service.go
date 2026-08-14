@@ -96,12 +96,19 @@ func (service *Service) gitArgv(arguments ...string) []string {
 }
 
 func (service *Service) runGit(ctx context.Context, directory string, stdout io.Writer, arguments ...string) error {
+	return service.runGitWithEnvironment(ctx, directory, nil, stdout, arguments...)
+}
+
+func (service *Service) runGitWithEnvironment(ctx context.Context, directory string, environment []string, stdout io.Writer, arguments ...string) error {
 	var stderr cappedCapture
 	stderr.limit = maxGitErrorOutput
+	commandEnvironment := make([]string, 0, len(service.environment)+len(environment))
+	commandEnvironment = append(commandEnvironment, service.environment...)
+	commandEnvironment = append(commandEnvironment, environment...)
 	exit, err := service.runner.Run(ctx, Command{
 		Argv:   service.gitArgv(arguments...),
 		Dir:    directory,
-		Env:    append([]string(nil), service.environment...),
+		Env:    commandEnvironment,
 		Stdout: stdout,
 		Stderr: &stderr,
 	})
@@ -122,8 +129,12 @@ func (service *Service) runGit(ctx context.Context, directory string, stdout io.
 }
 
 func (service *Service) gitOutput(ctx context.Context, directory string, arguments ...string) ([]byte, error) {
+	return service.gitOutputWithEnvironment(ctx, directory, nil, arguments...)
+}
+
+func (service *Service) gitOutputWithEnvironment(ctx context.Context, directory string, environment []string, arguments ...string) ([]byte, error) {
 	capture := cappedCapture{limit: maxGitOutput}
-	if err := service.runGit(ctx, directory, &capture, arguments...); err != nil {
+	if err := service.runGitWithEnvironment(ctx, directory, environment, &capture, arguments...); err != nil {
 		return nil, err
 	}
 	if capture.truncated {

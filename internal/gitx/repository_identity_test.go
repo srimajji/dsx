@@ -189,6 +189,38 @@ func TestPrepareSourceRejectsConcurrentSnapshotMutationAndCleansArtifacts(t *tes
 	}
 }
 
+func TestPrepareSourceRejectsConcurrentSnapshotContentMutationAndCleansArtifacts(t *testing.T) {
+	fixture := newRepositoryWithCommit(t)
+	writeFile(t, filepath.Join(fixture.path, "initial-untracked.txt"), "initial\n")
+	runner := &afterBundleCreateRunner{
+		delegate: OSRunner{},
+		after: func() {
+			writeFile(t, filepath.Join(fixture.path, "appeared-during-snapshot.txt"), "racing\n")
+		},
+	}
+	service, err := NewService(runner, testGitExecutable(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.service = service
+	tempRoot := t.TempDir()
+	_, err = service.PrepareSource(context.Background(), SourceRequest{
+		Repository: fixture.repository(), ApprovedRoot: fixture.path,
+		Workspace: "race", TempRoot: tempRoot, Snapshot: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "snapshot candidate files changed") {
+		t.Fatalf("snapshot race error = %v", err)
+	}
+	assertNoPrivateSourceRefs(t, fixture.path)
+	entries, readErr := os.ReadDir(tempRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary snapshot artifacts remain after race: %#v", entries)
+	}
+}
+
 type afterBundleCreateRunner struct {
 	delegate Runner
 	after    func()

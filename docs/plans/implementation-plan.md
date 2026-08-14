@@ -3,13 +3,13 @@
 - **Status:** MVP implementation complete in source; external acceptance and release gates remain
 - **Original plan date:** 2026-08-09
 - **Completion snapshot:** 2026-08-10
-- **Authority:** [PRD v0.3](./PRD.md) and [ADR 0001](./adr/0001-dsx-implementation-architecture.md)
-- **Historical evidence only:** [PRD/ADR pressure test](./review-2026-08-09-prd-adr-pressure-test.md)
-- **Closeout backlog:** [Missed, skipped, and post-MVP work](./post-mvp-backlog.md)
+- **Authority:** [PRD v0.3](../PRD.md) and [ADR 0001](../adr/0001-dsx-implementation-architecture.md)
+- **Historical evidence only:** [PRD/ADR pressure test](../reviews/review-2026-08-09-prd-adr-pressure-test.md)
+- **Closeout backlog:** [Missed, skipped, and post-MVP work](../post-mvp-backlog.md)
 
 ## Implementation outcome
 
-The numbered slices and issue-sized tasks below are retained as the execution record. DSX-001 through DSX-085 are implemented in source, tests, workflows, release tooling, or documentation. The implementation is not a signed public release: unavailable credentials, immutable reference fixtures, physical runner lanes, registry/signing identities, and external integration evidence remain tracked in the [post-MVP backlog](./post-mvp-backlog.md).
+The numbered slices and issue-sized tasks below are retained as the execution record. DSX-001 through DSX-085 are implemented in source, tests, workflows, release tooling, or documentation. The implementation is not a signed public release: unavailable credentials, immutable reference fixtures, physical runner lanes, registry/signing identities, and external integration evidence remain tracked in the [post-MVP backlog](../post-mvp-backlog.md).
 
 | Slice | Source implementation | Closeout qualification |
 |---|---|---|
@@ -730,20 +730,20 @@ A pre-job/boot sweeper handles trap-invisible SIGKILL/power loss by combining le
 
 ### 11.2 Closeout status of original open questions
 
-The original implementation blockers were resolved or transferred to the [post-MVP backlog](./post-mvp-backlog.md); they are no longer prerequisites for editing this completed plan.
+The original implementation blockers were resolved or transferred to the [post-MVP backlog](../post-mvp-backlog.md); they are no longer prerequisites for editing this completed plan.
 
 | Original question | Closeout status |
 |---|---|
 | Canonical repository/module path | Resolved: `github.com/srimajji/dsx`. |
 | Local Go installation | Resolved: Go 1.26.5 installed and pinned; module language floor remains 1.25.8. |
-| Reference workspaces | Open as MVP-GAP-001 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence): immutable nonsecret snapshots and complete repeatable acceptance were not supplied. |
+| Reference workspaces | Open as MVP-GAP-001 in the [closeout evidence gaps](../post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence): immutable nonsecret snapshots and complete repeatable acceptance were not supplied. |
 | Dynamic Apple publication | Resolved safely: Apple 1.2.2 native `:0` publication remains unsupported; DSX uses the tested loopback reservation/handoff fallback and inspect-derived bindings. |
-| macOS support inventory | Open as MVP-GAP-002 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence): macOS 26/27 dedicated physical lanes are not provisioned. |
-| Harness vendor behavior | Partially resolved in implementation; real provider authentication, refresh, callback, and PTY evidence remains MVP-GAP-003 and MVP-GAP-004 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
+| macOS support inventory | Open as MVP-GAP-002 in the [closeout evidence gaps](../post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence): macOS 26/27 dedicated physical lanes are not provisioned. |
+| Harness vendor behavior | Partially resolved in implementation; real provider authentication, refresh, callback, and PTY evidence remains MVP-GAP-003 and MVP-GAP-004 in the [closeout evidence gaps](../post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
 | Auth conflict UX | Resolved for MVP: preserve and report the conflict candidate, keep the active seed unchanged, and require a fresh explicit login; no generic merge command. |
-| Browser/private-network and host-interface semantics | Browser isolation passed locally. Private relay/interface proof remains MVP-GAP-005 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
+| Browser/private-network and host-interface semantics | Browser isolation passed locally. Private relay/interface proof remains MVP-GAP-005 in the [closeout evidence gaps](../post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
 | Leapp update mechanism | Resolved locally on macOS 27/Apple 1.2.2 through the production mirror and read-only directory mount; supported-lane repetition remains part of MVP-GAP-002. |
-| Standard image registry/signing identity | Open as MVP-GAP-006 and MVP-GAP-007 in the [closeout evidence gaps](./post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
+| Standard image registry/signing identity | Open as MVP-GAP-006 and MVP-GAP-007 in the [closeout evidence gaps](../post-mvp-backlog.md#3-missed-or-blocked-mvp-completion-evidence). |
 
 ### 11.3 Evidence that would change ADR 0001
 
@@ -810,4 +810,4 @@ Record the experiment, host/runtime/harness versions, raw sanitized evidence, fa
 
 The completed implementation followed the numbered slices. Slice 1 resolved the module path, pinned Go, created the two version entrypoints and common model contract, enforced the cross-build/import closure, and established ordinary CI before the configuration/runtime/state contracts and dependent slices proceeded.
 
-The original first-safe-slice rule is retained as historical sequencing guidance: repository/toolchain foundations had to land before any lifecycle work could safely begin. Future work should start from the [post-MVP backlog](./post-mvp-backlog.md), not replay this implementation sequence.
+The original first-safe-slice rule is retained as historical sequencing guidance: repository/toolchain foundations had to land before any lifecycle work could safely begin. Future work should start from the [post-MVP backlog](../post-mvp-backlog.md), not replay this implementation sequence.

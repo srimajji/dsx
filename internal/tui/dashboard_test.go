@@ -123,27 +123,34 @@ func TestDashboardDisablesUpdateAndRestartDuringMutation(t *testing.T) {
 	}
 }
 
-func TestDashboardDisablesSourceTransferActionsForDirtyCheckout(t *testing.T) {
+func TestDashboardAllowsReviewedCreateButBlocksOrdinaryUpdateForDirtyCheckout(t *testing.T) {
 	data := dashboardFixture("running")
 	data.Clean = false
 	model := NewDashboardModel(data)
 	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Not clean", "Create unavailable — commit tracked changes first", "Update unavailable — commit tracked changes first"} {
-		if !strings.Contains(view, expected) {
-			t.Fatalf("dirty checkout view omitted %q:\n%s", expected, view)
+	normalizedView := strings.Join(strings.Fields(strings.ReplaceAll(view, "│", " ")), " ")
+	for _, expected := range []string{
+		"Not clean — ordinary create/update require a commit; reviewed snapshots are available.",
+		"[c] Create workspace",
+		"Update unavailable — use dsx workspace update NAME --snapshot",
+	} {
+		if !strings.Contains(normalizedView, expected) {
+			t.Fatalf("dirty checkout view omitted %q:\nnormalized=%q\n%s", expected, normalizedView, view)
 		}
 	}
-	for _, key := range []string{"c", "u"} {
-		updated, command := dashboardPress(t, NewDashboardModel(data), textKey(key))
-		if command != nil {
-			t.Fatalf("dirty checkout %q action exited", key)
-		}
-		if updated.screen != dashboardHome {
-			t.Fatalf("dirty checkout %q opened screen %d", key, updated.screen)
-		}
-		if intent, found := updated.Intent(); found {
-			t.Fatalf("dirty checkout %q emitted %#v", key, intent)
-		}
+	if strings.Contains(normalizedView, "Create unavailable") {
+		t.Fatalf("dirty checkout incorrectly disabled reviewed create:\n%s", view)
+	}
+	updated, command := dashboardPress(t, model, textKey("c"))
+	if command != nil || updated.screen != dashboardCreate {
+		t.Fatalf("dirty checkout create did not open reviewed form: screen=%d command=%v", updated.screen, command)
+	}
+	updated, command = dashboardPress(t, NewDashboardModel(data), textKey("u"))
+	if command != nil {
+		t.Fatal("dirty ordinary update exited")
+	}
+	if intent, found := updated.Intent(); found {
+		t.Fatalf("dirty ordinary update emitted %#v", intent)
 	}
 }
 
@@ -173,7 +180,7 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 		model := NewDashboardModel(dashboardFixture("running"))
 		model, _ = dashboardPress(t, model, textKey("c"))
 		view := ansi.Strip(model.View().Content)
-		for _, expected := range []string{"Create workspace", "Name", "Starting point", "feat/branch-1 @ abc123 (immutable)", "Default agent", "OMP — inherited from project", "Create and open", "Create in background"} {
+		for _, expected := range []string{"Create workspace", "Name", "Starting point", "feat/branch-1 @ abc123", "Default agent", "OMP — inherited from project", "Snapshot local changes", "Create and open", "Create in background"} {
 			if !strings.Contains(view, expected) {
 				t.Fatalf("create form omitted %q:\n%s", expected, view)
 			}
@@ -189,6 +196,7 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 		}
 		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 		if !open {
 			model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 		}
@@ -201,6 +209,80 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 		if command == nil || !found || intent != want {
 			t.Fatalf("create intent = %#v, found=%t, command=%v; want %#v", intent, found, command, want)
 		}
+	}
+}
+
+func TestSnapshotCreateRequiresExplicitReviewAndPreservesFormOnBack(t *testing.T) {
+	data := dashboardFixture("running")
+	data.Clean = false
+	model := NewDashboardModel(data)
+	model, _ = dashboardPress(t, model, textKey("c"))
+	for _, r := range "dirty-work" {
+		model, _ = dashboardPress(t, model, textKey(string(r)))
+	}
+	for range 2 {
+		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+	}
+	model, _ = dashboardPress(t, model, textKey(" "))
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
+	if command != nil || model.screen != dashboardCreateSnapshotReview {
+		t.Fatalf("snapshot create skipped review: screen=%d command=%v", model.screen, command)
+	}
+	if _, found := model.Intent(); found {
+		t.Fatal("snapshot review emitted an intent before confirmation")
+	}
+	view := ansi.Strip(model.View().Content)
+	normalizedReview := strings.Join(strings.Fields(strings.ReplaceAll(view, "│", " ")), " ")
+	for _, expected := range []string{
+		"Review source snapshot",
+		"dirty-work",
+		"feat/branch-1 @ abc123",
+		"Includes final tracked file content and nonignored untracked files.",
+		"Ignored untracked files stay on the host; tracked files remain included.",
+		"Unmerged paths and Git submodules are rejected.",
+		"Your branch, HEAD, index, worktree, and durable refs are not changed.",
+	} {
+		if !strings.Contains(normalizedReview, expected) {
+			t.Fatalf("snapshot review omitted %q:\nnormalized=%q\n%s", expected, normalizedReview, view)
+		}
+	}
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyEscape))
+	if model.screen != dashboardCreate || model.name != "dirty-work" || !model.snapshot || !model.pendingCreateOpen {
+		t.Fatalf("review back lost form state: %#v", model)
+	}
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyEnter))
+	model, command = dashboardPress(t, model, textKey("y"))
+	want := Intent{
+		Action: "workspace-create", Root: data.Root, Workspace: "dirty-work",
+		SourceBranch: data.Branch, SourceRevision: data.Revision,
+		Snapshot: true, Agent: "omp", Open: true,
+	}
+	intent, found := model.Intent()
+	if command == nil || !found || intent != want {
+		t.Fatalf("snapshot intent = %#v, found=%t, command=%v; want %#v", intent, found, command, want)
+	}
+}
+
+func TestDirtyCreateWithoutSnapshotStaysInForm(t *testing.T) {
+	data := dashboardFixture("running")
+	data.Clean = false
+	model := NewDashboardModel(data)
+	model, _ = dashboardPress(t, model, textKey("c"))
+	for _, r := range "dirty-work" {
+		model, _ = dashboardPress(t, model, textKey(string(r)))
+	}
+	model.focus = 3
+	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
+	if command != nil || model.screen != dashboardCreate {
+		t.Fatalf("unchecked dirty create left form: screen=%d command=%v", model.screen, command)
+	}
+	if _, found := model.Intent(); found {
+		t.Fatal("unchecked dirty create emitted an intent")
+	}
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "Select Snapshot local changes to create from a dirty checkout.") {
+		t.Fatalf("unchecked dirty create omitted guidance:\n%s", view)
 	}
 }
 func TestDashboardVSCodeAttachOnlyForRunningWorkspace(t *testing.T) {
@@ -233,6 +315,7 @@ func TestCreateFormSelectsOnlyApprovedDefaultAgents(t *testing.T) {
 		t.Fatalf("approved agent selector did not move to Codex:\n%s", view)
 	}
 	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
 	intent, found := model.Intent()
 	if command == nil || !found || intent.Agent != "codex" {
@@ -246,7 +329,7 @@ func TestCreateFormValidatesNameAndCancellationIsSideEffectFree(t *testing.T) {
 	for _, r := range "Bad-" {
 		model, _ = dashboardPress(t, model, textKey(string(r)))
 	}
-	model.focus = 2
+	model.focus = 3
 	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
 	if command != nil {
 		t.Fatal("invalid name exited")
@@ -527,7 +610,7 @@ func TestRunnerForceSetupApprovesExistingConfiguration(t *testing.T) {
 
 func TestAccessibleCreateFormEmitsReviewedWorkspaceIntent(t *testing.T) {
 	var output bytes.Buffer
-	runner := &Runner{Input: strings.NewReader("cfeature-new\t\t\n"), Output: &output}
+	runner := &Runner{Input: strings.NewReader("cfeature-new\t\t\t\n"), Output: &output}
 	final, err := runner.runAccessibleAction(NewDashboardModel(dashboardFixture("running")))
 	if err != nil {
 		t.Fatal(err)
@@ -548,4 +631,54 @@ func TestAccessibleCreateFormEmitsReviewedWorkspaceIntent(t *testing.T) {
 		}
 	}
 	assertTerminalSafe(t, output.String())
+}
+
+func TestAccessibleDirtySnapshotCreateRequiresReview(t *testing.T) {
+	data := dashboardFixture("running")
+	data.Clean = false
+	var output bytes.Buffer
+	runner := &Runner{Input: strings.NewReader("cdirty-work\t\t \t\ny"), Output: &output}
+	final, err := runner.runAccessibleAction(NewDashboardModel(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, found := final.(*DashboardModel).Intent()
+	want := Intent{
+		Action: "workspace-create", Root: data.Root, Workspace: "dirty-work",
+		SourceBranch: data.Branch, SourceRevision: data.Revision,
+		Snapshot: true, Agent: "omp", Open: true,
+	}
+	if !found || intent != want {
+		t.Fatalf("accessible snapshot intent = %#v, found=%t; want %#v", intent, found, want)
+	}
+	normalized := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(output.String()), "│", " ")), " ")
+	for _, expected := range []string{
+		"Review source snapshot",
+		"Includes final tracked file content and nonignored untracked files.",
+		"Your branch, HEAD, index, worktree, and durable refs are not changed.",
+	} {
+		if !strings.Contains(normalized, expected) {
+			t.Fatalf("accessible snapshot output omitted %q: %q", expected, normalized)
+		}
+	}
+	assertTerminalSafe(t, output.String())
+}
+
+func TestSnapshotReviewRespectsSmallTerminalWidths(t *testing.T) {
+	for _, width := range []int{20, 40} {
+		model := NewDashboardModel(dashboardFixture("running"))
+		model.screen = dashboardCreateSnapshotReview
+		model.name = "dirty-work"
+		model.snapshot = true
+		model.Update(tea.WindowSizeMsg{Width: width, Height: 16})
+		view := ansi.Strip(model.View().Content)
+		for _, line := range strings.Split(view, "\n") {
+			if terminal.Width(line) > width {
+				t.Fatalf("width %d snapshot review overflow: %q", width, line)
+			}
+		}
+		if len(view) > 16*1024 {
+			t.Fatalf("width %d snapshot review exceeded output bound: %d", width, len(view))
+		}
+	}
 }

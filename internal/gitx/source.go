@@ -1,6 +1,7 @@
 package gitx
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +21,14 @@ type repositoryState struct {
 	warnUntracked bool
 	warnIgnored   bool
 	untracked     []string
+}
+
+type prepareSourceOptions struct {
+	expectedBranch       string
+	previousRevision     string
+	previousHeadRevision string
+	previousTree         string
+	snapshot             bool
 }
 
 func (service *Service) PrepareSource(ctx context.Context, request SourceRequest) (SourceArtifact, error) {
@@ -37,7 +47,7 @@ func (service *Service) PrepareSource(ctx context.Context, request SourceRequest
 	}
 	repository := request.Repository
 	repository.Identity = identity
-	return service.prepareSourceArtifact(ctx, repository, request.Workspace, request.TempRoot, "", "")
+	return service.prepareSourceArtifact(ctx, repository, request.Workspace, request.TempRoot, prepareSourceOptions{snapshot: request.Snapshot})
 }
 
 func (service *Service) PrepareUpdateSource(ctx context.Context, request UpdateSourceRequest) (SourceArtifact, error) {
@@ -56,12 +66,37 @@ func (service *Service) PrepareUpdateSource(ctx context.Context, request UpdateS
 	if err := validateFullOID(request.SourceRevision, "recorded source revision"); err != nil {
 		return SourceArtifact{}, err
 	}
+	if request.SourceTree != "" && request.SourceHeadRevision == "" {
+		return SourceArtifact{}, errors.New("recorded source tree requires a source head revision")
+	}
+	previousHead := request.SourceHeadRevision
+	previousTree := request.SourceTree
+	if previousHead == "" {
+		previousHead = request.SourceRevision
+	} else if err := validateFullOID(previousHead, "recorded source head revision"); err != nil {
+		return SourceArtifact{}, err
+	}
+	if previousTree != "" {
+		if err := validateFullOID(previousTree, "recorded source tree"); err != nil {
+			return SourceArtifact{}, err
+		}
+		if len(previousTree) != len(request.SourceRevision) {
+			return SourceArtifact{}, errors.New("recorded source provenance uses inconsistent Git object formats")
+		}
+	}
+	if len(previousHead) != len(request.SourceRevision) {
+		return SourceArtifact{}, errors.New("recorded source provenance uses inconsistent Git object formats")
+	}
 	if err := service.validateRepositoryIdentity(ctx, request.Repository); err != nil {
 		return SourceArtifact{}, err
 	}
-	return service.prepareSourceArtifact(
-		ctx, request.Repository, request.Workspace, request.TempRoot, request.SourceBranch, request.SourceRevision,
-	)
+	return service.prepareSourceArtifact(ctx, request.Repository, request.Workspace, request.TempRoot, prepareSourceOptions{
+		expectedBranch:       request.SourceBranch,
+		previousRevision:     request.SourceRevision,
+		previousHeadRevision: previousHead,
+		previousTree:         previousTree,
+		snapshot:             request.Snapshot,
+	})
 }
 
 func (service *Service) prepareSourceArtifact(
@@ -69,8 +104,20 @@ func (service *Service) prepareSourceArtifact(
 	repository Repository,
 	workspace string,
 	tempRoot string,
-	expectedBranch string,
-	previousRevision string,
+	options prepareSourceOptions,
+) (SourceArtifact, error) {
+	if options.snapshot {
+		return service.prepareSnapshotSourceArtifact(ctx, repository, workspace, tempRoot, options)
+	}
+	return service.prepareCleanSourceArtifact(ctx, repository, workspace, tempRoot, options)
+}
+
+func (service *Service) prepareCleanSourceArtifact(
+	ctx context.Context,
+	repository Repository,
+	workspace string,
+	tempRoot string,
+	options prepareSourceOptions,
 ) (artifact SourceArtifact, returnErr error) {
 	if err := service.validateRepositoryIdentity(ctx, repository); err != nil {
 		return SourceArtifact{}, err
@@ -79,42 +126,31 @@ func (service *Service) prepareSourceArtifact(
 		return SourceArtifact{}, err
 	}
 
-	sourceBranchBytes, err := service.gitOutput(ctx, repository.HostPath, "symbolic-ref", "--quiet", "--short", "HEAD")
+	sourceBranch, sourceRevision, sourceRef, err := service.resolveSourceIdentity(ctx, repository, options.expectedBranch)
 	if err != nil {
-		return SourceArtifact{}, fmt.Errorf("resolve symbolic source branch: %w", err)
-	}
-	sourceBranch := strings.TrimSuffix(string(sourceBranchBytes), "\n")
-	if err := validateSourceBranch(sourceBranch); err != nil {
 		return SourceArtifact{}, err
-	}
-	if expectedBranch != "" && sourceBranch != expectedBranch {
-		return SourceArtifact{}, fmt.Errorf("local checkout branch %q does not match recorded source branch %q", sourceBranch, expectedBranch)
-	}
-	sourceRef := "refs/heads/" + sourceBranch
-	if err := service.runGit(ctx, repository.HostPath, nil, "check-ref-format", sourceRef); err != nil {
-		return SourceArtifact{}, fmt.Errorf("validate source branch: %w", err)
-	}
-	sourceRevision, err := service.resolveCommit(ctx, repository.HostPath, sourceRef)
-	if err != nil {
-		return SourceArtifact{}, fmt.Errorf("resolve source revision: %w", err)
 	}
 	state, err := service.inspectRepositoryState(ctx, repository.HostPath)
 	if err != nil {
 		return SourceArtifact{}, err
 	}
 	if state.trackedDirty {
-		return SourceArtifact{}, errors.New("repository has tracked or index changes")
+		return SourceArtifact{}, errors.New("repository has tracked or index changes; source snapshot was not requested")
 	}
 	fingerprint, err := service.trackedFingerprint(ctx, repository.HostPath)
 	if err != nil {
 		return SourceArtifact{}, err
 	}
-	if previousRevision != "" {
-		if sourceRevision == previousRevision {
+	sourceTree, err := service.resolveTree(ctx, repository.HostPath, sourceRevision)
+	if err != nil {
+		return SourceArtifact{}, fmt.Errorf("resolve source tree: %w", err)
+	}
+	if options.previousHeadRevision != "" {
+		if sourceRevision == options.previousHeadRevision {
 			return SourceArtifact{}, errors.New("local source branch has no newer committed revision")
 		}
-		if err := service.runGit(ctx, repository.HostPath, nil, "merge-base", "--is-ancestor", previousRevision, sourceRevision); err != nil {
-			return SourceArtifact{}, fmt.Errorf("local source revision does not descend from recorded source revision: %w", err)
+		if err := service.runGit(ctx, repository.HostPath, nil, "merge-base", "--is-ancestor", options.previousHeadRevision, sourceRevision); err != nil {
+			return SourceArtifact{}, fmt.Errorf("local source revision does not descend from recorded source head revision: %w", err)
 		}
 	}
 
@@ -176,9 +212,414 @@ func (service *Service) prepareSourceArtifact(
 	owned = true
 	return SourceArtifact{
 		Repository: repository, SourceBranch: sourceBranch, SourceRevision: sourceRevision,
+		SourceHeadRevision: sourceRevision, SourceTree: sourceTree,
 		TrackedFingerprint: fingerprint, WarnUntracked: state.warnUntracked, WarnIgnored: state.warnIgnored,
 		BundlePath: bundlePath, BundleDigest: digest, BundleRef: privateRef,
 	}, nil
+}
+
+func (service *Service) prepareSnapshotSourceArtifact(
+	ctx context.Context,
+	repository Repository,
+	workspace string,
+	tempRoot string,
+	options prepareSourceOptions,
+) (artifact SourceArtifact, returnErr error) {
+	if err := service.validateRepositoryIdentity(ctx, repository); err != nil {
+		return SourceArtifact{}, err
+	}
+	if err := service.validateLocalConfiguration(ctx, repository.HostPath); err != nil {
+		return SourceArtifact{}, err
+	}
+	sourceBranch, sourceHeadRevision, sourceRef, err := service.resolveSourceIdentity(ctx, repository, options.expectedBranch)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	if options.previousHeadRevision != "" {
+		if err := service.runGit(ctx, repository.HostPath, nil, "merge-base", "--is-ancestor", options.previousHeadRevision, sourceHeadRevision); err != nil {
+			return SourceArtifact{}, fmt.Errorf("local source revision does not descend from recorded source head revision: %w", err)
+		}
+	}
+	unmerged, err := service.gitOutput(ctx, repository.HostPath, "ls-files", "--unmerged", "-z")
+	if err != nil {
+		return SourceArtifact{}, fmt.Errorf("inspect repository unmerged paths: %w", err)
+	}
+	if len(unmerged) != 0 {
+		return SourceArtifact{}, errors.New("repository has unmerged paths")
+	}
+	baseIndex, err := service.gitOutput(ctx, repository.HostPath, "ls-files", "--stage", "-z")
+	if err != nil {
+		return SourceArtifact{}, fmt.Errorf("inspect repository index: %w", err)
+	}
+	if containsGitlink(baseIndex) {
+		return SourceArtifact{}, errors.New("repository contains Git submodules or embedded Git repositories")
+	}
+	hostFingerprint, err := service.trackedFingerprint(ctx, repository.HostPath)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	state, err := service.inspectRepositoryState(ctx, repository.HostPath)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	candidates, inputBytes, err := snapshotCandidateListing(ctx, service, repository.HostPath)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+
+	quarantine, err := service.newGitQuarantine(ctx, repository, tempRoot, true)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	quarantineOwned := true
+	defer func() {
+		if quarantineOwned {
+			returnErr = errors.Join(returnErr, quarantine.Close())
+		}
+	}()
+	environment := quarantine.environment()
+	if err := service.runGitWithEnvironment(ctx, repository.HostPath, environment, nil, "read-tree", sourceHeadRevision); err != nil {
+		return SourceArtifact{}, fmt.Errorf("seed snapshot index: %w", err)
+	}
+	if err := service.runGitWithEnvironment(ctx, repository.HostPath, environment, nil, "add", "-A", "--", "."); err != nil {
+		return SourceArtifact{}, fmt.Errorf("materialize snapshot index: %w", err)
+	}
+	capturedIndex, err := service.gitOutputWithEnvironment(ctx, repository.HostPath, environment, "ls-files", "--stage", "-z")
+	if err != nil {
+		return SourceArtifact{}, fmt.Errorf("inspect captured snapshot index: %w", err)
+	}
+	if containsGitlink(capturedIndex) {
+		return SourceArtifact{}, errors.New("repository contains Git submodules or embedded Git repositories")
+	}
+	sourceTree, err := service.writeTree(ctx, repository.HostPath, environment)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	snapshotFingerprint := fingerprintIndex(capturedIndex)
+	if options.previousHeadRevision != "" && sourceHeadRevision == options.previousHeadRevision {
+		previousTree := options.previousTree
+		if previousTree == "" {
+			previousTree, err = service.resolveTree(ctx, repository.HostPath, options.previousRevision)
+			if err != nil {
+				return SourceArtifact{}, fmt.Errorf("resolve recorded source tree: %w", err)
+			}
+		}
+		if sourceTree == previousTree {
+			return SourceArtifact{}, errors.New("local source snapshot has not changed")
+		}
+	}
+	timestamp, err := service.commitTimestamp(ctx, repository.HostPath, sourceHeadRevision)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	commitEnvironment := appendSnapshotCommitEnvironment(environment, timestamp)
+	commitBytes, err := service.gitOutputWithEnvironment(
+		ctx,
+		repository.HostPath,
+		commitEnvironment,
+		"commit-tree", sourceTree, "-p", sourceHeadRevision, "-m", "DSX workspace source snapshot",
+	)
+	if err != nil {
+		return SourceArtifact{}, fmt.Errorf("create deterministic snapshot commit: %w", err)
+	}
+	sourceRevision := strings.TrimSpace(string(commitBytes))
+	if err := validateFullOID(sourceRevision, "snapshot source revision"); err != nil {
+		return SourceArtifact{}, err
+	}
+
+	privateRef, err := sourceSnapshotRef()
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	bareRoot, err := service.newBareRepositoryWithAlternates(
+		ctx,
+		tempRoot,
+		quarantine.objectFormat,
+		[]string{quarantine.objects, quarantine.commonObjects},
+	)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	bareOwned := true
+	defer func() {
+		if bareOwned {
+			returnErr = errors.Join(returnErr, os.RemoveAll(bareRoot))
+		}
+	}()
+	if err := service.runGit(ctx, bareRoot, nil, "update-ref", privateRef, sourceRevision, strings.Repeat("0", len(sourceRevision))); err != nil {
+		return SourceArtifact{}, fmt.Errorf("create isolated private source ref: %w", err)
+	}
+	bundlePath, err := service.produceSourceBundle(ctx, bareRoot, tempRoot, privateRef, MaxSourceBundleBytes)
+	if err != nil {
+		return SourceArtifact{}, fmt.Errorf("create snapshot source bundle: %w", err)
+	}
+	bundleOwned := true
+	defer func() {
+		if bundleOwned {
+			returnErr = errors.Join(returnErr, os.Remove(bundlePath))
+		}
+	}()
+	digest, err := bundleSHA256(bundlePath)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	if err := service.verifyBundleInRepository(ctx, bundlePath, digest, bareRoot); err != nil {
+		return SourceArtifact{}, fmt.Errorf("verify snapshot source bundle: %w", err)
+	}
+	bundleRevision, err := service.singleBundleHead(ctx, bareRoot, bundlePath, privateRef)
+	if err != nil {
+		return SourceArtifact{}, fmt.Errorf("verify isolated private source ref: %w", err)
+	}
+	if bundleRevision != sourceRevision {
+		return SourceArtifact{}, fmt.Errorf("source bundle revision %s does not match approved snapshot revision %s", bundleRevision, sourceRevision)
+	}
+
+	if err := service.validateRepositoryIdentity(ctx, repository); err != nil {
+		return SourceArtifact{}, fmt.Errorf("revalidate repository after snapshot bundle: %w", err)
+	}
+	if err := service.validateLocalConfiguration(ctx, repository.HostPath); err != nil {
+		return SourceArtifact{}, err
+	}
+	finalBranch, finalHead, finalRef, err := service.resolveSourceIdentity(ctx, repository, options.expectedBranch)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	if finalBranch != sourceBranch || finalRef != sourceRef || finalHead != sourceHeadRevision {
+		return SourceArtifact{}, errors.New("source branch or HEAD changed during snapshot")
+	}
+	currentHostFingerprint, err := service.trackedFingerprint(ctx, repository.HostPath)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	if currentHostFingerprint != hostFingerprint {
+		return SourceArtifact{}, errors.New("host index changed during source snapshot")
+	}
+	finalCandidates, finalInputBytes, err := snapshotCandidateListing(ctx, service, repository.HostPath)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	if !bytes.Equal(candidates, finalCandidates) || inputBytes != finalInputBytes {
+		return SourceArtifact{}, errors.New("snapshot candidate files changed during source snapshot")
+	}
+	recheckTree, recheckFingerprint, err := service.rebuildSnapshotTree(ctx, repository, tempRoot, sourceHeadRevision)
+	if err != nil {
+		return SourceArtifact{}, err
+	}
+	if recheckTree != sourceTree || recheckFingerprint != snapshotFingerprint {
+		return SourceArtifact{}, errors.New("snapshot content changed during source snapshot")
+	}
+	if err := service.validateRepositoryIdentity(ctx, repository); err != nil {
+		return SourceArtifact{}, fmt.Errorf("final repository revalidation after source snapshot: %w", err)
+	}
+	if err := os.RemoveAll(bareRoot); err != nil {
+		return SourceArtifact{}, fmt.Errorf("remove temporary source repository: %w", err)
+	}
+	bareOwned = false
+	if err := quarantine.Close(); err != nil {
+		return SourceArtifact{}, err
+	}
+	quarantineOwned = false
+	if err := service.registerArtifact(bundlePath, tempRoot); err != nil {
+		return SourceArtifact{}, fmt.Errorf("register source bundle: %w", err)
+	}
+	bundleOwned = false
+	return SourceArtifact{
+		Repository: repository, SourceBranch: sourceBranch, SourceRevision: sourceRevision,
+		SourceSnapshot: true, SourceHeadRevision: sourceHeadRevision, SourceTree: sourceTree,
+		TrackedFingerprint: snapshotFingerprint, WarnUntracked: false, WarnIgnored: state.warnIgnored,
+		BundlePath: bundlePath, BundleDigest: digest, BundleRef: privateRef,
+	}, nil
+}
+
+func (service *Service) resolveSourceIdentity(ctx context.Context, repository Repository, expectedBranch string) (branch, revision, ref string, returnErr error) {
+	sourceBranchBytes, err := service.gitOutput(ctx, repository.HostPath, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		return "", "", "", fmt.Errorf("resolve symbolic source branch: %w", err)
+	}
+	branch = strings.TrimSuffix(string(sourceBranchBytes), "\n")
+	if err := validateSourceBranch(branch); err != nil {
+		return "", "", "", err
+	}
+	if expectedBranch != "" && branch != expectedBranch {
+		return "", "", "", fmt.Errorf("local checkout branch %q does not match recorded source branch %q", branch, expectedBranch)
+	}
+	ref = "refs/heads/" + branch
+	if err := service.runGit(ctx, repository.HostPath, nil, "check-ref-format", ref); err != nil {
+		return "", "", "", fmt.Errorf("validate source branch: %w", err)
+	}
+	revision, err = service.resolveCommit(ctx, repository.HostPath, ref)
+	if err != nil {
+		return "", "", "", fmt.Errorf("resolve source revision: %w", err)
+	}
+	return branch, revision, ref, nil
+}
+
+func snapshotCandidateListing(ctx context.Context, service *Service, repositoryPath string) ([]byte, int64, error) {
+	output, err := service.gitOutput(ctx, repositoryPath, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no")
+	if err != nil {
+		return nil, 0, fmt.Errorf("inspect snapshot candidates: %w", err)
+	}
+	parts := cleanNULTerminated(output)
+	var total int64
+	for index := 0; index < len(parts); index++ {
+		record := parts[index]
+		if len(record) < 3 || record[2] != ' ' {
+			return nil, 0, errors.New("Git returned malformed snapshot candidate status")
+		}
+		size, sizeErr := snapshotPathSize(repositoryPath, string(record[3:]))
+		if sizeErr != nil {
+			return nil, 0, sizeErr
+		}
+		if size > MaxSnapshotInputBytes-total {
+			return nil, 0, fmt.Errorf("snapshot materialized input exceeds %d bytes", MaxSnapshotInputBytes)
+		}
+		total += size
+		code := record[:2]
+		if code[0] == 'R' || code[0] == 'C' || code[1] == 'R' || code[1] == 'C' {
+			index++
+			if index >= len(parts) {
+				return nil, 0, errors.New("Git returned incomplete snapshot rename status")
+			}
+			size, sizeErr = snapshotPathSize(repositoryPath, string(parts[index]))
+			if sizeErr != nil {
+				return nil, 0, sizeErr
+			}
+			if size > MaxSnapshotInputBytes-total {
+				return nil, 0, fmt.Errorf("snapshot materialized input exceeds %d bytes", MaxSnapshotInputBytes)
+			}
+			total += size
+		}
+	}
+	return output, total, nil
+}
+
+func snapshotPathSize(repositoryPath, relative string) (int64, error) {
+	if relative == "" || filepath.IsAbs(relative) || strings.IndexByte(relative, 0) >= 0 {
+		return 0, fmt.Errorf("Git returned unsafe snapshot path %q", relative)
+	}
+	clean := filepath.Clean(relative)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return 0, fmt.Errorf("Git returned snapshot path outside repository %q", relative)
+	}
+	info, err := os.Lstat(filepath.Join(repositoryPath, clean))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("inspect snapshot input %q: %w", relative, err)
+	}
+	if info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		if info.Size() < 0 {
+			return 0, fmt.Errorf("snapshot input %q has invalid size", relative)
+		}
+		return info.Size(), nil
+	}
+	if info.IsDir() {
+		gitEntry, gitErr := os.Lstat(filepath.Join(repositoryPath, clean, ".git"))
+		if gitErr == nil && (gitEntry.IsDir() || gitEntry.Mode().IsRegular()) && gitEntry.Mode()&os.ModeSymlink == 0 {
+			return 0, errors.New("repository contains Git submodules or embedded Git repositories")
+		}
+		if gitErr != nil && !errors.Is(gitErr, os.ErrNotExist) {
+			return 0, fmt.Errorf("inspect embedded repository candidate %q: %w", relative, gitErr)
+		}
+		return 0, nil
+	}
+	return 0, fmt.Errorf("snapshot input %q is not a regular file or symlink", relative)
+}
+
+func containsGitlink(index []byte) bool {
+	for _, record := range cleanNULTerminated(index) {
+		if bytes.HasPrefix(record, []byte("160000 ")) {
+			return true
+		}
+	}
+	return false
+}
+
+func fingerprintIndex(index []byte) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("dsx-clean-tracked-v1\x00"))
+	_, _ = hash.Write(index)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func (service *Service) writeTree(ctx context.Context, repositoryPath string, environment []string) (string, error) {
+	output, err := service.gitOutputWithEnvironment(ctx, repositoryPath, environment, "write-tree")
+	if err != nil {
+		return "", fmt.Errorf("write snapshot tree: %w", err)
+	}
+	tree := strings.TrimSpace(string(output))
+	if err := validateFullOID(tree, "snapshot source tree"); err != nil {
+		return "", err
+	}
+	return tree, nil
+}
+
+func (service *Service) resolveTree(ctx context.Context, repositoryPath, revision string) (string, error) {
+	output, err := service.gitOutput(ctx, repositoryPath, "rev-parse", "--verify", revision+"^{tree}")
+	if err != nil {
+		return "", err
+	}
+	tree := strings.TrimSpace(string(output))
+	if err := validateFullOID(tree, "resolved tree"); err != nil {
+		return "", err
+	}
+	return tree, nil
+}
+
+func (service *Service) commitTimestamp(ctx context.Context, repositoryPath, revision string) (string, error) {
+	output, err := service.gitOutput(ctx, repositoryPath, "show", "-s", "--format=%ct", revision)
+	if err != nil {
+		return "", fmt.Errorf("resolve source commit timestamp: %w", err)
+	}
+	timestamp := strings.TrimSpace(string(output))
+	value, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || value < 0 {
+		return "", fmt.Errorf("source commit timestamp %q is invalid", timestamp)
+	}
+	return timestamp, nil
+}
+
+func appendSnapshotCommitEnvironment(environment []string, timestamp string) []string {
+	result := make([]string, 0, len(environment)+6)
+	result = append(result, environment...)
+	date := "@" + timestamp + " +0000"
+	result = append(result,
+		"GIT_AUTHOR_NAME=DSX Snapshot",
+		"GIT_AUTHOR_EMAIL=snapshot@dsx.invalid",
+		"GIT_AUTHOR_DATE="+date,
+		"GIT_COMMITTER_NAME=DSX Snapshot",
+		"GIT_COMMITTER_EMAIL=snapshot@dsx.invalid",
+		"GIT_COMMITTER_DATE="+date,
+	)
+	return result
+}
+
+func (service *Service) rebuildSnapshotTree(ctx context.Context, repository Repository, tempRoot, sourceHeadRevision string) (tree, fingerprint string, returnErr error) {
+	quarantine, err := service.newGitQuarantine(ctx, repository, tempRoot, true)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { returnErr = errors.Join(returnErr, quarantine.Close()) }()
+	environment := quarantine.environment()
+	if err := service.runGitWithEnvironment(ctx, repository.HostPath, environment, nil, "read-tree", sourceHeadRevision); err != nil {
+		return "", "", fmt.Errorf("seed snapshot recheck index: %w", err)
+	}
+	if err := service.runGitWithEnvironment(ctx, repository.HostPath, environment, nil, "add", "-A", "--", "."); err != nil {
+		return "", "", fmt.Errorf("materialize snapshot recheck index: %w", err)
+	}
+	index, err := service.gitOutputWithEnvironment(ctx, repository.HostPath, environment, "ls-files", "--stage", "-z")
+	if err != nil {
+		return "", "", fmt.Errorf("inspect snapshot recheck index: %w", err)
+	}
+	if containsGitlink(index) {
+		return "", "", errors.New("repository contains Git submodules or embedded Git repositories")
+	}
+	tree, err = service.writeTree(ctx, repository.HostPath, environment)
+	if err != nil {
+		return "", "", err
+	}
+	return tree, fingerprintIndex(index), nil
 }
 
 func (service *Service) produceSourceBundle(ctx context.Context, repositoryPath, tempRoot, privateRef string, maximumBytes int64) (bundlePath string, returnErr error) {
