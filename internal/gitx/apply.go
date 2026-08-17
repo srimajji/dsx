@@ -161,14 +161,26 @@ func (transaction *applyTransaction) Commit(ctx context.Context) (result ApplyRe
 		"-c", "rerere.autoupdate=false",
 		"merge", "--squash", "--no-commit", mergeTarget,
 	)
+	var messageErr error
+	if mergeErr == nil && transaction.request.SourceSnapshot {
+		messageErr = writeApplyGitMessage(
+			transaction.request.Repository,
+			"SQUASH_MSG",
+			[]byte("Apply DSX workspace result\n"),
+		)
+	}
 	if err := transaction.rollback.captureMutatedState(); err != nil {
 		return ApplyResult{}, errors.Join(
 			fmt.Errorf("capture post-merge rollback state: %w", err),
 			mergeErr,
+			messageErr,
 		)
 	}
 	if mergeErr != nil {
 		return ApplyResult{}, fmt.Errorf("squash apply failed: %w", mergeErr)
+	}
+	if messageErr != nil {
+		return ApplyResult{}, fmt.Errorf("replace snapshot squash message: %w", messageErr)
 	}
 	current, err := transaction.service.resolveCommit(ctx, transaction.request.Repository.HostPath, "HEAD")
 	if err != nil {
@@ -558,6 +570,31 @@ func openRollbackRoot(label string, expected PhysicalPathIdentity, paths []strin
 		return rollbackRoot{}, fmt.Errorf("%s changed while opening rollback root", label)
 	}
 	return rollbackRoot{label: label, root: root, paths: paths}, nil
+}
+
+func writeApplyGitMessage(repository Repository, name string, content []byte) error {
+	metadata, err := openRollbackRoot("repository Git directory", repository.Identity.GitDir, []string{name})
+	if err != nil {
+		return err
+	}
+	defer metadata.root.Close()
+
+	info, err := metadata.root.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("Git message path %q is not a regular file", name)
+	}
+	file, err := metadata.root.OpenFile(name, os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	written, writeErr := file.Write(content)
+	if writeErr == nil && written != len(content) {
+		writeErr = io.ErrShortWrite
+	}
+	return errors.Join(writeErr, file.Sync(), file.Close())
 }
 
 func rollbackCaptureRoots(root *os.Root, paths []string) ([]string, error) {

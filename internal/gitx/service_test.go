@@ -595,6 +595,9 @@ func TestSnapshotResultFetchDiffAndSuccessfulSquashApplySmoke(t *testing.T) {
 	if staged := strings.Fields(gitTest(t, host.path, "diff", "--cached", "--name-only")); !reflect.DeepEqual(staged, wantStaged) {
 		t.Fatalf("snapshot apply staged paths = %#v, want %#v", staged, wantStaged)
 	}
+	if message := string(mustRead(t, filepath.Join(host.path, ".git", "SQUASH_MSG"))); message != "Apply DSX workspace result\n" {
+		t.Fatalf("snapshot squash message = %q", message)
+	}
 	if got := string(mustRead(t, filepath.Join(host.path, "baseline.txt"))); got != "captured untracked baseline\n" {
 		t.Fatalf("captured baseline changed = %q", got)
 	}
