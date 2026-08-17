@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   signed-notarized-candidate:
-    if: github.repository == 'srimajji/dsx' && github.ref_type == 'tag'
+    if: github.repository == 'srimajji/dsx' && github.ref_type == 'tag' && github.ref_protected == true
     environment: release
     runs-on: [self-hosted, dsx-release, macOS, ARM64]
     timeout-minutes: 60
