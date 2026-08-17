@@ -2285,14 +2285,19 @@ func assertHostByteSnapshot(t *testing.T, root string, before map[string]string)
 	after := hostByteSnapshot(t, root)
 	if !reflect.DeepEqual(after, before) {
 		beforeKeys, afterKeys := make([]string, 0, len(before)), make([]string, 0, len(after))
-		for key := range before {
+		changed := make([]string, 0)
+		for key, beforeHash := range before {
 			beforeKeys = append(beforeKeys, key)
+			if afterHash, found := after[key]; found && afterHash != beforeHash {
+				changed = append(changed, key)
+			}
 		}
 		for key := range after {
 			afterKeys = append(afterKeys, key)
 		}
 		sort.Strings(beforeKeys)
 		sort.Strings(afterKeys)
-		t.Fatalf("host bytes changed\nbefore keys=%v\nafter keys=%v", beforeKeys, afterKeys)
+		sort.Strings(changed)
+		t.Fatalf("host bytes changed\nchanged=%v\nbefore keys=%v\nafter keys=%v", changed, beforeKeys, afterKeys)
 	}
 }
