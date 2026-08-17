@@ -26,6 +26,8 @@ func TestDocumentedCommandHelpContract(t *testing.T) {
 		{name: "inspect", args: []string{"inspect", "--help"}, want: "Usage: dsx inspect [--format text|json] [--root PATH]"},
 		{name: "doctor", args: []string{"doctor", "--help"}, want: "Usage: dsx doctor [--format text|json] [--require-builder]"},
 		{name: "workspace", args: []string{"workspace", "--help"}, want: "dsx workspace restart NAME"},
+		{name: "workspace create snapshot", args: []string{"workspace", "--help"}, want: "dsx workspace create NAME [--root PATH] [--default-agent AGENT] [--approve-config HASH] [--snapshot] [--open]"},
+		{name: "workspace update snapshot", args: []string{"workspace", "--help"}, want: "dsx workspace update NAME [--root PATH] [--snapshot]"},
 		{name: "agent", args: []string{"agent", "--help"}, want: "Usage: dsx agent WORKSPACE"},
 		{name: "auth", args: []string{"auth", "--help"}, want: "dsx auth purge --agent"},
 		{name: "aws", args: []string{"aws", "--help"}, want: "dsx aws enable WORKSPACE"},

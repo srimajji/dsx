@@ -7,6 +7,20 @@
 - **Confidence:** 80%
 - **Related:** [DSX Product Requirements](../PRD.md)
 
+## Amendment — 2026-08-14: explicit final-working-tree snapshot ingress
+
+DSX retains one workspace and storage model: guest-owned private clones seeded through bounded, restrictive, verified Git bundles. Clean committed ingress remains the default. An explicit per-create or per-update `--snapshot` request may instead transfer a deterministic synthetic child of the real host `HEAD`.
+
+The synthetic tree contains the final working-tree version of every tracked path, including tracked paths matching ignore rules, plus every nonignored untracked path. Ignored untracked paths remain excluded. Staged and unstaged distinctions are flattened to final working-tree content. Unmerged paths, mode-`160000` gitlinks, and newly embedded Git repositories are rejected.
+
+Snapshot capture uses a validated private temporary index and object quarantine. It does not mutate the host branch, `HEAD`, index, worktree, durable refs, or object database. Only private temporary index/object/ref artifacts and the registered mode-`0600` bundle may be created. Bundle verification, guest-owned storage, result bundles, workspace cleanliness before rebase, ownership-safe cleanup, rollback, bounded I/O, and race refusal remain unchanged.
+
+Durable workspace Git state records the exact transferred source revision, the real host head, the transferred tree, and whether the source is synthetic. Existing manifest version 2 records remain valid: absent provenance means a clean source whose effective real head is the recorded source revision. New clean and snapshot records persist full provenance; snapshot records require valid source-head and source-tree object IDs. Conflict state adds only the requested snapshot mode because the deterministic conflict revision binds its parent and tree.
+
+Snapshot apply is permitted only after the clean host `HEAD` tree exactly equals the captured snapshot tree. DSX verifies the synthetic parent/tree and result ancestry, creates an apply-local temporary bridge commit parented by the current real host `HEAD`, and runs the existing guarded squash path against that bridge. A tree mismatch refuses before host mutation. Fetch, diff, result bundles, and the recorded applied workspace result revision are unchanged.
+
+`--snapshot` is invocation state, not configuration authority: it adds no configuration or schema field, changes no executable-plan hash, and does not change manifest version 2.
+
 ## Context
 
 DSX must provide a fast, minimal, Apple-native command-line workflow for creating and operating isolated Linux development workspaces and coding-agent harnesses from an existing macOS Git checkout.
@@ -524,7 +538,7 @@ dsx auth purge --agent omp
 
 `dsx auth purge` requires explicit selection and confirmation. Removing a workspace never silently purges canonical project credentials.
 
-### 9. Create named workspaces from committed Git revisions
+### 9. Create named workspaces from verified clean or snapshot Git revisions
 
 Workspace names must contain only lowercase letters, digits, and hyphens and must be no longer than 24 characters.
 
@@ -533,6 +547,7 @@ CLI examples:
 ```console
 dsx workspace create feature-a
 dsx workspace create feature-b --default-agent codex
+dsx workspace create dirty-work --snapshot
 ```
 
 The TUI creation form is:
@@ -540,27 +555,29 @@ The TUI creation form is:
 ```text
 Create workspace
 
-Name
+Workspace name
   feature-a
 
-Starting point
+Starting from
   feat/branch-1 @ abc123
 
-Default agent
-  OMP — inherited from project
+Coding assistant
+  OMP — project default
 
-Container
-  dsx-tracking-chrome-feature-a-workspace-a81f2c
+Include local changes
+  [ ] Off — reviewed final working-tree content
 
-[Create and open]  [Create in background]
+> [Create and open a shell]
+  [Create in background]
 ```
 
 The form contains:
 
 - A validated workspace name.
-- The committed source branch and revision.
+- The real host source branch and revision.
 - An agent selector populated from `agents.allowed`.
 - The project default agent preselected.
+- An optional **Include local changes** choice, defaulting to off and entering the separately reviewed snapshot path when enabled.
 
 The form does not contain:
 
@@ -569,18 +586,20 @@ The form does not contain:
 - Browser selection.
 - A workspace-mode selection.
 
-Creation must:
+Ordinary creation must:
 
 1. Inspect the local Git checkout.
-2. Require a clean tracked working tree.
+2. Require a clean tracked working tree and index.
 3. Warn that ignored and untracked files are excluded.
-4. Record the checked-out branch and commit.
+4. Record the checked-out branch and real host commit.
 5. Create and verify a restrictive temporary Git bundle.
 6. Create the workspace VM, private network, and private volumes.
 7. Clone into guest-owned storage without shared Git objects or object hardlinks.
 8. Create and check out `dsx/<workspace-name>`.
 9. Start only the DSX guest control process.
 10. Optionally open an interactive shell.
+
+Explicit snapshot creation runs the amended isolated capture path. The TUI requires a separate bounded review stating what crosses and what remains excluded before it emits the same application intent. Snapshot mode is never inferred from a dirty checkout.
 
 Temporary source bundles must use restrictive permissions and be deleted after a verified transfer or rollback.
 
@@ -605,13 +624,13 @@ dsx workspace remove NAME
 
 Semantics:
 
-- `create` creates a new named workspace from the current committed local revision.
-- `list` reports all current-project workspaces and their states.
+- `create` creates a new named workspace from the current clean committed revision or, only when explicitly requested, a reviewed final-working-tree snapshot.
+- `list` reports all current-project workspaces, source kinds, and states.
 - `open` opens an interactive shell in the named workspace and may run the same explicit start transaction first if it is stopped.
 - `start` starts the VM and only the DSX guest control process.
 - `stop` terminates workspace processes and the VM while preserving configured persistent state.
 - `restart` performs a stop/start transaction for one named workspace.
-- `update` transfers and rebases onto a newer committed local revision.
+- `update` transfers and rebases onto a newer clean revision or an explicitly requested changed snapshot.
 - `remove` deletes one named workspace only after protecting unfetched or otherwise unintegrated work.
 
 Lifecycle operations always require a workspace name except `list`. There is no unnamed lifecycle.
@@ -660,18 +679,21 @@ It must refuse destructive removal unless loss is explicitly confirmed. `--force
 
 ```console
 dsx workspace update feature-a
+dsx workspace update feature-a --snapshot
 ```
 
 This command means **Update from local checkout**.
 
 The operation must:
 
-1. Require the local source state to be committed.
-2. Verify that the local checkout remains on the workspace’s recorded source branch.
-3. Transfer the latest revision through a restrictive, verified Git bundle.
-4. Create a workspace backup ref.
-5. Rebase `dsx/feature-a` onto the new local revision.
-6. Report conflicts without attempting semantic resolution.
+1. For ordinary update, require a clean tracked state and an advanced real host commit.
+2. For explicit snapshot update, capture a changed final-working-tree tree; the real host commit may be unchanged.
+3. Verify the checked-out branch and require the real host `HEAD` to equal or descend from the previously recorded real host head.
+4. Transfer the latest exact source revision through a restrictive, verified Git bundle.
+5. Create a workspace backup ref.
+6. Rebase `dsx/feature-a` from the old exact transferred source revision onto the new one.
+7. Persist source revision, real head, tree, snapshot kind, fingerprint, and digest atomically.
+8. Report conflicts without attempting semantic resolution.
 
 ```text
 Before:
@@ -702,6 +724,8 @@ git rebase --abort
 ```
 
 DSX does not attempt semantic conflict resolution. A conflicted workspace remains openable, but another update is unavailable until the rebase is continued or aborted.
+
+Conflict state remembers whether snapshot ingress produced the pending target. Reconciliation prepares that same deterministic mode again, requires the exact pending revision, copies current provenance atomically, and then clears every conflict field. Abort clears the snapshot-conflict bit with the existing tuple.
 
 Update and restart are unavailable while another lifecycle mutation for that workspace is active. A lifecycle mutation in one workspace does not block unrelated operations in sibling workspaces unless a project-wide runtime or configuration transaction requires serialization.
 
@@ -800,9 +824,9 @@ dsx git fetch feature-a
 git merge refs/remotes/dsx/feature-a
 ```
 
-DSX must not invent a workspace commit to conceal uncommitted files. Uncommitted or untracked workspace changes remain visible through status and diff and continue to block destructive cleanup until integrated or explicitly discarded.
+DSX must not invent a workspace result commit to conceal uncommitted files. Uncommitted or untracked workspace changes remain visible through status and diff and continue to block destructive cleanup until integrated or explicitly discarded.
 
-`dsx git apply` remains a convenience for applying the reviewed workspace result as a squash to the local working tree only when the local tracked-state fingerprint still matches the expected workspace base. Otherwise it refuses without modifying the local checkout. Transfer must preserve applicable binary files, renames, additions, and deletions.
+`dsx git apply` remains a guarded squash convenience. Ordinary sources retain exact-source, tracked-fingerprint, ancestry, collision, and mutation-safety checks. Snapshot sources additionally require a clean host `HEAD` tree exactly equal to the recorded captured tree. DSX verifies the synthetic source parent/tree and result ancestry, creates an apply-local temporary bridge commit whose parent is the current real host `HEAD` and whose tree is the fetched result, then exercises the existing squash and rollback machinery. A mismatch or moved state refuses without mutation. `AppliedCommit` remains the real fetched workspace result, and transfer preserves applicable binary files, renames, additions, and deletions.
 
 The recommended parallel workflow is:
 
@@ -824,17 +848,18 @@ Browser support is enabled only for an individual agent invocation:
 dsx agent feature-a --browser
 ```
 
-The TUI agent form is:
+The TUI coding-assistant form is:
 
 ```text
-Open agent
+Open coding assistant
 
-Agent
+Coding assistant
   OMP
 
-[ ] Enable isolated browser
+Isolated browser
+  [ ] Off — this session only
 
-[Open agent]
+[Open coding assistant]
 ```
 
 When enabled, DSX must:
@@ -903,6 +928,8 @@ A local atomic manifest records:
 - Workspace state.
 - Git fetch and integration state.
 - Rebase-conflict state.
+- Source provenance: exact transferred revision, real host head, tree, and snapshot kind.
+- Pending rebase target snapshot kind.
 - Cleanup state.
 - Active lifecycle and session leases.
 
@@ -1086,27 +1113,27 @@ When stdin and stdout are interactive terminals, bare `dsx` launches a TUI in th
 The workspace dashboard is:
 
 ```text
-DSX PROJECT — tracking-chrome-extension
+DSX  WORKSPACES — tracking-chrome-extension
 
 Local checkout
-  feat/branch-1 @ abc123
-  Clean
+  feat/branch-1 @ abc123 · Ready
 
-Workspaces
+Workspaces                 Selected workspace
+> feature-a  Running       feature-a  Running
+  feature-b  Stopped       Assistant: OMP
+  tests      Needs review  AWS: Disabled
 
-> feature-a    Running             OMP · Codex
-  feature-b    Stopped             Codex
-  tests        Needs resolution    OMP · Codex
-
-[c] Create workspace
-[Enter] Open
-[a] Open agent
-[u] Update from local checkout
-[s] Start/stop
-[r] Restart
-[g] Review Git changes
-[d] Remove
-[q] Quit
+                            Actions
+                            [c] New workspace
+                            [Enter] Open shell
+                            [a] Open coding assistant
+                            [u] Update from this Mac
+                            [s] Start/stop
+                            [r] Restart
+                            [g] Review Git changes
+                            [w] Enable/disable AWS
+                            [d] Remove
+                            [q] Quit
 ```
 
 Actions are state-aware:
@@ -1142,8 +1169,8 @@ TUI actions ───────────┘
 
 Onboarding uses three presentation stages:
 
-1. A first screen offers only **Ubuntu — Default settings** and **Ubuntu — Custom**. The default applies 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom changes the agent, network, ports, CPU, or memory. Other image sources remain valid configuration and CLI inputs but are not offered by this TUI.
-2. A single concise review screen shows the effective environment and every non-default executable or authority-bearing detail. Routine internal digests, project discovery facts, and provenance priorities are omitted, while the complete executable hash, commands, mounts, credential imports, network grants, ports, and volumes remain reviewable. Overflow scrolls within the same screen and approval remains locked until its tail is visible.
+1. A first stage offers only **Ubuntu — Default settings** and **Ubuntu — Custom**. The default applies 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom changes the agent, network, ports, CPU, or memory. Other image sources remain valid configuration and CLI inputs but are not offered by this TUI. Huh presents one bounded question group at a time inside a viewport sized from the terminal after header, step, panel, and help chrome are reserved.
+2. A single concise review screen shows the effective environment and every non-default executable or authority-bearing detail. Routine internal digests, project discovery facts, and provenance priorities are omitted, while the complete executable hash, commands, mounts, credential imports, network grants, ports, and volumes remain reviewable. Overflow is paginated within the same screen and approval remains locked until its tail is visible.
 3. A bounded progress screen performs runtime preflight, persistence, Standard-image preparation, and dashboard transition.
 The setup flow performs detection and planning without mutation. Final confirmation first performs a read-only Apple container-system status check. A missing CLI or any service state other than `running` fails before configuration or approval persistence.
 
@@ -1157,7 +1184,9 @@ The TUI:
 - Sanitizes untrusted repository names, paths, configuration text, process labels, and runtime output.
 - Strips or escapes ANSI and control sequences.
 - Respects `NO_COLOR`.
-- Supports narrow terminals and resize events.
+- Derives content width and bounded screen height from every resize event; it never relies on terminal soft wrapping.
+- Uses a side-by-side workspace-list/selected-workspace dashboard on wide terminals and a compact selected-workspace/action surface on narrow or short terminals.
+- Uses focused-field compact forms and bounded review/progress content rather than clipping controls below the viewport.
 - Restores terminal state on normal exit, cancellation, recoverable errors, and child-process handoff.
 - Exits its alternate screen before handing the terminal to an interactive guest or agent process.
 - May restore the dashboard after the child exits.
@@ -1327,7 +1356,7 @@ Subprocess overhead is expected to be insignificant compared with VM boot, image
 
 | Option | Benefits | Costs | Decision |
 |---|---|---|---|
-| Named guest-owned private clone from a verified Git bundle | Independent files and Git metadata; excludes ignored files; supports concurrent workspaces, updates, and explicit result retrieval | One VM and clone per workspace; clean committed host input; explicit fetch and merge workflow | **Selected as the only workspace type** |
+| Named guest-owned private clone from a verified Git bundle | Independent files and Git metadata; clean committed ingress by default; explicit snapshots include final tracked and nonignored untracked content while excluding ignored untracked files; supports concurrent workspaces, updates, and explicit result retrieval | One VM and clone per workspace; explicit snapshot review; strict capture/apply invariants; explicit fetch and merge workflow | **Selected as the only workspace type** |
 | Direct host source mount | Immediate host visibility | Exposes the host checkout, ignored files, and host-side mutation risk | Rejected |
 | Host Git worktree | Efficient parallel branches | Shares host Git objects and metadata; `.git` pointer complicates isolation | Rejected as the security boundary |
 | Multiple workspace modes | Accommodates different interaction styles | Creates divergent lifecycle, security, and command semantics | Rejected |
@@ -1382,8 +1411,8 @@ Subprocess overhead is expected to be insignificant compared with VM boot, image
 - Integrated services are not isolated from malicious agents or dependencies inside one workspace.
 - A standard polyglot image may be large.
 - Concurrent workspaces duplicate VMs, dependency state, and configured databases.
-- Git bundle transfer requires committed tracked input, explicit updates, explicit result fetching, and per-repository handling for composite projects.
-- Uncommitted workspace changes cannot be represented by a normal fetched branch until the user commits them.
+- Git bundle transfer requires clean committed input by default or explicit reviewed snapshot input, explicit updates, explicit result fetching, and per-repository handling for composite projects.
+- Snapshot ingress adds bounded private-index/object processing and may require committing the exact captured baseline before guarded apply.
 - DSX does not resolve semantic rebase or merge conflicts.
 - Workspace restart intentionally does not restore development processes or agent sessions.
 - Docker Compose and Testcontainers projects remain unsupported until a compatibility backend exists.
@@ -1404,6 +1433,8 @@ Subprocess overhead is expected to be insignificant compared with VM boot, image
 - Treat runtime bind results as authoritative.
 - Use restrictive temporary files for source and result Git bundles.
 - Remove temporary bundles after verified transfer or rollback.
+- Snapshot source capture must use private temporary indexes, objects, and refs and must leave the host branch, `HEAD`, index, worktree, durable refs, and object database unchanged.
+- Snapshot result apply must quarantine its temporary bridge object and remove it before return.
 - Limit temporary host proxies to an active project, workspace, and lease.
 - Remove temporary helpers and proxies during normal exit, cancellation, failure, and cleanup.
 
@@ -1588,16 +1619,19 @@ The redesign is accepted for release only when all of the following are validate
 
 ### Source and Git
 
-- Workspace creation requires a clean tracked local checkout and reports excluded ignored and untracked files.
+- Ordinary workspace creation requires a clean tracked local checkout and reports excluded ignored and untracked files.
+- Explicit snapshot creation includes final tracked content and nonignored untracked files, excludes ignored untracked files, rejects unmerged paths and gitlinks, and requires a separate TUI review.
+- Snapshot capture leaves the host branch, `HEAD`, index, worktree, durable refs, and object database unchanged.
 - Every workspace clones from a verified restrictive Git bundle into guest-owned storage.
 - Workspaces share no Git metadata or object storage.
-- Workspace update rebases onto the latest committed local revision.
+- Workspace update rebases between exact transferred source revisions while separately validating real-host lineage and requested source kind.
 - Update verifies the recorded source branch.
-- Rebase conflicts persist as `Needs resolution`.
-- DSX does not silently stash files, discard files, invent commits, or attempt semantic conflict resolution.
+- Rebase conflicts persist the requested source kind as `Needs resolution`.
+- DSX does not silently stash files, discard files, invent result commits, or attempt semantic conflict resolution.
 - Workspace results can be fetched independently into `refs/remotes/dsx/<workspace-name>`.
 - Independently fetched workspace branches can be merged through normal Git operations.
 - Cleanup protects unfetched and unintegrated work.
+- Snapshot apply requires a clean tree-equivalent host baseline, stages only workspace-result changes, and refuses every mismatch without mutation.
 
 ### Authentication
 

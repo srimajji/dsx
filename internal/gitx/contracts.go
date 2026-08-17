@@ -6,11 +6,12 @@ import (
 )
 
 const (
-	SourceBundleMode           = 0o600
-	ResultBundleMode           = 0o600
-	RefNamespace               = "refs/remotes/dsx/"
-	MaxSourceBundleBytes int64 = 512 << 20
-	MaxResultBundleBytes       = MaxSourceBundleBytes
+	SourceBundleMode            = 0o600
+	ResultBundleMode            = 0o600
+	RefNamespace                = "refs/remotes/dsx/"
+	MaxSourceBundleBytes  int64 = 512 << 20
+	MaxSnapshotInputBytes       = MaxSourceBundleBytes
+	MaxResultBundleBytes        = MaxSourceBundleBytes
 )
 
 type PathComponentIdentity struct {
@@ -42,20 +43,27 @@ type SourceRequest struct {
 	ApprovedRoot string
 	Workspace    string
 	TempRoot     string
+	Snapshot     bool
 }
 
 type UpdateSourceRequest struct {
-	Repository     Repository
-	Workspace      string
-	TempRoot       string
-	SourceBranch   string
-	SourceRevision string
+	Repository         Repository
+	Workspace          string
+	TempRoot           string
+	SourceBranch       string
+	SourceRevision     string
+	SourceHeadRevision string
+	SourceTree         string
+	Snapshot           bool
 }
 
 type SourceArtifact struct {
 	Repository         Repository `json:"repository"`
 	SourceBranch       string     `json:"source_branch"`
 	SourceRevision     string     `json:"source_revision"`
+	SourceSnapshot     bool       `json:"source_snapshot"`
+	SourceHeadRevision string     `json:"source_head_revision"`
+	SourceTree         string     `json:"source_tree"`
 	TrackedFingerprint string     `json:"tracked_fingerprint"`
 	WarnUntracked      bool       `json:"warn_untracked"`
 	WarnIgnored        bool       `json:"warn_ignored"`
@@ -91,6 +99,7 @@ type StatusRequest struct {
 	Workspace          string
 	SourceBranch       string
 	SourceRevision     string
+	SourceSnapshot     bool
 	WorkspaceBranch    string
 	ResultCommit       string
 	TrackedFingerprint string
@@ -102,6 +111,7 @@ type Status struct {
 	Workspace              string `json:"workspace"`
 	SourceBranch           string `json:"source_branch"`
 	SourceRevision         string `json:"source_revision"`
+	SourceSnapshot         bool   `json:"source_snapshot"`
 	WorkspaceBranch        string `json:"workspace_branch"`
 	ResultCommit           string `json:"result_commit,omitempty"`
 	HostCommit             string `json:"host_commit"`
@@ -138,9 +148,13 @@ type DiffResult struct {
 type ApplyRequest struct {
 	Repository         Repository
 	SourceRevision     string
+	SourceSnapshot     bool
+	SourceHeadRevision string
+	SourceTree         string
 	TrackedFingerprint string
 	FetchedRef         string
 	ExpectedCommit     string
+	TempRoot           string
 }
 
 type ApplyResult struct {

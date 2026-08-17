@@ -23,7 +23,10 @@ import (
 	"github.com/srimajji/dsx/internal/terminal"
 )
 
-const maxSetupReviewBytes = 512 * 1024
+const (
+	maxSetupReviewBytes = 512 * 1024
+	maxSetupFormHeight  = 10
+)
 
 var errSetupReviewTooLarge = errors.New("complete setup review exceeds the safe display bound")
 
@@ -265,16 +268,16 @@ func validateHostAWSDirectory(value string) error {
 
 func (model *SetupModel) buildSetupForm() {
 	ubuntuChoice := huh.NewSelect[string]().
-		Title("Choose your Ubuntu workspace").
-		Description("Default uses 6 CPUs, 6 GiB memory, network allowed, and no browser.").
+		Title("How should this workspace start?").
+		Description("Recommended uses Codex, 6 CPUs, 6 GiB memory, internet access, no published ports, and no browser session.").
 		Options(
 			huh.NewOption("Ubuntu — Default settings", "ubuntu-default"),
 			huh.NewOption("Ubuntu — Custom", "ubuntu-custom"),
 		).
 		Value(&model.setupChoice)
 	awsCapability := huh.NewSelect[string]().
-		Title("AWS capability").
-		Description("Optional. New workspaces always start with AWS disabled.").
+		Title("Will this project use AWS?").
+		Description("Optional. Choosing yes only makes AWS available; each new workspace still starts disconnected.").
 		Options(
 			huh.NewOption("None — no host AWS access", plan.AWSModeNone),
 			huh.NewOption("Follow host default — selected workspaces only", plan.AWSModeHostDefault),
@@ -282,15 +285,15 @@ func (model *SetupModel) buildSetupForm() {
 		Value(&model.awsMode)
 	awsDirectory := huh.NewGroup(
 		huh.NewInput().
-			Title("Host AWS directory").
-			Description("Canonical standard-file directory. Leapp Desktop or a compatible provider must keep one complete temporary [default] active. Named profiles are unavailable.").
+			Title("Where are the host AWS files?").
+			Description("Use the standard AWS directory. Leapp Desktop or a compatible provider must keep one complete temporary [default] session active. Named profiles are not shared.").
 			Value(&model.awsDirectory).
 			Validate(validateHostAWSDirectory),
 	).WithHideFunc(func() bool { return model.awsMode != plan.AWSModeHostDefault })
 	custom := huh.NewGroup(
 		huh.NewSelect[string]().
-			Title("Coding assistant").
-			Description("Choose the assistant DSX will open inside your workspace.").
+			Title("Which coding assistant should open by default?").
+			Description("You can choose another approved assistant when opening a session.").
 			Options(
 				huh.NewOption("Codex", string(harness.Codex)),
 				huh.NewOption("Claude Code", string(harness.Claude)),
@@ -299,30 +302,53 @@ func (model *SetupModel) buildSetupForm() {
 			).
 			Value(&model.agent),
 		huh.NewConfirm().
-			Title("Let this workspace access the internet?").
-			Description("Needed for package downloads, documentation, and most coding assistants.").
-			Affirmative("Allow").
+			Title("Allow internet access?").
+			Description("Recommended for package downloads, documentation, and most coding assistants.").
+			Affirmative("Allow internet").
 			Negative("Keep offline").
 			Value(&model.internet).
 			WithButtonAlignment(lipgloss.Left),
 		huh.NewInput().
-			Title("Published guest ports").
-			Description("Optional comma-separated guest ports. DSX assigns dynamic loopback host ports.").
+			Title("Which app ports should be reachable from this Mac?").
+			Description("Optional. Enter guest ports separated by commas, for example 3000, 8080. DSX assigns safe local-only host ports.").
 			Value(&model.portInput).
 			Validate(validateGuestPorts),
 		huh.NewSelect[int]().
-			Title("CPU allocation").
+			Title("How much CPU should this workspace use?").
 			Options(setupCPUOptions(model.cpus)...).
 			Value(&model.cpus),
 		huh.NewSelect[string]().
-			Title("Memory allocation").
+			Title("How much memory should this workspace use?").
 			Options(setupMemoryOptions(model.memory)...).
 			Value(&model.memory),
 	).WithHideFunc(func() bool { return model.setupChoice != "ubuntu-custom" })
-	model.form = huh.NewForm(huh.NewGroup(ubuntuChoice, awsCapability), awsDirectory, custom).WithAccessible(model.accessible)
+	model.form = huh.NewForm(
+		huh.NewGroup(ubuntuChoice),
+		huh.NewGroup(awsCapability),
+		awsDirectory,
+		custom,
+	).WithAccessible(model.accessible)
 	if model.accessible || !model.color {
 		model.form.WithTheme(huh.ThemeFunc(huh.ThemeBase))
 	}
+	model.resizeSetupForm()
+}
+
+func (model *SetupModel) resizeSetupForm() {
+	if model.form == nil {
+		return
+	}
+	theme := newVisualTheme(model.color && !model.accessible)
+	width := tuiSetupWidth(model.width)
+	formWidth := theme.panelBodyWidth(width, model.height)
+	headerHeight := lipgloss.Height(theme.header("Workspace setup", friendlyProjectName(model.root), width))
+	stepHeight := lipgloss.Height(theme.stepper(0, width))
+	titleHeight := lipgloss.Height(wrapTUIText("Create a Linux workspace for this project", formWidth))
+	chromeHeight := headerHeight + stepHeight + titleHeight
+	if !compactTUILayout(width, model.height) {
+		chromeHeight += theme.border.GetVerticalFrameSize() + 2
+	}
+	model.form.WithWidth(formWidth).WithHeight(max(1, min(maxSetupFormHeight, model.height-chromeHeight-2)))
 }
 
 func NewPortUpdateReviewModel(ctx context.Context, application Application, root string, current, candidate app.SetupPreview, accessible bool) *SetupModel {
@@ -377,6 +403,7 @@ func (model *SetupModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if resized {
 			model.reviewPage = 0
+			model.resizeSetupForm()
 		}
 	case tea.KeyPressMsg:
 		if message.String() == "ctrl+c" || message.String() == "esc" && model.stage != setupForm {
@@ -457,14 +484,17 @@ func (model *SetupModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model *SetupModel) View() tea.View {
 	theme := newVisualTheme(model.color && !model.accessible)
-	header := theme.header("Workspace setup", friendlyProjectName(model.root), model.width)
+	width := tuiSetupWidth(model.width)
+	header := theme.header("Workspace setup", friendlyProjectName(model.root), width)
+	gap := tuiGap(model.height)
 	step := 0
 	var content string
 	if model.err != nil {
-		content = header + "\n\n" + theme.panel(
+		content = header + gap + theme.panel(
 			"Something needs attention",
-			theme.danger.Render("Could not continue")+"\n\n"+terminal.Sanitize(model.err.Error())+"\n\nPress Ctrl-C to exit.",
-			model.width,
+			theme.danger.Render("DSX could not continue")+"\n\n"+terminal.Sanitize(model.err.Error())+"\n\nPress Ctrl-C to exit.",
+			width,
+			model.height,
 			true,
 		)
 	} else {
@@ -474,17 +504,17 @@ func (model *SetupModel) View() tea.View {
 			if !model.color {
 				formView = ansi.Strip(formView)
 			}
-			content = header + "\n\n" + theme.stepper(step, model.width) + "\n\n" +
-				theme.panel("Choose how your workspace should start", formView, model.width, true)
+			content = header + gap + theme.stepper(step, width) + gap +
+				theme.panel("Create a Linux workspace for this project", formView, width, model.height, true)
 		case setupSaving:
 			step = 1
 			title := "Checking your choices"
-			body := model.spinner.View() + " Preparing the complete plan for review\n\n" +
-				"[ ] Inspect project configuration\n[ ] Resolve workspace access\n[ ] Calculate approval identity"
+			body := model.spinner.View() + " Preparing a complete, safe review\n\n" +
+				"[ ] Inspect this project\n[ ] Resolve workspace access\n[ ] Calculate approval identity"
 			if model.confirming {
 				title = "Applying approved setup"
 				body = model.spinner.View() + " Setting up this project\n\n" +
-					"[ ] Verify Apple container system\n[ ] Save configuration and approval"
+					"[ ] Verify Apple Container\n[ ] Save configuration and approval"
 				if model.approveOnly {
 					title = "Saving configuration approval"
 					body = model.spinner.View() + " Verifying and saving the reviewed approval"
@@ -492,20 +522,20 @@ func (model *SetupModel) View() tea.View {
 					title = "Updating published ports"
 					body = model.spinner.View() + " Verifying and saving the reviewed configuration"
 				} else if model.preview.Plan.Image.Standard {
-					title = "Building DSX Standard"
-					body = model.spinner.View() + " building and verifying the approved image\n\n" +
-						"[ ] Verify Apple container system\n[ ] Save configuration and approval\n[ ] Build and verify DSX Standard"
+					title = "Preparing the DSX workspace image"
+					body = model.spinner.View() + " Building and verifying DSX Standard\n\n" +
+						"[ ] Verify Apple Container\n[ ] Save configuration and approval\n[ ] Build and verify DSX Standard"
 				}
 				if !model.approveOnly && !model.updateOnly {
-					body += "\n[ ] Open project workspace screen"
+					body += "\n[ ] Open the project workspace screen"
 				}
 			}
-			content = header + "\n\n" + theme.stepper(step, model.width) + "\n\n" +
-				theme.panel(title, body, model.width, true)
+			content = header + gap + theme.stepper(step, width) + gap +
+				theme.panel(title, body, width, model.height, true)
 		case setupDone:
 			step = 2
 			status := "✓ Workspace configuration saved"
-			title := "Ready to build"
+			title := "Ready to create a workspace"
 			if model.approveOnly {
 				status = "✓ Existing workspace configuration approved"
 				title = "Approval saved"
@@ -518,15 +548,15 @@ func (model *SetupModel) View() tea.View {
 			body := theme.success.Render(status) +
 				"\n\nConfiguration\n" + terminal.SanitizeLine(model.result.ConfigPath) +
 				"\n\nApproval\n" + terminal.SanitizeLine(model.result.Hash)
-			content = header + "\n\n" + theme.stepper(step, model.width) + "\n\n" +
-				theme.panel(title, body, model.width, true)
+			content = header + gap + theme.stepper(step, width) + gap +
+				theme.panel(title, body, width, model.height, true)
 		default:
 			content = model.renderReviewPage()
 		}
 	}
-	rendered := terminal.Wrap(content, tuiContentWidth(model.width))
+	rendered := content
 	if !model.accessible {
-		rendered = theme.layout(rendered, model.width)
+		rendered = theme.layoutAt(rendered, model.width, width)
 	}
 	view := tea.NewView(rendered)
 	view.AltScreen = !model.accessible
@@ -625,40 +655,43 @@ func (model *SetupModel) reviewPageCount() int {
 
 func (model *SetupModel) renderReviewPage() string {
 	theme := newVisualTheme(model.color && !model.accessible)
-	header := theme.header("Workspace setup", friendlyProjectName(model.root), model.width)
+	width := tuiSetupWidth(model.width)
+	header := theme.header("Workspace setup", friendlyProjectName(model.root), width)
+	gap := tuiGap(model.height)
+	helpWidth := theme.panelBodyWidth(width, model.height)
 	if model.reviewRefused != nil {
 		body := fmt.Sprintf("The complete review exceeds the %d-byte safe display limit. Nothing was truncated. Approval is disabled.\n\nReduce the configuration and retry.", maxSetupReviewBytes)
-		footer := theme.center(theme.help("[q] quit"), model.width)
-		return header + "\n\n" + theme.stepper(1, model.width) + "\n\n" +
-			theme.panel("Review unavailable", body, model.width, true) + "\n\n" + footer
+		footer := theme.center(theme.help(helpWidth, "[q] quit"), width)
+		return header + gap + theme.stepper(1, width) + gap +
+			theme.panel("Review unavailable", body, width, model.height, true) + gap + footer
 	}
 	pages := reviewSectionPages(model.review, model.width, model.height)
 	if model.reviewPage >= len(pages) {
 		model.reviewPage = len(pages) - 1
 	}
 	position := theme.accent.Render(reviewPageIndicator(model.reviewPage, len(pages)))
-	controls := theme.help("[PgDn/↓] next section", "[PgUp/↑] previous", "[q] quit")
+	controls := theme.help(helpWidth, "[PgDn/↓] next section", "[PgUp/↑] previous", "[q] quit")
 	if !model.approveOnly && !model.reviewOnly {
-		controls = theme.help("[b] back to environment", "[PgDn/↓] next section", "[PgUp/↑] previous", "[q] quit")
+		controls = theme.help(helpWidth, "[b] change choices", "[PgDn/↓] next section", "[PgUp/↑] previous", "[q] quit")
 	}
 	status := theme.warning.Render("Approval locked • review every section to continue")
 	if model.reviewPage+1 == len(pages) {
-		controls = theme.help("[y] approve", "[PgUp/↑] previous", "[q] quit")
+		controls = theme.help(helpWidth, "[y] approve", "[PgUp/↑] previous", "[q] quit")
 		if !model.approveOnly && !model.reviewOnly {
-			controls = theme.help("[y] approve", "[b] back to environment", "[PgUp/↑] previous", "[q] quit")
+			controls = theme.help(helpWidth, "[y] approve", "[b] change choices", "[PgUp/↑] previous", "[q] quit")
 		}
-		confirmation := "write configuration and persist this approval"
+		confirmation := "save this configuration and approval"
 		if model.preview.Plan.Image.Standard && !model.reviewOnly && !model.approveOnly {
-			confirmation = "write configuration, persist this approval, and build DSX Standard"
+			confirmation = "save this configuration and approval, then build DSX Standard"
 		}
-		status = theme.success.Render("Final confirmation: " + confirmation + "? [y/N]")
+		status = theme.success.Render("Ready to continue: " + confirmation + "? [y/N]")
 	}
 	page := position + "\n" + theme.muted.Render(reviewNavigationHint(model.reviewPage, len(pages))) + "\n\n" +
 		renderReviewSectionPage(pages[model.reviewPage], theme)
-	footer := theme.center(status+"\n"+controls, model.width)
-	return header + "\n\n" + theme.stepper(1, model.width) + "\n\n" +
-		theme.panel("Review what DSX will do", page, model.width, true) +
-		"\n\n" + footer
+	footer := theme.center(status+"\n"+controls, width)
+	return header + gap + theme.stepper(1, width) + gap +
+		theme.panel("Review before DSX makes changes", page, width, model.height, true) +
+		gap + footer
 }
 
 type setupReviewBuilder struct {
@@ -1068,8 +1101,15 @@ func reviewSectionPages(review string, width, height int) []setupReviewPage {
 	if height <= 0 {
 		height = 24
 	}
-	bodyWidth := max(1, tuiContentWidth(width)-6)
-	pageBudget := max(1, height-20)
+	contentWidth := tuiSetupWidth(width)
+	bodyWidth := max(1, contentWidth-4)
+	if compactTUILayout(contentWidth, height) {
+		bodyWidth = contentWidth
+	}
+	pageBudget := max(1, height-16)
+	if compactTUILayout(contentWidth, height) {
+		pageBudget = max(1, height-11)
+	}
 	sections := strings.Split(review, "\n\n")
 	pages := make([]setupReviewPage, 0, len(sections))
 	for _, section := range sections {
@@ -1084,11 +1124,11 @@ func reviewSectionPages(review string, width, height int) []setupReviewPage {
 		}
 		details := []string{}
 		if len(rawLines) > 2 {
-			details = strings.Split(terminal.Wrap(strings.Join(rawLines[2:], "\n"), bodyWidth), "\n")
+			details = strings.Split(wrapTUIText(strings.Join(rawLines[2:], "\n"), bodyWidth), "\n")
 		}
-		headerLines := len(strings.Split(terminal.Wrap(title, bodyWidth), "\n"))
+		headerLines := len(strings.Split(wrapTUIText(title, bodyWidth), "\n"))
 		if description != "" {
-			headerLines += len(strings.Split(terminal.Wrap(description, bodyWidth), "\n")) + 1
+			headerLines += len(strings.Split(wrapTUIText(description, bodyWidth), "\n")) + 1
 		}
 		detailsPerPage := max(1, pageBudget-headerLines)
 		partCount := max(1, (len(details)+detailsPerPage-1)/detailsPerPage)

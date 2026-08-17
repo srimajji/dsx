@@ -392,6 +392,9 @@ type GitRecord struct {
 	Identity               gitx.RepositoryIdentity `json:"identity"`
 	SourceBranch           string                  `json:"source_branch"`
 	SourceRevision         string                  `json:"source_revision"`
+	SourceSnapshot         bool                    `json:"source_snapshot,omitempty"`
+	SourceHeadRevision     string                  `json:"source_head_revision,omitempty"`
+	SourceTree             string                  `json:"source_tree,omitempty"`
 	TrackedFingerprint     string                  `json:"tracked_fingerprint"`
 	WarnUntracked          bool                    `json:"warn_untracked,omitempty"`
 	WarnIgnored            bool                    `json:"warn_ignored,omitempty"`
@@ -404,6 +407,7 @@ type GitRecord struct {
 	BackupRef              string                  `json:"backup_ref,omitempty"`
 	Conflict               bool                    `json:"conflict,omitempty"`
 	ConflictSourceRevision string                  `json:"conflict_source_revision,omitempty"`
+	ConflictSourceSnapshot bool                    `json:"conflict_source_snapshot,omitempty"`
 	ConflictBundleDigest   string                  `json:"conflict_bundle_digest,omitempty"`
 }
 
@@ -473,6 +477,20 @@ func validateGitRecord(manifest Manifest, record GitRecord) error {
 	if !validGitObjectID(record.SourceRevision) {
 		return fmt.Errorf("source revision must be a lowercase Git object ID")
 	}
+	if (record.SourceHeadRevision == "") != (record.SourceTree == "") {
+		return fmt.Errorf("source head revision and source tree must be recorded together")
+	}
+	if record.SourceSnapshot && record.SourceHeadRevision == "" {
+		return fmt.Errorf("snapshot source requires source head revision and source tree")
+	}
+	if record.SourceHeadRevision != "" {
+		if !validGitObjectID(record.SourceHeadRevision) || len(record.SourceHeadRevision) != len(record.SourceRevision) {
+			return fmt.Errorf("source head revision must match the source revision object format")
+		}
+		if !validGitObjectID(record.SourceTree) || len(record.SourceTree) != len(record.SourceRevision) {
+			return fmt.Errorf("source tree must match the source revision object format")
+		}
+	}
 	if !validSHA256(record.TrackedFingerprint) {
 		return fmt.Errorf("tracked fingerprint must be a lowercase SHA-256 digest")
 	}
@@ -487,6 +505,9 @@ func validateGitRecord(manifest Manifest, record GitRecord) error {
 	}
 	if record.Conflict != (record.ConflictSourceRevision != "" && record.ConflictBundleDigest != "") {
 		return fmt.Errorf("conflict state, source revision, and bundle digest must be recorded together")
+	}
+	if !record.Conflict && record.ConflictSourceSnapshot {
+		return fmt.Errorf("conflict source snapshot exists without conflict state")
 	}
 	if record.ConflictSourceRevision != "" && !validGitObjectID(record.ConflictSourceRevision) {
 		return fmt.Errorf("conflict source revision must be a lowercase Git object ID")

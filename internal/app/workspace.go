@@ -21,6 +21,7 @@ import (
 	"github.com/srimajji/dsx/internal/plan"
 	"github.com/srimajji/dsx/internal/runtime"
 	"github.com/srimajji/dsx/internal/state"
+	"github.com/srimajji/dsx/internal/terminal"
 )
 
 const (
@@ -124,6 +125,7 @@ type WorkspaceCreateRequest struct {
 	Workspace      model.WorkspaceName
 	SourceBranch   string
 	SourceRevision string
+	Snapshot       bool
 	DefaultAgent   string
 	ApproveConfig  string
 	Open           bool
@@ -200,6 +202,7 @@ type WorkspaceSummary struct {
 	DefaultAgent   string               `json:"default_agent,omitempty"`
 	SourceBranch   string               `json:"source_branch,omitempty"`
 	SourceRevision string               `json:"source_revision,omitempty"`
+	SourceSnapshot bool                 `json:"source_snapshot"`
 	Resources      int                  `json:"resources"`
 	MutationActive bool                 `json:"mutation_active"`
 	Legacy         bool                 `json:"legacy"`
@@ -289,7 +292,7 @@ func (service *WorkspaceService) Create(ctx context.Context, request WorkspaceCr
 	if !approvedAgent(execution.Agents.Allowed, defaultAgent) {
 		return result, model.NewError(model.CodeInvalidInput, "workspace default agent is not approved", nil)
 	}
-	artifacts, warnings, err := service.prepareWorkspaceSources(ctx, execution, name, request.SourceBranch, request.SourceRevision)
+	artifacts, warnings, err := service.prepareWorkspaceSources(ctx, execution, name, request.SourceBranch, request.SourceRevision, request.Snapshot)
 	if err != nil {
 		return result, err
 	}
@@ -400,18 +403,31 @@ func (service *WorkspaceService) Create(ctx context.Context, request WorkspaceCr
 }
 
 func (service *WorkspaceService) initializeWorkspaceVolumes(ctx context.Context, snapshot runtime.ResourceSnapshot) error {
+	var stderr cappedBuffer
+	stderr.limit = 4096
 	exit, err := service.runtime.Exec(ctx, snapshot, runtime.ExecSpec{
 		Argv:       append([]string(nil), workspaceInitializationArgv...),
 		WorkingDir: "/workspace",
 		User:       "0:0",
-	}, runtime.ExecIO{})
-	if err != nil {
-		return model.Wrap(model.CodeUnavailable, "initialize workspace volume ownership", err)
+	}, runtime.ExecIO{Stderr: &stderr})
+	if err == nil && exit.Code != nil && *exit.Code == 0 && exit.Signal == "" {
+		return nil
 	}
-	if exit.Code == nil || *exit.Code != 0 {
-		return model.NewError(model.CodeUnavailable, "initialize workspace volume ownership", nil)
+	detail := terminal.SanitizeLine(strings.TrimSpace(stderr.String()))
+	if detail == "" && err != nil {
+		detail = terminal.SanitizeLine(strings.TrimSpace(err.Error()))
 	}
-	return nil
+	if detail == "" {
+		switch {
+		case exit.Signal != "":
+			detail = "guest initializer terminated by signal " + terminal.SanitizeLine(exit.Signal)
+		case exit.Code != nil:
+			detail = fmt.Sprintf("guest initializer exited with status %d", *exit.Code)
+		default:
+			detail = "guest initializer returned no exit status"
+		}
+	}
+	return model.NewError(model.CodeUnavailable, "initialize workspace volume ownership: "+detail, err)
 }
 
 func (service *WorkspaceService) Start(ctx context.Context, request WorkspaceStartRequest) (result WorkspaceResult, returnErr error) {
@@ -648,7 +664,7 @@ func (service *WorkspaceService) List(ctx context.Context, request WorkspaceList
 		}
 		summary := WorkspaceSummary{ProjectID: manifest.ProjectID, Workspace: manifest.Workspace, RunID: manifest.RunID, State: manifest.State, DefaultAgent: manifest.DefaultAgent, Resources: len(manifest.Resources), MutationActive: manifest.Operation != "", Legacy: manifest.Legacy}
 		if len(manifest.Git) != 0 {
-			summary.SourceBranch, summary.SourceRevision = manifest.Git[0].SourceBranch, manifest.Git[0].SourceRevision
+			summary.SourceBranch, summary.SourceRevision, summary.SourceSnapshot = manifest.Git[0].SourceBranch, manifest.Git[0].SourceRevision, manifest.Git[0].SourceSnapshot
 		}
 		if manifest.Legacy {
 			summary.Warnings = []string{"Legacy — cleanup only"}
@@ -1181,11 +1197,14 @@ func (service *WorkspaceService) rollbackCreate(ctx context.Context, manifest *s
 	return service.manifests.DeleteManifest(ctx, manifest.ProjectID, manifest.Workspace, manifest.RunID)
 }
 
-func (service *WorkspaceService) prepareWorkspaceSources(ctx context.Context, execution plan.ExecutionPlan, name model.WorkspaceName, expectedBranch, expectedRevision string) ([]gitx.SourceArtifact, []string, error) {
+func (service *WorkspaceService) prepareWorkspaceSources(ctx context.Context, execution plan.ExecutionPlan, name model.WorkspaceName, expectedBranch, expectedHeadRevision string, snapshot bool) ([]gitx.SourceArtifact, []string, error) {
 	artifacts := make([]gitx.SourceArtifact, 0, len(execution.Repositories))
 	warnings := make([]string, 0)
 	for _, repository := range execution.Repositories {
-		artifact, err := service.git.PrepareSource(ctx, gitx.SourceRequest{Repository: gitx.Repository{Name: repository.Name, HostPath: repository.HostPath, GuestPath: repository.GuestPath}, ApprovedRoot: execution.Project.CanonicalRoot, Workspace: string(name), TempRoot: service.tempRoot})
+		artifact, err := service.git.PrepareSource(ctx, gitx.SourceRequest{
+			Repository:   gitx.Repository{Name: repository.Name, HostPath: repository.HostPath, GuestPath: repository.GuestPath},
+			ApprovedRoot: execution.Project.CanonicalRoot, Workspace: string(name), TempRoot: service.tempRoot, Snapshot: snapshot,
+		})
 		if err != nil {
 			return nil, nil, errors.Join(err, service.removeSourceArtifacts(artifacts))
 		}
@@ -1195,10 +1214,13 @@ func (service *WorkspaceService) prepareWorkspaceSources(ctx context.Context, ex
 		if expectedBranch != "" && artifact.SourceBranch != expectedBranch {
 			return nil, nil, errors.Join(model.NewError(model.CodeConflict, "selected source branch changed", nil), service.git.RemoveArtifact(artifact.BundlePath), service.removeSourceArtifacts(artifacts))
 		}
-		if expectedRevision != "" && artifact.SourceRevision != expectedRevision {
+		if expectedHeadRevision != "" && artifact.SourceHeadRevision != expectedHeadRevision {
 			return nil, nil, errors.Join(model.NewError(model.CodeConflict, "selected source revision changed", nil), service.git.RemoveArtifact(artifact.BundlePath), service.removeSourceArtifacts(artifacts))
 		}
 		artifacts = append(artifacts, artifact)
+		if artifact.SourceSnapshot {
+			warnings = append(warnings, repository.Name+": source snapshot included final tracked content and nonignored untracked files")
+		}
 		if artifact.WarnUntracked {
 			warnings = append(warnings, repository.Name+": untracked files were not transferred")
 		}
@@ -1255,7 +1277,7 @@ func plannedWorkspaceManifest(execution plan.ExecutionPlan, name model.Workspace
 		manifest.Resources = append(manifest.Resources, record)
 	}
 	for index, artifact := range artifacts {
-		manifest.Git[index] = state.GitRecord{Repository: artifact.Repository.Name, HostPath: artifact.Repository.HostPath, GuestPath: artifact.Repository.GuestPath, Identity: artifact.Repository.Identity, SourceBranch: artifact.SourceBranch, SourceRevision: artifact.SourceRevision, TrackedFingerprint: artifact.TrackedFingerprint, WarnUntracked: artifact.WarnUntracked, WarnIgnored: artifact.WarnIgnored, WorkspaceBranch: "dsx/" + string(name), SourceBundleDigest: artifact.BundleDigest}
+		manifest.Git[index] = state.GitRecord{Repository: artifact.Repository.Name, HostPath: artifact.Repository.HostPath, GuestPath: artifact.Repository.GuestPath, Identity: artifact.Repository.Identity, SourceBranch: artifact.SourceBranch, SourceRevision: artifact.SourceRevision, SourceSnapshot: artifact.SourceSnapshot, SourceHeadRevision: artifact.SourceHeadRevision, SourceTree: artifact.SourceTree, TrackedFingerprint: artifact.TrackedFingerprint, WarnUntracked: artifact.WarnUntracked, WarnIgnored: artifact.WarnIgnored, WorkspaceBranch: "dsx/" + string(name), SourceBundleDigest: artifact.BundleDigest}
 	}
 	return manifest, state.ValidateManifest(manifest)
 }

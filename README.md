@@ -12,7 +12,7 @@ It supports live project workspaces, independent named Git clones, coding-agent 
 - [Complete user and operator manual](docs/manual/user-guide.md)
 - [Product requirements](docs/PRD.md)
 - [Implementation architecture](docs/adr/0001-dsx-implementation-architecture.md)
-- [MVP implementation outcome](docs/implementation-plan.md)
+- [MVP implementation outcome](docs/plans/implementation-plan.md)
 - [Post-MVP backlog](docs/post-mvp-backlog.md)
 
 ## Quick start

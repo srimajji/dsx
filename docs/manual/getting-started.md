@@ -72,8 +72,8 @@ $ dsx init
 
 The setup flow has three steps:
 
-1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default means Codex, 6 CPUs, 6 GiB, network allowed, no published ports, and no browser. Custom exposes the coding assistant, internet access, ports, CPU, and memory.
-2. Review and approve one concise screen. DSX shows the effective environment and any non-default commands, mounts, credentials, network grants, ports, or volumes. It hides routine implementation digests and discovery noise while retaining the executable hash and every authority-bearing detail.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default means Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser session. Custom exposes the coding assistant, internet access, ports, CPU, and memory. DSX asks one bounded group of questions at a time, so the form and its controls stay inside the terminal.
+2. Review and approve one concise screen. DSX shows the effective environment and any non-default commands, mounts, credentials, network grants, ports, or volumes. It hides routine implementation digests and discovery noise while retaining the executable hash and every authority-bearing detail. Long reviews use complete, bounded pages; approval unlocks only after the final page.
 3. DSX verifies Apple Container, saves configuration and approval, prepares DSX Standard when needed, and opens the workspace dashboard.
 
 Alternate OCI and project images remain supported through configuration and CLI workflows, but are intentionally absent from onboarding.
@@ -133,13 +133,18 @@ Omit `aws` or use `"mode": "none"` to authorize no host AWS access. No profile n
 
 ## Create named workspaces
 
-The tracked local working tree must be clean. Creation records the checked-out branch and commit, warns that ignored and untracked files are excluded, transfers a restrictive verified bundle, and creates `dsx/<workspace-name>` in guest-owned storage.
+Ordinary creation requires a clean tracked local working tree. It records the checked-out branch and `HEAD`, excludes every untracked file whether ignored or not, transfers a restrictive verified bundle, and creates `dsx/<workspace-name>` in guest-owned storage.
 
 ```console
 $ dsx workspace create feature-a
 $ dsx workspace create feature-b --default-agent claude
+$ dsx workspace create dirty-work --snapshot
 $ dsx workspace list
 ```
+
+`--snapshot` is an explicit alternative for reviewed local work. It creates an isolated synthetic commit whose single parent is the captured host `HEAD`, then uses the same bounded, verified bundle and guest-owned private clone as ordinary creation. The snapshot contains the final working-tree version of every tracked file—including tracked files that match ignore rules—and nonignored untracked files. Ignored untracked files stay on the host. Staged content is not a separate layer: if a tracked path has later unstaged edits, the final working-tree bytes win.
+
+Unmerged paths and Git submodules are rejected. Snapshot capture also refuses other gitlinks, unsafe paths, unsupported file kinds, and bounded-input violations. It does not change the host branch, `HEAD`, index, working tree, durable refs, or object database. Temporary snapshot refs, indexes, object directories, and bundles are removed on success and failure.
 
 Names contain 1–24 lowercase letters, digits, or hyphens, cannot begin or end with a hyphen, and identify peer workspaces. There is no implicit or privileged workspace.
 
@@ -148,10 +153,15 @@ Creation starts only `dsx-guest`. It does not ask for authentication, a task pro
 In the TUI, press **c** on the dashboard. The create form contains only:
 
 - workspace name;
-- committed source branch and revision; and
-- an optional workspace default selected from `agents.allowed`.
+- source branch and real parent revision;
+- an optional workspace coding assistant selected from `agents.allowed`; and
+- **Include local changes**, which is off by default.
 
-Choose **Create and open** to keep a bounded creation-progress screen visible until the workspace is ready, then hand the terminal directly to its shell. Choose **Create in background** to show the same progress without attaching a shell. DSX does not expose an idle host prompt between creation and shell attachment.
+Ordinary submission remains unavailable from a dirty checkout. Enabling **Include local changes** opens a separate snapshot review showing the workspace, real parent, included and excluded content, rejection rules, and host non-mutation guarantee. No creation intent is emitted until that review is confirmed. Dirty dashboard update stays disabled and points to the explicit CLI command.
+
+Choose **Create and open a shell** to keep a bounded creation-progress screen visible until the workspace is ready, then hand the terminal directly to its shell. Choose **Create in background** to show the same progress without attaching a shell. DSX does not expose an idle host prompt between creation and shell attachment.
+
+The dashboard adapts to the terminal. Wide terminals place the workspace list beside the selected workspace’s status and actions. Narrow or short terminals show a compact selected-workspace view with the same state-aware actions. Text wraps to terminal cells, forms focus one field at a time when space is tight, and review/progress controls remain inside the viewport.
 
 ## Operate a workspace
 
@@ -262,13 +272,23 @@ The browser is deleted on success, error, cancellation, or terminal closure. It 
 
 ## Update from the local checkout
 
-Commit local changes on the same source branch recorded for the workspace, then run:
+For ordinary ingress, commit local changes on the same source branch recorded for the workspace, then run:
 
 ```console
 $ dsx workspace update feature-a
 ```
 
-DSX requires a clean, committed local branch matching the recorded source branch. It transfers a verified bundle, creates a backup ref, and rebases `dsx/feature-a` onto the new local revision. It never stashes work, invents commits, or attempts semantic conflict resolution.
+DSX requires a clean local branch matching the recorded source branch. It transfers a verified bundle, creates a backup ref, and rebases `dsx/feature-a` onto the new committed revision.
+
+To rebase onto explicitly reviewed final working-tree content instead, run:
+
+```console
+$ dsx workspace update feature-a --snapshot
+```
+
+Snapshot update uses the same inclusion, exclusion, parent, and host non-mutation rules as snapshot creation. It records the new synthetic source and its real host `HEAD`, then rebases workspace-only commits onto that synthetic commit. DSX never stashes work, merges unrelated branches, or attempts semantic conflict resolution.
+
+After a workspace is created or updated with `--snapshot`, keep using `--snapshot` for subsequent updates. DSX rejects an ordinary update because switching directly to committed-only ingress would discard captured baseline content. Preserve the workspace result, remove the workspace, and recreate it from a clean committed checkout to return to ordinary ingress.
 
 If a conflict occurs, the workspace becomes **Needs resolution** and remains openable:
 
@@ -301,6 +321,17 @@ Or apply a guarded squashed working-tree change:
 ```console
 $ dsx git apply feature-a
 ```
+
+For an ordinary committed source, the guarded apply contract is unchanged. For a snapshot source, `git status`, `git diff`, and `git fetch` work normally, but `git apply` requires a clean host whose `HEAD` tree exactly equals the recorded snapshot tree. First make the host contain the exact captured baseline and commit it:
+
+```console
+$ git add -A
+$ git commit -m "record reviewed DSX snapshot baseline"
+$ dsx git fetch feature-a
+$ dsx git apply feature-a
+```
+
+The matching host commit may have a different commit ID from the synthetic source; tree equality is the boundary. If the captured baseline is no longer desired, update or re-snapshot instead. On success, apply stages only workspace-result changes relative to the captured snapshot. Any baseline mismatch refuses without host mutation.
 
 For composite projects, add `--repo MEMBER` to target one configured repository.
 
@@ -388,4 +419,4 @@ Run `dsx doctor` and `container version --format json`. DSX fails closed for an 
 - Read the [complete user and operator guide](./user-guide.md).
 - Review the [product requirements](../PRD.md).
 - Review the [implementation architecture](../adr/0001-dsx-implementation-architecture.md).
-- For dedicated physical CI hosts, use the [runner operations guide](../runner-operations.md).
+- For dedicated physical CI hosts, use the [runner operations guide](../operations/runner-operations.md).

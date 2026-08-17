@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,13 +12,6 @@ import (
 	"github.com/srimajji/dsx/internal/guest"
 	"github.com/srimajji/dsx/internal/guestproto"
 )
-
-func TestCtlProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_DSX_CTL_HELPER") != "1" {
-		return
-	}
-	os.Exit(run([]string{"ctl", "--socket", os.Getenv("DSX_CTL_SOCKET")}))
-}
 
 func TestCtlModeRoundTrip(t *testing.T) {
 	root, err := os.MkdirTemp("/tmp", "dg-cli-")
@@ -58,19 +50,17 @@ func TestCtlModeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable, "-test.run=^TestCtlProcess$")
-	command.Env = append(os.Environ(), "GO_WANT_DSX_CTL_HELPER=1", "DSX_CTL_SOCKET="+socket)
-	command.Stdin = bytes.NewReader(requestJSON)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		t.Fatalf("ctl command = %v, stderr %q", err, stderr.String())
+	code := runControlWithIO(
+		[]string{"--socket", socket},
+		func() error { return nil },
+		bytes.NewReader(requestJSON),
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("ctl command exit = %d, stderr %q", code, stderr.String())
 	}
 	if bytes.Count(stdout.Bytes(), []byte("\n")) != 1 {
 		t.Fatalf("ctl stdout = %q", stdout.String())

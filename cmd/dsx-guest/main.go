@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -177,20 +178,30 @@ func (values *repeatedStrings) Set(value string) error {
 }
 
 func runControl(arguments []string) int {
-	if err := guest.VerifyInstalledExecutable(); err != nil {
-		fmt.Fprintf(os.Stderr, "dsx-guest ctl: verify installed helper: %v\n", err)
+	return runControlWithIO(arguments, guest.VerifyInstalledExecutable, os.Stdin, os.Stdout, os.Stderr)
+}
+
+func runControlWithIO(
+	arguments []string,
+	verifyInstalled func() error,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	if err := verifyInstalled(); err != nil {
+		fmt.Fprintf(stderr, "dsx-guest ctl: verify installed helper: %v\n", err)
 		return 3
 	}
 	flags := flag.NewFlagSet("dsx-guest ctl", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
+	flags.SetOutput(stderr)
 	socketPath := flags.String("socket", guest.DefaultSocketPath, "control socket path")
 	if err := flags.Parse(arguments); err != nil || len(flags.Args()) != 0 {
-		fmt.Fprintln(os.Stderr, "usage: dsx-guest ctl [--socket PATH]")
+		fmt.Fprintln(stderr, "usage: dsx-guest ctl [--socket PATH]")
 		return 2
 	}
-	ok, err := guest.Control(context.Background(), *socketPath, os.Stdin, os.Stdout)
+	ok, err := guest.Control(context.Background(), *socketPath, stdin, stdout)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dsx-guest ctl: %v\n", err)
+		fmt.Fprintf(stderr, "dsx-guest ctl: %v\n", err)
 		if errors.Is(err, guest.ErrControlInput) {
 			return 2
 		}

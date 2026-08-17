@@ -56,12 +56,219 @@ func TestPrepareSourceRefusesDirtyTrackedAndReportsWarnings(t *testing.T) {
 	}
 }
 
+func TestPrepareSourceSnapshotCapturesFinalWorktreeWithoutHostMutation(t *testing.T) {
+	fixture := newRepository(t)
+	writeFile(t, filepath.Join(fixture.path, ".gitignore"), "ignored.log\ntracked-ignored.txt\n")
+	writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "original\n")
+	writeFile(t, filepath.Join(fixture.path, "rename-source.txt"), "rename source\n")
+	writeFile(t, filepath.Join(fixture.path, "deleted.txt"), "delete me\n")
+	writeFile(t, filepath.Join(fixture.path, "binary.dat"), []byte{0, 1, 2, 3})
+	writeFile(t, filepath.Join(fixture.path, "tracked-ignored.txt"), "tracked ignored original\n")
+	gitTest(t, fixture.path, "add", ".gitignore", "tracked.txt", "rename-source.txt", "deleted.txt", "binary.dat")
+	gitTest(t, fixture.path, "add", "-f", "tracked-ignored.txt")
+	gitTest(t, fixture.path, "commit", "-m", "source")
+	sourceHead := strings.TrimSpace(gitTest(t, fixture.path, "rev-parse", "HEAD"))
+
+	writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "staged\n")
+	gitTest(t, fixture.path, "add", "tracked.txt")
+	writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "final unstaged\n")
+	gitTest(t, fixture.path, "rm", "deleted.txt")
+	gitTest(t, fixture.path, "mv", "rename-source.txt", "renamed.txt")
+	writeFile(t, filepath.Join(fixture.path, "renamed.txt"), "renamed final\n")
+	writeFile(t, filepath.Join(fixture.path, "binary.dat"), []byte{0, 9, 0xff, 4})
+	writeFile(t, filepath.Join(fixture.path, "tracked-ignored.txt"), "tracked ignored final\n")
+	if err := os.Mkdir(filepath.Join(fixture.path, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(fixture.path, "nested", "untracked.txt"), "nested untracked\n")
+	if err := os.Symlink("nested/untracked.txt", filepath.Join(fixture.path, "untracked-link")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(fixture.path, "ignored.log"), "host only\n")
+	gitTest(t, fixture.path, "config", "user.name", "Hostile User")
+	gitTest(t, fixture.path, "config", "user.email", "hostile@example.invalid")
+	t.Setenv("GIT_AUTHOR_NAME", "Ambient Hostile")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.invalid")
+	t.Setenv("GIT_OBJECT_DIRECTORY", filepath.Join(t.TempDir(), "hostile-objects"))
+
+	before := hostByteSnapshot(t, fixture.path)
+	tempRoot := t.TempDir()
+	request := SourceRequest{
+		Repository: fixture.repository(), ApprovedRoot: fixture.path,
+		Workspace: "snapshot", TempRoot: tempRoot, Snapshot: true,
+	}
+	artifact, err := fixture.service.PrepareSource(context.Background(), request)
+	if err != nil {
+		t.Fatalf("PrepareSource(snapshot) error = %v", err)
+	}
+	assertHostByteSnapshot(t, fixture.path, before)
+	if !artifact.SourceSnapshot || artifact.SourceHeadRevision != sourceHead || artifact.SourceTree == "" {
+		t.Fatalf("snapshot provenance = %#v", artifact)
+	}
+	if artifact.WarnUntracked || !artifact.WarnIgnored {
+		t.Fatalf("snapshot warnings = untracked:%v ignored:%v", artifact.WarnUntracked, artifact.WarnIgnored)
+	}
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].IsDir() || filepath.Join(tempRoot, entries[0].Name()) != artifact.BundlePath {
+		t.Fatalf("temporary artifacts after snapshot return = %#v", entries)
+	}
+
+	guest := filepath.Join(t.TempDir(), "guest")
+	gitTest(t, "", "init", "--quiet", guest)
+	gitTest(t, guest, "fetch", "--no-tags", "--no-write-fetch-head", "--", artifact.BundlePath, artifact.BundleRef)
+	gitTest(t, guest, "checkout", "--quiet", "--detach", artifact.SourceRevision)
+	if got := string(mustRead(t, filepath.Join(guest, "tracked.txt"))); got != "final unstaged\n" {
+		t.Fatalf("tracked final content = %q", got)
+	}
+	if got := string(mustRead(t, filepath.Join(guest, "nested", "untracked.txt"))); got != "nested untracked\n" {
+		t.Fatalf("nested untracked content = %q", got)
+	}
+	if got := string(mustRead(t, filepath.Join(guest, "tracked-ignored.txt"))); got != "tracked ignored final\n" {
+		t.Fatalf("tracked ignored content = %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(guest, "ignored.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ignored untracked file crossed snapshot: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(guest, "deleted.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted file remained in snapshot: %v", err)
+	}
+	if got := string(mustRead(t, filepath.Join(guest, "renamed.txt"))); got != "renamed final\n" {
+		t.Fatalf("renamed content = %q", got)
+	}
+	if got := mustRead(t, filepath.Join(guest, "binary.dat")); !bytes.Equal(got, []byte{0, 9, 0xff, 4}) {
+		t.Fatalf("binary content = %v", got)
+	}
+	if target, err := os.Readlink(filepath.Join(guest, "untracked-link")); err != nil || target != "nested/untracked.txt" {
+		t.Fatalf("untracked symlink = %q, %v", target, err)
+	}
+	if parent := strings.TrimSpace(gitTest(t, guest, "rev-parse", artifact.SourceRevision+"^")); parent != sourceHead {
+		t.Fatalf("snapshot parent = %s, want %s", parent, sourceHead)
+	}
+	if tree := strings.TrimSpace(gitTest(t, guest, "rev-parse", artifact.SourceRevision+"^{tree}")); tree != artifact.SourceTree {
+		t.Fatalf("snapshot tree = %s, want %s", tree, artifact.SourceTree)
+	}
+	if got := strings.TrimSpace(gitTest(t, guest, "show", "-s", "--format=%an <%ae>|%cn <%ce>|%s", artifact.SourceRevision)); got != "DSX Snapshot <snapshot@dsx.invalid>|DSX Snapshot <snapshot@dsx.invalid>|DSX workspace source snapshot" {
+		t.Fatalf("snapshot commit headers = %q", got)
+	}
+
+	second, err := fixture.service.PrepareSource(context.Background(), request)
+	if err != nil {
+		t.Fatalf("second PrepareSource(snapshot) error = %v", err)
+	}
+	if second.SourceRevision != artifact.SourceRevision || second.SourceTree != artifact.SourceTree || second.TrackedFingerprint != artifact.TrackedFingerprint {
+		t.Fatalf("snapshot is not deterministic: first %#v second %#v", artifact, second)
+	}
+	assertHostByteSnapshot(t, fixture.path, before)
+	if err := fixture.service.RemoveArtifact(artifact.BundlePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.RemoveArtifact(second.BundlePath); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("temporary artifacts after removal = %#v, %v", entries, err)
+	}
+}
+
+func TestPrepareSourceSnapshotRejectsUnsafeOrOversizedRepositoriesWithoutArtifacts(t *testing.T) {
+	t.Run("unmerged paths", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		gitTest(t, fixture.path, "checkout", "-b", "other")
+		writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "other\n")
+		gitTest(t, fixture.path, "commit", "-am", "other")
+		gitTest(t, fixture.path, "checkout", "main")
+		writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "main\n")
+		gitTest(t, fixture.path, "commit", "-am", "main")
+		command := exec.Command("git", "merge", "other")
+		command.Dir = fixture.path
+		command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+		if output, err := command.CombinedOutput(); err == nil {
+			t.Fatalf("git merge unexpectedly succeeded: %s", output)
+		}
+		tempRoot := t.TempDir()
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+			Repository: fixture.repository(), ApprovedRoot: fixture.path,
+			Workspace: "unmerged", TempRoot: tempRoot, Snapshot: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "repository has unmerged paths") {
+			t.Fatalf("unmerged snapshot error = %v", err)
+		}
+		if entries, readErr := os.ReadDir(tempRoot); readErr != nil || len(entries) != 0 {
+			t.Fatalf("unmerged refusal artifacts = %#v, %v", entries, readErr)
+		}
+	})
+
+	t.Run("tracked gitlink", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		head := strings.TrimSpace(gitTest(t, fixture.path, "rev-parse", "HEAD"))
+		gitTest(t, fixture.path, "update-index", "--add", "--cacheinfo", "160000,"+head+",submodule")
+		tempRoot := t.TempDir()
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+			Repository: fixture.repository(), ApprovedRoot: fixture.path,
+			Workspace: "gitlink", TempRoot: tempRoot, Snapshot: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "submodules or embedded Git repositories") {
+			t.Fatalf("tracked gitlink snapshot error = %v", err)
+		}
+		if entries, readErr := os.ReadDir(tempRoot); readErr != nil || len(entries) != 0 {
+			t.Fatalf("tracked gitlink refusal artifacts = %#v, %v", entries, readErr)
+		}
+	})
+
+	t.Run("new embedded repository", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		embedded := filepath.Join(fixture.path, "embedded")
+		gitTest(t, "", "init", "--quiet", embedded)
+		writeFile(t, filepath.Join(embedded, "nested.txt"), "nested\n")
+		tempRoot := t.TempDir()
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+			Repository: fixture.repository(), ApprovedRoot: fixture.path,
+			Workspace: "embedded", TempRoot: tempRoot, Snapshot: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "submodules or embedded Git repositories") {
+			t.Fatalf("embedded repository snapshot error = %v", err)
+		}
+		if entries, readErr := os.ReadDir(tempRoot); readErr != nil || len(entries) != 0 {
+			t.Fatalf("embedded repository refusal artifacts = %#v, %v", entries, readErr)
+		}
+	})
+
+	t.Run("over cap before materialization", func(t *testing.T) {
+		fixture := newRepositoryWithCommit(t)
+		large := filepath.Join(fixture.path, "large-untracked.bin")
+		if err := os.WriteFile(large, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(large, MaxSnapshotInputBytes+1); err != nil {
+			t.Fatal(err)
+		}
+		before := hostByteSnapshot(t, fixture.path)
+		tempRoot := t.TempDir()
+		_, err := fixture.service.PrepareSource(context.Background(), SourceRequest{
+			Repository: fixture.repository(), ApprovedRoot: fixture.path,
+			Workspace: "large", TempRoot: tempRoot, Snapshot: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "snapshot materialized input exceeds") {
+			t.Fatalf("over-cap snapshot error = %v", err)
+		}
+		assertHostByteSnapshot(t, fixture.path, before)
+		if entries, readErr := os.ReadDir(tempRoot); readErr != nil || len(entries) != 0 {
+			t.Fatalf("over-cap refusal artifacts = %#v, %v", entries, readErr)
+		}
+	})
+}
+
 func TestPrepareUpdateSourceRequiresCleanMatchingAdvancedBranch(t *testing.T) {
 	tests := map[string]struct {
-		mutate  func(*testing.T, repositoryFixture)
-		wantErr string
+		mutate       func(*testing.T, repositoryFixture)
+		snapshot     bool
+		wantSnapshot bool
+		wantErr      string
 	}{
-		"successful update": {
+		"successful ordinary update": {
 			mutate: func(t *testing.T, fixture repositoryFixture) {
 				writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "new source\n")
 				gitTest(t, fixture.path, "add", "tracked.txt")
@@ -74,23 +281,52 @@ func TestPrepareUpdateSourceRequiresCleanMatchingAdvancedBranch(t *testing.T) {
 			},
 			wantErr: "does not match recorded source branch",
 		},
-		"dirty host": {
+		"dirty host ordinary": {
 			mutate: func(t *testing.T, fixture repositoryFixture) {
 				writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "dirty\n")
 			},
 			wantErr: "tracked or index changes",
 		},
-		"no newer commit": {
+		"no newer ordinary commit": {
 			mutate:  func(*testing.T, repositoryFixture) {},
 			wantErr: "no newer committed revision",
 		},
-		"rewritten source history": {
+		"rewritten ordinary source history": {
 			mutate: func(t *testing.T, fixture repositoryFixture) {
 				tree := strings.TrimSpace(gitTest(t, fixture.path, "write-tree"))
 				revision := strings.TrimSpace(gitTest(t, fixture.path, "commit-tree", tree, "-m", "unrelated source"))
 				gitTest(t, fixture.path, "update-ref", "refs/heads/main", revision)
 			},
-			wantErr: "does not descend from recorded source revision",
+			wantErr: "does not descend from recorded source head revision",
+		},
+		"same parent changed snapshot": {
+			mutate: func(t *testing.T, fixture repositoryFixture) {
+				writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "snapshot source\n")
+				writeFile(t, filepath.Join(fixture.path, "untracked.txt"), "snapshot untracked\n")
+			},
+			snapshot: true, wantSnapshot: true,
+		},
+		"advanced parent snapshot": {
+			mutate: func(t *testing.T, fixture repositoryFixture) {
+				gitTest(t, fixture.path, "commit", "--allow-empty", "-m", "advanced parent")
+				writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "advanced snapshot\n")
+			},
+			snapshot: true, wantSnapshot: true,
+		},
+		"unchanged snapshot": {
+			mutate:   func(*testing.T, repositoryFixture) {},
+			snapshot: true,
+			wantErr:  "local source snapshot has not changed",
+		},
+		"rewritten snapshot parent history": {
+			mutate: func(t *testing.T, fixture repositoryFixture) {
+				tree := strings.TrimSpace(gitTest(t, fixture.path, "write-tree"))
+				revision := strings.TrimSpace(gitTest(t, fixture.path, "commit-tree", tree, "-m", "unrelated source"))
+				gitTest(t, fixture.path, "update-ref", "refs/heads/main", revision)
+				writeFile(t, filepath.Join(fixture.path, "tracked.txt"), "rewritten snapshot\n")
+			},
+			snapshot: true,
+			wantErr:  "does not descend from recorded source head revision",
 		},
 	}
 	for name, test := range tests {
@@ -103,6 +339,7 @@ func TestPrepareUpdateSourceRequiresCleanMatchingAdvancedBranch(t *testing.T) {
 			artifact, err := fixture.service.PrepareUpdateSource(context.Background(), UpdateSourceRequest{
 				Repository: fixture.repository(), Workspace: "alpha", TempRoot: t.TempDir(),
 				SourceBranch: source.SourceBranch, SourceRevision: source.SourceRevision,
+				SourceHeadRevision: source.SourceHeadRevision, SourceTree: source.SourceTree, Snapshot: test.snapshot,
 			})
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
@@ -114,8 +351,11 @@ func TestPrepareUpdateSourceRequiresCleanMatchingAdvancedBranch(t *testing.T) {
 				t.Fatalf("PrepareUpdateSource() error = %v", err)
 			}
 			t.Cleanup(func() { _ = fixture.service.RemoveArtifact(artifact.BundlePath) })
-			if artifact.SourceBranch != "main" || artifact.SourceRevision == source.SourceRevision {
+			if artifact.SourceBranch != "main" || artifact.SourceRevision == source.SourceRevision || artifact.SourceSnapshot != test.wantSnapshot {
 				t.Fatalf("updated artifact = %#v", artifact)
+			}
+			if artifact.SourceHeadRevision == "" || artifact.SourceTree == "" {
+				t.Fatalf("updated artifact lacks provenance = %#v", artifact)
 			}
 			if info, statErr := os.Lstat(artifact.BundlePath); statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != SourceBundleMode {
 				t.Fatalf("updated bundle metadata = %v, error = %v", info, statErr)
@@ -231,11 +471,11 @@ func TestResultFetchDiffAndSuccessfulSquashApplySmoke(t *testing.T) {
 	if len(capped.Patch) != 32 || !capped.Truncated {
 		t.Fatalf("capped diff length=%d truncated=%v", len(capped.Patch), capped.Truncated)
 	}
-	status, err := fixture.host.service.Status(context.Background(), StatusRequest{Repository: fixture.host.repository(), Workspace: "alpha", SourceBranch: fixture.source.SourceBranch, SourceRevision: fixture.source.SourceRevision, WorkspaceBranch: "dsx/alpha", ResultCommit: fixture.resultCommit, TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedCommit: fixture.resultCommit})
+	status, err := fixture.host.service.Status(context.Background(), StatusRequest{Repository: fixture.host.repository(), Workspace: "alpha", SourceBranch: fixture.source.SourceBranch, SourceRevision: fixture.source.SourceRevision, SourceSnapshot: true, WorkspaceBranch: "dsx/alpha", ResultCommit: fixture.resultCommit, TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedCommit: fixture.resultCommit})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.HostTrackedClean || status.SourceBranch != fixture.source.SourceBranch || status.WorkspaceBranch != "dsx/alpha" || status.HostCommit != fixture.source.SourceRevision || !status.Fetched || status.FetchedCommit != fixture.resultCommit {
+	if !status.SourceSnapshot || !status.HostTrackedClean || status.SourceBranch != fixture.source.SourceBranch || status.WorkspaceBranch != "dsx/alpha" || status.HostCommit != fixture.source.SourceRevision || !status.Fetched || status.FetchedCommit != fixture.resultCommit {
 		t.Fatalf("status = %#v", status)
 	}
 	transaction, err := fixture.host.service.PrepareApply(context.Background(), ApplyRequest{Repository: fixture.host.repository(), SourceRevision: fixture.source.SourceRevision, TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedRef: fixture.fetch.HostRef, ExpectedCommit: fixture.resultCommit})
@@ -258,6 +498,111 @@ func TestResultFetchDiffAndSuccessfulSquashApplySmoke(t *testing.T) {
 	}
 	if !bytes.Equal(mustRead(t, filepath.Join(fixture.host.path, "binary.dat")), []byte{0, 1, 2, 0xff, 0, 4}) {
 		t.Fatal("binary result was not applied exactly")
+	}
+}
+
+func TestSnapshotResultFetchDiffAndSuccessfulSquashApplySmoke(t *testing.T) {
+	host := newRepository(t)
+	writeFile(t, filepath.Join(host.path, "deleted.txt"), "delete me\n")
+	writeFile(t, filepath.Join(host.path, "old.txt"), "rename me\n")
+	writeFile(t, filepath.Join(host.path, "binary.dat"), []byte{0, 1, 0, 2})
+	writeFile(t, filepath.Join(host.path, "tracked.txt"), "base\n")
+	gitTest(t, host.path, "add", "-A")
+	gitTest(t, host.path, "commit", "-m", "real source head")
+	realSourceHead := strings.TrimSpace(gitTest(t, host.path, "rev-parse", "HEAD"))
+
+	writeFile(t, filepath.Join(host.path, "tracked.txt"), "captured baseline\n")
+	writeFile(t, filepath.Join(host.path, "baseline.txt"), "captured untracked baseline\n")
+	sourceTempRoot := t.TempDir()
+	source, err := host.service.PrepareSource(context.Background(), SourceRequest{
+		Repository: host.repository(), ApprovedRoot: host.path,
+		Workspace: "alpha", TempRoot: sourceTempRoot, Snapshot: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = host.service.RemoveArtifact(source.BundlePath) })
+	host.identity = source.Repository.Identity
+	if source.SourceHeadRevision != realSourceHead || !source.SourceSnapshot {
+		t.Fatalf("snapshot source = %#v", source)
+	}
+
+	guest := filepath.Join(t.TempDir(), "guest")
+	gitTest(t, "", "init", "--quiet", guest)
+	gitTest(t, guest, "fetch", "--no-tags", "--no-write-fetch-head", "--", source.BundlePath, source.BundleRef)
+	gitTest(t, guest, "config", "user.name", "DSX Result")
+	gitTest(t, guest, "config", "user.email", "dsx@example.invalid")
+	gitTest(t, guest, "checkout", "--quiet", "-b", "dsx/alpha", source.SourceRevision)
+	if err := os.Remove(filepath.Join(guest, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(guest, "old.txt"), filepath.Join(guest, "renamed.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(guest, "new.txt"), "new file\n")
+	writeFile(t, filepath.Join(guest, "binary.dat"), []byte{0, 1, 2, 0xff, 0, 4})
+	gitTest(t, guest, "add", "-A")
+	gitTest(t, guest, "commit", "-m", "snapshot agent result")
+	resultCommit := strings.TrimSpace(gitTest(t, guest, "rev-parse", "HEAD"))
+	resultBundle := filepath.Join(t.TempDir(), "result.bundle")
+	gitTest(t, guest, "bundle", "create", resultBundle, "refs/heads/dsx/alpha")
+	if err := os.Chmod(resultBundle, ResultBundleMode); err != nil {
+		t.Fatal(err)
+	}
+	resultDigest, err := bundleSHA256(resultBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitTest(t, host.path, "add", "-A")
+	gitTest(t, host.path, "commit", "-m", "commit exact captured baseline")
+	equivalentHostHead := strings.TrimSpace(gitTest(t, host.path, "rev-parse", "HEAD"))
+	if equivalentHostHead == source.SourceHeadRevision {
+		t.Fatal("tree-equivalent host HEAD did not advance")
+	}
+	if tree := strings.TrimSpace(gitTest(t, host.path, "rev-parse", "HEAD^{tree}")); tree != source.SourceTree {
+		t.Fatalf("tree-equivalent host tree = %s, want %s", tree, source.SourceTree)
+	}
+	fetched, err := host.service.FetchResult(context.Background(), FetchRequest{
+		Repository: host.repository(), Workspace: "alpha", BundlePath: resultBundle,
+		Digest: resultDigest, ExpectedCommit: resultCommit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyTempRoot := t.TempDir()
+	transaction, err := host.service.PrepareApply(context.Background(), ApplyRequest{
+		Repository: host.repository(), SourceRevision: source.SourceRevision, SourceSnapshot: true,
+		SourceHeadRevision: source.SourceHeadRevision, SourceTree: source.SourceTree,
+		TrackedFingerprint: source.TrackedFingerprint, FetchedRef: fetched.HostRef,
+		ExpectedCommit: resultCommit, TempRoot: applyTempRoot,
+	})
+	if err != nil {
+		t.Fatalf("PrepareApply(snapshot) error = %v", err)
+	}
+	applied, err := transaction.Commit(context.Background())
+	if err != nil {
+		t.Fatalf("Commit(snapshot) error = %v", err)
+	}
+	wantPaths := []string{"binary.dat", "deleted.txt", "new.txt", "old.txt", "renamed.txt"}
+	if applied.AppliedCommit != resultCommit || !reflect.DeepEqual(applied.Paths, wantPaths) {
+		t.Fatalf("snapshot apply = %#v, want paths %#v", applied, wantPaths)
+	}
+	if head := strings.TrimSpace(gitTest(t, host.path, "rev-parse", "HEAD")); head != equivalentHostHead {
+		t.Fatalf("snapshot apply changed host HEAD to %s, want %s", head, equivalentHostHead)
+	}
+	wantStaged := []string{"binary.dat", "deleted.txt", "new.txt", "renamed.txt"}
+	if staged := strings.Fields(gitTest(t, host.path, "diff", "--cached", "--name-only")); !reflect.DeepEqual(staged, wantStaged) {
+		t.Fatalf("snapshot apply staged paths = %#v, want %#v", staged, wantStaged)
+	}
+	if message := string(mustRead(t, filepath.Join(host.path, ".git", "SQUASH_MSG"))); message != "Apply DSX workspace result\n" {
+		t.Fatalf("snapshot squash message = %q", message)
+	}
+	if got := string(mustRead(t, filepath.Join(host.path, "baseline.txt"))); got != "captured untracked baseline\n" {
+		t.Fatalf("captured baseline changed = %q", got)
+	}
+	if entries, err := os.ReadDir(applyTempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("snapshot apply quarantine leaked: %#v, %v", entries, err)
 	}
 }
 
@@ -1195,6 +1540,65 @@ func TestApplyPreconditionsLeaveHostByteIdentical(t *testing.T) {
 		}
 		assertHostByteSnapshot(t, fixture.host.path, before)
 	})
+	t.Run("snapshot tree mismatch", func(t *testing.T) {
+		fixture := newSnapshotApplyFixture(t)
+		writeFile(t, filepath.Join(fixture.host.path, "mismatch.txt"), "one byte mismatch\n")
+		gitTest(t, fixture.host.path, "add", "mismatch.txt")
+		gitTest(t, fixture.host.path, "commit", "-m", "mismatched tree")
+		before := hostByteSnapshot(t, fixture.host.path)
+		_, err := fixture.host.service.PrepareApply(context.Background(), fixture.applyRequest())
+		if err == nil || !strings.Contains(err.Error(), "host HEAD tree does not match snapshot source tree") {
+			t.Fatalf("snapshot tree mismatch error = %v", err)
+		}
+		assertHostByteSnapshot(t, fixture.host.path, before)
+	})
+	t.Run("snapshot dirty host", func(t *testing.T) {
+		fixture := newSnapshotApplyFixture(t)
+		writeFile(t, filepath.Join(fixture.host.path, "tracked.txt"), "dirty after baseline commit\n")
+		before := hostByteSnapshot(t, fixture.host.path)
+		_, err := fixture.host.service.PrepareApply(context.Background(), fixture.applyRequest())
+		if err == nil || !strings.Contains(err.Error(), "host index or tracked work tree is not clean") {
+			t.Fatalf("snapshot dirty host error = %v", err)
+		}
+		assertHostByteSnapshot(t, fixture.host.path, before)
+	})
+	t.Run("snapshot unmerged host", func(t *testing.T) {
+		fixture := newSnapshotApplyFixture(t)
+		gitTest(t, fixture.host.path, "checkout", "-b", "conflict-side")
+		writeFile(t, filepath.Join(fixture.host.path, "tracked.txt"), "conflict side\n")
+		gitTest(t, fixture.host.path, "commit", "-am", "conflict side")
+		gitTest(t, fixture.host.path, "checkout", "main")
+		writeFile(t, filepath.Join(fixture.host.path, "tracked.txt"), "conflict main\n")
+		gitTest(t, fixture.host.path, "commit", "-am", "conflict main")
+		command := exec.Command("git", "merge", "conflict-side")
+		command.Dir = fixture.host.path
+		command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+		if output, err := command.CombinedOutput(); err == nil {
+			t.Fatalf("conflicting merge unexpectedly succeeded: %s", output)
+		}
+		before := hostByteSnapshot(t, fixture.host.path)
+		_, err := fixture.host.service.PrepareApply(context.Background(), fixture.applyRequest())
+		if err == nil || !strings.Contains(err.Error(), "host repository has unmerged paths") {
+			t.Fatalf("snapshot unmerged host error = %v", err)
+		}
+		assertHostByteSnapshot(t, fixture.host.path, before)
+	})
+	t.Run("snapshot fetched ref moved at boundary", func(t *testing.T) {
+		fixture := newSnapshotApplyFixture(t)
+		transaction, err := fixture.host.service.PrepareApply(context.Background(), fixture.applyRequest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, fixture.host.path, "update-ref", fixture.fetch.HostRef, fixture.source.SourceRevision)
+		before := hostByteSnapshot(t, fixture.host.path)
+		if _, err := transaction.Commit(context.Background()); err == nil || !strings.Contains(err.Error(), "want recorded result") {
+			t.Fatalf("snapshot moved-ref boundary error = %v", err)
+		}
+		assertHostByteSnapshot(t, fixture.host.path, before)
+		if entries, err := os.ReadDir(fixture.tempRoot); err != nil || len(entries) != 0 {
+			t.Fatalf("snapshot moved-ref quarantine artifacts = %#v, %v", entries, err)
+		}
+	})
 	if service, err := NewService(OSRunner{}, testGitExecutable(t)); err != nil {
 		t.Fatal(err)
 	} else if _, err := service.PrepareApply(context.Background(), ApplyRequest{Repository: Repository{Name: "workspace", HostPath: t.TempDir(), GuestPath: "/workspace"}, SourceRevision: strings.Repeat("0", 40), TrackedFingerprint: strings.Repeat("0", 64), FetchedRef: "refs/remotes/dsx/alpha/evil", ExpectedCommit: strings.Repeat("1", 40)}); err == nil {
@@ -1225,6 +1629,29 @@ func TestApplyGitFailureRollsBackIndexAndWorktree(t *testing.T) {
 	assertHostByteSnapshot(t, fixture.host.path, before)
 	if got := gitTest(t, fixture.host.path, "status", "--porcelain"); got != "" {
 		t.Fatalf("repository dirty after rollback: %q", got)
+	}
+}
+
+func TestSnapshotApplyGitFailureRollsBackAndCleansQuarantine(t *testing.T) {
+	fixture := newSnapshotApplyFixture(t)
+	failing, err := NewService(postMutationFailureRunner{delegate: OSRunner{}}, testGitExecutable(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := hostByteSnapshot(t, fixture.host.path)
+	transaction, err := failing.PrepareApply(context.Background(), fixture.applyRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transaction.Commit(context.Background()); err == nil {
+		t.Fatal("snapshot Commit unexpectedly succeeded")
+	}
+	if rollbackErr := transaction.Rollback(context.Background()); rollbackErr != nil {
+		t.Fatalf("snapshot Rollback() error = %v", rollbackErr)
+	}
+	assertHostByteSnapshot(t, fixture.host.path, before)
+	if entries, err := os.ReadDir(fixture.tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("snapshot apply quarantine leaked after rollback: %#v, %v", entries, err)
 	}
 }
 
@@ -1551,6 +1978,69 @@ func (fixture transferFixture) applyRequest() ApplyRequest {
 	return ApplyRequest{Repository: fixture.host.repository(), SourceRevision: fixture.source.SourceRevision, TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedRef: fixture.fetch.HostRef, ExpectedCommit: fixture.resultCommit}
 }
 
+type snapshotApplyFixture struct {
+	host         repositoryFixture
+	source       SourceArtifact
+	fetch        FetchResult
+	resultCommit string
+	tempRoot     string
+}
+
+func newSnapshotApplyFixture(t *testing.T) snapshotApplyFixture {
+	t.Helper()
+	host := newRepositoryWithCommit(t)
+	writeFile(t, filepath.Join(host.path, "tracked.txt"), "captured baseline\n")
+	source, err := host.service.PrepareSource(context.Background(), SourceRequest{
+		Repository: host.repository(), ApprovedRoot: host.path,
+		Workspace: "alpha", TempRoot: t.TempDir(), Snapshot: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.identity = source.Repository.Identity
+	t.Cleanup(func() { _ = host.service.RemoveArtifact(source.BundlePath) })
+
+	guest := filepath.Join(t.TempDir(), "guest")
+	gitTest(t, "", "init", "--quiet", guest)
+	gitTest(t, guest, "fetch", "--no-tags", "--no-write-fetch-head", "--", source.BundlePath, source.BundleRef)
+	gitTest(t, guest, "config", "user.name", "DSX Result")
+	gitTest(t, guest, "config", "user.email", "dsx@example.invalid")
+	gitTest(t, guest, "checkout", "--quiet", "-b", "dsx/alpha", source.SourceRevision)
+	writeFile(t, filepath.Join(guest, "agent.txt"), "agent result\n")
+	gitTest(t, guest, "add", "agent.txt")
+	gitTest(t, guest, "commit", "-m", "agent result")
+	resultCommit := strings.TrimSpace(gitTest(t, guest, "rev-parse", "HEAD"))
+	bundle := filepath.Join(t.TempDir(), "result.bundle")
+	gitTest(t, guest, "bundle", "create", bundle, "refs/heads/dsx/alpha")
+	if err := os.Chmod(bundle, ResultBundleMode); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := bundleSHA256(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitTest(t, host.path, "add", "-A")
+	gitTest(t, host.path, "commit", "-m", "commit captured baseline")
+	fetch, err := host.service.FetchResult(context.Background(), FetchRequest{
+		Repository: host.repository(), Workspace: "alpha", BundlePath: bundle,
+		Digest: digest, ExpectedCommit: resultCommit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshotApplyFixture{host: host, source: source, fetch: fetch, resultCommit: resultCommit, tempRoot: t.TempDir()}
+}
+
+func (fixture snapshotApplyFixture) applyRequest() ApplyRequest {
+	return ApplyRequest{
+		Repository: fixture.host.repository(), SourceRevision: fixture.source.SourceRevision, SourceSnapshot: true,
+		SourceHeadRevision: fixture.source.SourceHeadRevision, SourceTree: fixture.source.SourceTree,
+		TrackedFingerprint: fixture.source.TrackedFingerprint, FetchedRef: fixture.fetch.HostRef,
+		ExpectedCommit: fixture.resultCommit, TempRoot: fixture.tempRoot,
+	}
+}
+
 type diffRepositoryRunner struct {
 	delegate Runner
 	roots    []string
@@ -1795,14 +2285,19 @@ func assertHostByteSnapshot(t *testing.T, root string, before map[string]string)
 	after := hostByteSnapshot(t, root)
 	if !reflect.DeepEqual(after, before) {
 		beforeKeys, afterKeys := make([]string, 0, len(before)), make([]string, 0, len(after))
-		for key := range before {
+		changed := make([]string, 0)
+		for key, beforeHash := range before {
 			beforeKeys = append(beforeKeys, key)
+			if afterHash, found := after[key]; found && afterHash != beforeHash {
+				changed = append(changed, key)
+			}
 		}
 		for key := range after {
 			afterKeys = append(afterKeys, key)
 		}
 		sort.Strings(beforeKeys)
 		sort.Strings(afterKeys)
-		t.Fatalf("host bytes changed\nbefore keys=%v\nafter keys=%v", beforeKeys, afterKeys)
+		sort.Strings(changed)
+		t.Fatalf("host bytes changed\nchanged=%v\nbefore keys=%v\nafter keys=%v", changed, beforeKeys, afterKeys)
 	}
 }

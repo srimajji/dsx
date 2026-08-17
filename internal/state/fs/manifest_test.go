@@ -38,6 +38,40 @@ func TestManifestRepositoryPersistsThreeWorkspacePeersDeterministically(t *testi
 	}
 }
 
+func TestManifestRepositoryPersistsSnapshotAndConflictProvenance(t *testing.T) {
+	root := t.TempDir()
+	repository, err := NewManifestRepository(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := fsManifestFixture(t, root, "snapshot", "01890f5c-7b00-7000-8000-000000000006")
+	manifest.Git[0].SourceRevision = strings.Repeat("4", 40)
+	manifest.Git[0].SourceSnapshot = true
+	manifest.Git[0].SourceHeadRevision = strings.Repeat("1", 40)
+	manifest.Git[0].SourceTree = strings.Repeat("5", 40)
+	manifest.Git[0].Conflict = true
+	manifest.Git[0].ConflictSourceRevision = strings.Repeat("6", 40)
+	manifest.Git[0].ConflictSourceSnapshot = true
+	manifest.Git[0].ConflictBundleDigest = strings.Repeat("7", 64)
+	if err := repository.CreateIntent(context.Background(), manifest); err != nil {
+		t.Fatal(err)
+	}
+	persisted, found, err := repository.LoadManifest(context.Background(), manifest.ProjectID, manifest.Workspace, manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("snapshot manifest was not persisted")
+	}
+	record := persisted.Git[0]
+	if !record.SourceSnapshot || !record.ConflictSourceSnapshot ||
+		record.SourceHeadRevision != manifest.Git[0].SourceHeadRevision ||
+		record.SourceTree != manifest.Git[0].SourceTree ||
+		record.ConflictSourceRevision != manifest.Git[0].ConflictSourceRevision {
+		t.Fatalf("persisted provenance = %#v", record)
+	}
+}
+
 func TestManifestRepositoryPersistsAWSGrantAndRejectsStaleCAS(t *testing.T) {
 	root := t.TempDir()
 	repository, err := NewManifestRepository(filepath.Join(t.TempDir(), "state"))

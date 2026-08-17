@@ -45,6 +45,8 @@ func TestManualsDescribeOnlyNamedWorkspaceWorkflows(t *testing.T) {
 		"dsx workspace stop feature-a",
 		"dsx workspace restart feature-a",
 		"dsx workspace update feature-a",
+		"dsx workspace create dirty-work --snapshot",
+		"dsx workspace update feature-a --snapshot",
 		"dsx workspace remove feature-a",
 		"dsx agent feature-a",
 		"dsx auth import --agent omp",
@@ -84,6 +86,11 @@ func TestManualsDescribeOnlyNamedWorkspaceWorkflows(t *testing.T) {
 		"at most 62 bytes",
 		"no host source or host-home mount",
 		"browser is deleted on success, error, cancellation, or terminal closure",
+		"final working-tree version of every tracked",
+		"Ignored untracked files stay on the host.",
+		"Unmerged paths and Git submodules are rejected.",
+		"`HEAD` tree exactly equals the recorded snapshot tree",
+		"apply stages only workspace-result changes",
 	} {
 		if !strings.Contains(combined, required) {
 			t.Errorf("manuals do not document required workspace contract %q", required)
@@ -110,6 +117,8 @@ func TestMaintainerGuideUsesNamedWorkspaceArchitecture(t *testing.T) {
 		"Every workspace is a named peer backed by a guest-owned private Git clone.",
 		"The local checkout is the source and integration point, not a DSX workspace.",
 		"without shared Git objects or host source/home mounts",
+		"Clean committed ingress is the default",
+		"explicit reviewed final-working-tree snapshot ingress is the alternative",
 		"Every lifecycle and Git operation names its workspace",
 		"workspace, agent, authentication, and browser-session lifecycles remain separate",
 		"`internal/app/workspace.go`",

@@ -186,51 +186,53 @@ With a terminal, bare `dsx` opens setup for an unconfigured project or the dashb
 
 Setup is a three-step flow:
 
-1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default agent, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI. Setup also asks whether the project may allow selected workspaces to follow the host AWS `default`; this authorizes only the capability, never a workspace grant.
-2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. For `host-default`, it also shows the approved canonical source and identity, reserved read-only guest destination, eligible profile `default`, new-workspace default **Disabled**, and dynamic identity warning. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews scroll without truncation and cannot be approved before the complete content has been viewed.
+1. Choose **Ubuntu — Default settings** or **Ubuntu — Custom**. Default uses Codex, 6 CPUs, 6 GiB, internet access, no published ports, and no browser. Custom exposes the default coding assistant, internet policy, guest ports, CPU, and memory. Alternate images remain configurable outside this TUI. Setup also asks whether the project may allow selected workspaces to follow the host AWS `default`; this authorizes only the capability, never a workspace grant. The environment step shows one bounded question group at a time.
+2. Review one concise approval screen. It shows the effective environment, resources, network policy, browser state, agent, ports, executable hash, and every non-default setup command, process, mount, credential import, host grant, or volume. For `host-default`, it also shows the approved canonical source and identity, reserved read-only guest destination, eligible profile `default`, new-workspace default **Disabled**, and dynamic identity warning. Routine internal digests, discovery lists, and provenance priorities are omitted. Long exceptional reviews use complete bounded pages and cannot be approved before the final page has been viewed.
 3. Verify Apple Container, persist configuration and approval, prepare DSX Standard when required, and open the dashboard.
 
 Authentication import remains a separate explicit approval. Setup does not silently import credentials. No configuration, approval, credential, or runtime resource is persisted before final confirmation. A post-confirmation Apple runtime preflight must succeed before project mutation.
 
-Use `DSX_ACCESSIBLE=1` for accessible form mode. `NO_COLOR` is respected. Narrow terminals, resize, masked secret input, and terminal-safe rendering are part of the interface contract.
+Use `DSX_ACCESSIBLE=1` for accessible form mode. `NO_COLOR` is respected. Every resize recalculates terminal-cell wrapping and available height. Narrow or short terminals use focused-field forms rather than clipping later questions or controls.
 
 ### 3.2 Dashboard
 
-The dashboard shows:
+The dashboard uses a responsive master-detail layout:
 
-- canonical local checkout branch, commit, and cleanliness;
-- workspaces in deterministic order;
-- lifecycle state and active mutation;
-- source branch and revision;
-- workspace default and project-allowed agents;
-- final URLs and published ports;
-- unfetched or unresolved-work warnings;
-- AWS grant and non-secret availability state; and
-- `Legacy — cleanup only` resources.
+- on wide terminals, the deterministic workspace list sits beside the selected workspace’s status, coding assistant, AWS state, warnings, and actions;
+- on narrow or short terminals, the selected workspace and its currently available actions take priority;
+- all layouts show canonical local-checkout branch, commit, and cleanliness;
+- actions remain state-aware and unavailable actions are not presented as executable;
+- long text wraps to terminal cells instead of relying on terminal soft wrapping; and
+- legacy cleanup-only resources, unfetched or unresolved-work warnings, final URLs, and published ports appear when applicable.
 
 Actions for the selected workspace are state-aware:
 
 | Key | Action |
 |---|---|
-| **c** | Create a workspace. |
-| **Enter** | Open the selected workspace. |
-| **a** | Open the agent form. |
-| **u** | Update from the local checkout. |
+| **↑/↓** | Select a workspace. |
+| **c** | Create a new workspace. |
+| **Enter** | Open the selected workspace’s shell. |
+| **v** | Open the supported VS Code attachment guidance for a running workspace. |
+| **a** | Open the coding-assistant form. |
+| **u** | Update from this Mac’s local checkout. |
 | **s** | Start or stop. |
 | **r** | Restart. |
-| **g** | Review Git status or diff. |
-| **d** | Remove. |
+| **g** | Review Git status, diff, fetch, or apply. |
+| **w** | Enable or disable AWS when the project capability is approved. |
+| **d** | Remove safely. |
 | **q** | Quit. |
 
 The dashboard also exposes **Enable AWS** or **Disable AWS** for the selected workspace. These TUI actions record intent and use the same workspace lifecycle path as the CLI.
 
 Update and restart are disabled while another lifecycle mutation is active. A workspace needing conflict resolution remains openable.
 
-The create form contains only the validated name, recorded source branch/revision, and optional default agent selected from `agents.allowed`. It offers create-and-open or background creation. It never asks for credentials, a task prompt, browser selection, or a workspace mode.
+The create form contains the validated workspace name, source branch and real parent revision, optional coding assistant selected from `agents.allowed`, and **Include local changes**, which is off by default. Ordinary creation still requires a clean checkout. A dirty checkout may enter the form, but submission remains in-form until local changes are explicitly enabled.
 
-After either create action, the TUI remains on a bounded milestone screen while DSX validates the approved plan and creates, starts, and bootstraps the workspace. **Create and open** hands directly from completed progress to the workspace shell without exposing an idle host prompt. **Create in background** completes after the same progress without attaching a shell.
+Enabling **Include local changes** opens a separate snapshot review of the workspace, real parent, included final tracked and nonignored untracked content, ignored-file behavior, rejection rules, and host non-mutation guarantee. Back navigation preserves the populated form. Confirmation alone emits the create intent. The form never asks for credentials, a task prompt, browser selection, or a workspace mode.
 
-The agent form contains only an agent selection and an **Enable isolated browser** checkbox. Browser selection is per session and is not stored as a workspace-creation default.
+After either create action, the TUI remains on a bounded milestone screen while DSX validates the approved plan and creates, starts, and bootstraps the workspace. **Create and open a shell** hands directly from completed progress to the workspace shell without exposing an idle host prompt. **Create in background** completes after the same progress without attaching a shell. Dashboard update remains clean-only; a dirty checkout points to `dsx workspace update NAME --snapshot`.
+
+The coding-assistant form contains only an assistant selection and an **Isolated browser** choice. Browser selection is per session and is not stored as a workspace-creation default.
 
 Before handing the terminal to an interactive workspace shell or agent, the TUI exits its alternate screen and restores normal terminal state. It may restore the dashboard after the child exits. Confirmed work shows bounded milestones rather than unbounded raw runtime logs.
 
@@ -243,12 +245,14 @@ Before handing the terminal to an interactive workspace shell or agent, the TUI 
 | `dsx init` | Open the setup flow. |
 | `dsx workspace create NAME` | Create a private-clone workspace from the committed local revision. |
 | `dsx workspace create NAME --default-agent AGENT` | Set an approved workspace-specific default. |
+| `dsx workspace create NAME --snapshot` | Create from explicitly reviewed final tracked content plus nonignored untracked files. |
 | `dsx workspace list` | List current workspaces and legacy cleanup-only resources. |
 | `dsx workspace open NAME` | Start if needed, wait for readiness, and open the shell. |
 | `dsx workspace start NAME` | Start the workspace and only `dsx-guest`, without attaching. |
 | `dsx workspace stop NAME` | Stop while preserving private state. |
 | `dsx workspace restart NAME` | Stop and start without restoring agent or project processes. |
 | `dsx workspace update NAME` | Rebase the workspace branch onto the latest committed local revision. |
+| `dsx workspace update NAME --snapshot` | Rebase workspace-only commits onto a new reviewed synthetic source. |
 | `dsx workspace remove NAME` | Remove one proven workspace subject to result protection. |
 | `dsx workspace remove --all` | Remove removable current-project workspaces. |
 | `dsx workspace remove --legacy-resources` | Remove proven current-project legacy resources. |
@@ -294,13 +298,14 @@ Mutations use per-workspace and project locks with a fixed ordering. Manifests a
 
 ```console
 $ dsx workspace create feature-a
+$ dsx workspace create dirty-work --snapshot
 ```
 
-Creation:
+Ordinary creation:
 
 1. verifies a clean tracked local checkout;
 2. records its checked-out branch and commit;
-3. warns that ignored and untracked files are excluded;
+3. excludes all untracked files, ignored or not;
 4. creates a restrictive source bundle in a private temporary location;
 5. verifies the bundle and repository identities;
 6. writes lifecycle intent before runtime changes;
@@ -308,6 +313,10 @@ Creation:
 8. clones without object hardlinks or shared Git metadata;
 9. checks out `dsx/feature-a`; and
 10. starts only `dsx-guest`.
+
+`--snapshot` replaces only steps 1–3. In an isolated temporary object database and index, DSX builds a deterministic synthetic commit with the captured real host `HEAD` as its single parent. Its tree contains the final working-tree version of every tracked path, including tracked paths matching ignore rules, plus nonignored untracked files. Ignored untracked files stay on the host. If a path has staged content and later unstaged edits, only the final working-tree bytes enter the snapshot.
+
+Snapshot capture refuses unmerged paths, submodules and other gitlinks, unsafe paths, unsupported file kinds, oversized inputs, incompatible Git object formats, and any identity or race mismatch. It does not change the host branch, `HEAD`, index, worktree, durable refs, object database, configuration, or hooks. Temporary refs, indexes, object directories, and bundles are cleaned on every exit. The synthetic source commit and its real parent/tree provenance are persisted before runtime mutation.
 
 Finite approved setup commands may execute during creation, but no agent, browser, application, watcher, process manager, manually started database, or other persistent project process starts implicitly.
 
@@ -343,18 +352,23 @@ Restart terminates and never restores agent sessions, browsers, development serv
 
 ```console
 $ dsx workspace update feature-a
+$ dsx workspace update feature-a --snapshot
 ```
 
-Update means **Update from local checkout**. It requires:
+Ordinary update means **Update from local checkout**. It requires:
 
 - a clean, committed local checkout;
 - the same checked-out source branch recorded for the workspace;
 - a verifiable restrictive source bundle; and
 - a workspace branch that can be safely rebased.
 
-DSX transfers the latest source revision, verifies it, records a backup ref, and rebases `dsx/feature-a`. It does not stash uncommitted files, synthesize commits, merge unrelated branches, or attempt semantic resolution.
+DSX transfers the latest committed source, verifies it, records a backup ref, and rebases `dsx/feature-a`. It does not stash uncommitted files, synthesize an ordinary source commit, merge unrelated branches, or attempt semantic resolution.
 
-On conflict the manifest durably records the conflict, the state becomes `needs_resolution`, and the valid Git rebase state is preserved:
+Snapshot update is an explicit CLI operation. It uses the same final-worktree inclusion, ignored-file exclusion, synthetic-parent, bounded-input, race-revalidation, cleanup, and host non-mutation contracts as snapshot creation. DSX persists the new synthetic source plus its real host `HEAD` and tree, then rebases only workspace-result commits from the previous recorded source onto the new snapshot. The TUI intentionally keeps update clean-only and points dirty users to this command.
+
+A workspace whose current source is a snapshot must continue using `--snapshot` for updates. An ordinary update is rejected with guidance rather than silently replacing the captured baseline with committed-only content. To return to ordinary committed ingress, first preserve the workspace result, remove the workspace, and recreate it from a clean committed checkout.
+
+On conflict the manifest durably records the requested source kind and revision, the state becomes `needs_resolution`, and the valid Git rebase state is preserved:
 
 ```console
 $ dsx workspace open feature-a
@@ -373,7 +387,7 @@ $ dsx workspace list
 $ dsx workspace remove feature-a
 ```
 
-List output includes source revision, lifecycle state, default and allowed agents, URLs, mutation state, warnings, result/fetch state, and legacy cleanup-only records. Ordering is deterministic and rendered text is terminal-sanitized.
+List output includes source kind, source revision, lifecycle state, default and allowed agents, URLs, mutation state, warnings, result/fetch state, and legacy cleanup-only records. Ordering is deterministic and rendered text is terminal-sanitized.
 
 Removal inventories the exact manifest and inspected runtime resources, verifies ownership labels, respects reverse dependencies, and deletes only proven resources. It is idempotent after interruption or partial startup.
 
@@ -474,9 +488,9 @@ $ dsx git fetch feature-a
 $ dsx git apply feature-a
 ```
 
-`status` reports recorded source branch/revision, `dsx/feature-a`, dirty state, rebase/conflict state, host fingerprint, last fetched revision, and unexported work.
+`status` reports recorded source branch/revision and whether it is a snapshot, `dsx/feature-a`, dirty state, rebase/conflict state, host fingerprint, last fetched revision, and unexported work.
 
-`diff` safely renders committed and uncommitted changes, omits unsafe terminal control sequences, describes binary changes without dumping their content, and bounds output.
+`diff` safely renders committed and uncommitted changes, omits unsafe terminal control sequences, describes binary changes without dumping their content, and bounds output. Snapshot sources do not change diff semantics.
 
 `fetch` creates and verifies a restrictive result bundle and imports committed history to:
 
@@ -484,7 +498,9 @@ $ dsx git apply feature-a
 refs/remotes/dsx/feature-a
 ```
 
-It does not merge. The user may merge the remote-tracking ref normally. `apply` is a convenience that checks the recorded host fingerprint and ref state before applying a squashed working-tree result. It refuses without partial host mutation on mismatch. New, deleted, renamed, and binary files are preserved.
+It does not merge. The user may merge the remote-tracking ref normally.
+
+For an ordinary committed source, `apply` checks the recorded host fingerprint and ref state before applying a squashed working-tree result. For a snapshot source, the clean host `HEAD` tree must exactly equal the recorded snapshot tree; commit identity may differ because the host baseline is a real commit while the source was synthetic. Run `git add -A` and commit the exact captured baseline before apply, or update/re-snapshot if that baseline is no longer desired. Apply then stages only workspace-result changes relative to the captured snapshot. Every mismatch refuses without partial host mutation. New, deleted, renamed, and binary result files are preserved.
 
 Composite projects accept `--repo MEMBER`. Cross-repository atomicity is not claimed. DSX never semantically merges parallel results.
 
@@ -624,6 +640,6 @@ An agent can read and change anything deliberately placed in its private workspa
 
 Destructive Apple acceptance runs belong only on dedicated physical Apple-silicon runners. A run must attest the host/runtime, acquire the host-local lock, write a unique ledger before mutation, inventory unrelated sentinels and builder identity, clean only exact proven IDs, and emit evidence.
 
-Any uncertain ledger, ownership tuple, runtime state, sentinel, builder identity, or upstream run status quarantines the host. Only a human operator and independent reviewer may clear the exact stale marker or lock after reviewing evidence. Broad pruning, runtime shutdown, uninstall, default-network deletion, and builder deletion are never recovery actions. The [runner operations guide](../runner-operations.md) is authoritative.
+Any uncertain ledger, ownership tuple, runtime state, sentinel, builder identity, or upstream run status quarantines the host. Only a human operator and independent reviewer may clear the exact stale marker or lock after reviewing evidence. Broad pruning, runtime shutdown, uninstall, default-network deletion, and builder deletion are never recovery actions. The [runner operations guide](../operations/runner-operations.md) is authoritative.
 
 Implemented code and release support are distinct claims. Registry publication identity, digest-pinned production images, Apple signing and notarization identity, provisioned macOS 26/27 runners, real provider authentication, PTY behavior, browser isolation, network relay, Leapp rotation, fault cleanup, and end-to-end workflow evidence must all pass their applicable gates before release support is claimed. Hosted macOS CI may compile and run non-virtualized checks but is not evidence for nested Apple virtualization.

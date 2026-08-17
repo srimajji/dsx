@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,11 +45,13 @@ func TestDashboardRendersPeerWorkspaceStatesAndAgents(t *testing.T) {
 		{Name: "feature-b", State: "stopped", DefaultAgent: "codex"},
 		{Name: "feature-a", State: "running"},
 	}
-	view := ansi.Strip(NewDashboardModel(data).View().Content)
+	model := NewDashboardModel(data)
+	model.Update(tea.WindowSizeMsg{Width: 128, Height: 40})
+	view := ansi.Strip(model.View().Content)
 	for _, expected := range []string{
-		"Local checkout", "feat/branch-1 @ abc123", "Clean", "feature-a", "Running",
-		"feature-b", "Stopped", "tests", "Needs resolution", "Default: OMP (project default)",
-		"Default: Codex", "Approved: Codex · OMP",
+		"Local checkout", "feat/branch-1 @ abc123", "Ready", "feature-a", "Running",
+		"feature-b", "Stopped", "tests", "Needs resolution", "Opens with OMP",
+		"Opens with Codex", "Available: Codex · OMP",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("dashboard omitted %q:\n%s", expected, view)
@@ -65,13 +68,13 @@ func TestDashboardActionsAreStateAware(t *testing.T) {
 		present []string
 		absent  []string
 	}{
-		{state: "running", present: []string{"[Enter] Open", "[a] Open agent", "[u] Update", "[s] Stop", "[r] Restart", "[g] Review Git", "[d] Remove"}},
-		{state: "stopped", present: []string{"[Enter] Open", "[u] Update", "[s] Start", "[r] Restart", "[g] Review Git", "[d] Remove"}, absent: []string{"[a] Open agent"}},
-		{state: "needs_resolution", present: []string{"[Enter] Open", "[s] Stop", "[g] Review Git", "[d] Remove"}, absent: []string{"[a] Open agent", "[u] Update", "[r] Restart"}},
-		{state: "failed", present: []string{"[g] Review Git", "[d] Remove"}, absent: []string{"[Enter] Open", "[a] Open agent", "[u] Update", "[s] Start", "[r] Restart"}},
-		{state: "planned", present: []string{"Update unavailable", "Restart unavailable"}, absent: []string{"[Enter] Open", "[a] Open agent", "[s] Start", "[g] Review Git", "[d] Remove"}},
-		{state: "creating", present: []string{"Update unavailable", "Restart unavailable"}, absent: []string{"[Enter] Open", "[a] Open agent", "[s] Start", "[g] Review Git", "[d] Remove"}},
-		{state: "cleaning", present: []string{"Update unavailable", "Restart unavailable"}, absent: []string{"[Enter] Open", "[a] Open agent", "[s] Start", "[g] Review Git", "[d] Remove"}},
+		{state: "running", present: []string{"[Enter] Open shell", "[a] Open coding assistant", "[u] Update from this Mac", "[s] Stop", "[r] Restart", "[g] Review Git changes", "[d] Remove"}},
+		{state: "stopped", present: []string{"[Enter] Open shell", "[u] Update from this Mac", "[s] Start", "[r] Restart", "[g] Review Git changes", "[d] Remove"}, absent: []string{"[a] Open coding assistant"}},
+		{state: "needs_resolution", present: []string{"[Enter] Open shell", "[s] Stop", "[g] Review Git changes", "[d] Remove"}, absent: []string{"[a] Open coding assistant", "[u] Update from this Mac", "[r] Restart"}},
+		{state: "failed", present: []string{"[g] Review Git changes", "[d] Remove"}, absent: []string{"[Enter] Open shell", "[a] Open coding assistant", "[u] Update from this Mac", "[s] Start", "[r] Restart"}},
+		{state: "planned", present: []string{"A lifecycle change is running"}, absent: []string{"[Enter] Open shell", "[a] Open coding assistant", "[s] Start", "[g] Review Git changes", "[d] Remove"}},
+		{state: "creating", present: []string{"A lifecycle change is running"}, absent: []string{"[Enter] Open shell", "[a] Open coding assistant", "[s] Start", "[g] Review Git changes", "[d] Remove"}},
+		{state: "cleaning", present: []string{"A lifecycle change is running"}, absent: []string{"[Enter] Open shell", "[a] Open coding assistant", "[s] Start", "[g] Review Git changes", "[d] Remove"}},
 	}
 	for _, test := range tests {
 		t.Run(test.state, func(t *testing.T) {
@@ -107,10 +110,9 @@ func TestDashboardDisablesUpdateAndRestartDuringMutation(t *testing.T) {
 	data.Workspaces[0].MutationActive = true
 	model := NewDashboardModel(data)
 	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Update unavailable while lifecycle change runs", "Restart unavailable while lifecycle change runs"} {
-		if !strings.Contains(view, expected) {
-			t.Fatalf("mutating view omitted %q:\n%s", expected, view)
-		}
+	normalizedView := strings.Join(strings.Fields(view), " ")
+	if !strings.Contains(normalizedView, "A lifecycle change is running. Conflicting actions are temporarily unavailable.") {
+		t.Fatalf("mutating view omitted lifecycle guidance:\n%s", view)
 	}
 	for _, key := range []string{"u", "r"} {
 		updated, command := dashboardPress(t, NewDashboardModel(data), textKey(key))
@@ -123,27 +125,34 @@ func TestDashboardDisablesUpdateAndRestartDuringMutation(t *testing.T) {
 	}
 }
 
-func TestDashboardDisablesSourceTransferActionsForDirtyCheckout(t *testing.T) {
+func TestDashboardAllowsReviewedCreateButBlocksOrdinaryUpdateForDirtyCheckout(t *testing.T) {
 	data := dashboardFixture("running")
 	data.Clean = false
 	model := NewDashboardModel(data)
 	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Not clean", "Create unavailable — commit tracked changes first", "Update unavailable — commit tracked changes first"} {
-		if !strings.Contains(view, expected) {
-			t.Fatalf("dirty checkout view omitted %q:\n%s", expected, view)
+	normalizedView := strings.Join(strings.Fields(strings.ReplaceAll(view, "│", " ")), " ")
+	for _, expected := range []string{
+		"feat/branch-1 @ abc123 · Local files changed",
+		"[c] New workspace",
+		"Update needs a clean checkout. Commit local work, or use dsx workspace update feature-a --snapshot.",
+	} {
+		if !strings.Contains(normalizedView, expected) {
+			t.Fatalf("dirty checkout view omitted %q:\nnormalized=%q\n%s", expected, normalizedView, view)
 		}
 	}
-	for _, key := range []string{"c", "u"} {
-		updated, command := dashboardPress(t, NewDashboardModel(data), textKey(key))
-		if command != nil {
-			t.Fatalf("dirty checkout %q action exited", key)
-		}
-		if updated.screen != dashboardHome {
-			t.Fatalf("dirty checkout %q opened screen %d", key, updated.screen)
-		}
-		if intent, found := updated.Intent(); found {
-			t.Fatalf("dirty checkout %q emitted %#v", key, intent)
-		}
+	if strings.Contains(normalizedView, "New workspace unavailable") {
+		t.Fatalf("dirty checkout incorrectly disabled reviewed create:\n%s", view)
+	}
+	updated, command := dashboardPress(t, model, textKey("c"))
+	if command != nil || updated.screen != dashboardCreate {
+		t.Fatalf("dirty checkout create did not open reviewed form: screen=%d command=%v", updated.screen, command)
+	}
+	updated, command = dashboardPress(t, NewDashboardModel(data), textKey("u"))
+	if command != nil {
+		t.Fatal("dirty ordinary update exited")
+	}
+	if intent, found := updated.Intent(); found {
+		t.Fatalf("dirty ordinary update emitted %#v", intent)
 	}
 }
 
@@ -152,7 +161,7 @@ func TestDashboardFailsClosedWhenCheckoutIdentityIsUnavailable(t *testing.T) {
 	data.Branch, data.Revision = "", ""
 	model := NewDashboardModel(data)
 	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Local checkout", "Unavailable", "Source branch or revision unavailable", "Create unavailable", "Update unavailable"} {
+	for _, expected := range []string{"Local checkout", "Unavailable", "Source unavailable", "New workspace unavailable", "Update is unavailable"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("missing checkout view omitted %q:\n%s", expected, view)
 		}
@@ -172,8 +181,15 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 	for _, open := range []bool{true, false} {
 		model := NewDashboardModel(dashboardFixture("running"))
 		model, _ = dashboardPress(t, model, textKey("c"))
-		view := ansi.Strip(model.View().Content)
-		for _, expected := range []string{"Create workspace", "Name", "Starting point", "feat/branch-1 @ abc123 (immutable)", "Default agent", "OMP — inherited from project", "Create and open", "Create in background"} {
+		var views strings.Builder
+		for focus := range createFormFocusCount {
+			model.focus = focus
+			views.WriteString(ansi.Strip(model.View().Content))
+			views.WriteByte('\n')
+		}
+		model.focus = 0
+		view := views.String()
+		for _, expected := range []string{"Create workspace", "Workspace name", "feat/branch-1 @ abc123", "Coding assistant", "OMP — project default", "Include local changes", "Create and open a shell", "Create in background"} {
 			if !strings.Contains(view, expected) {
 				t.Fatalf("create form omitted %q:\n%s", expected, view)
 			}
@@ -187,6 +203,7 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 		for _, r := range "feature-new" {
 			model, _ = dashboardPress(t, model, textKey(string(r)))
 		}
+		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 		if !open {
@@ -203,11 +220,85 @@ func TestCreateFormContainsOnlyWorkspaceInputsAndEmitsBothActions(t *testing.T) 
 		}
 	}
 }
+
+func TestSnapshotCreateRequiresExplicitReviewAndPreservesFormOnBack(t *testing.T) {
+	data := dashboardFixture("running")
+	data.Clean = false
+	model := NewDashboardModel(data)
+	model, _ = dashboardPress(t, model, textKey("c"))
+	for _, r := range "dirty-work" {
+		model, _ = dashboardPress(t, model, textKey(string(r)))
+	}
+	for range 2 {
+		model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+	}
+	model, _ = dashboardPress(t, model, textKey(" "))
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
+	if command != nil || model.screen != dashboardCreateSnapshotReview {
+		t.Fatalf("snapshot create skipped review: screen=%d command=%v", model.screen, command)
+	}
+	if _, found := model.Intent(); found {
+		t.Fatal("snapshot review emitted an intent before confirmation")
+	}
+	view := ansi.Strip(model.View().Content)
+	normalizedReview := strings.Join(strings.Fields(strings.ReplaceAll(view, "│", " ")), " ")
+	for _, expected := range []string{
+		"Review source snapshot",
+		"dirty-work",
+		"feat/branch-1 @ abc123",
+		"Includes final tracked file content and nonignored untracked files.",
+		"Ignored untracked files stay on the host; tracked files remain included.",
+		"Unmerged paths and Git submodules are rejected.",
+		"Your branch, HEAD, index, worktree, and durable refs are not changed.",
+	} {
+		if !strings.Contains(normalizedReview, expected) {
+			t.Fatalf("snapshot review omitted %q:\nnormalized=%q\n%s", expected, normalizedReview, view)
+		}
+	}
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyEscape))
+	if model.screen != dashboardCreate || model.name != "dirty-work" || !model.snapshot || !model.pendingCreateOpen {
+		t.Fatalf("review back lost form state: %#v", model)
+	}
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyEnter))
+	model, command = dashboardPress(t, model, textKey("y"))
+	want := Intent{
+		Action: "workspace-create", Root: data.Root, Workspace: "dirty-work",
+		SourceBranch: data.Branch, SourceRevision: data.Revision,
+		Snapshot: true, Agent: "omp", Open: true,
+	}
+	intent, found := model.Intent()
+	if command == nil || !found || intent != want {
+		t.Fatalf("snapshot intent = %#v, found=%t, command=%v; want %#v", intent, found, command, want)
+	}
+}
+
+func TestDirtyCreateWithoutSnapshotStaysInForm(t *testing.T) {
+	data := dashboardFixture("running")
+	data.Clean = false
+	model := NewDashboardModel(data)
+	model, _ = dashboardPress(t, model, textKey("c"))
+	for _, r := range "dirty-work" {
+		model, _ = dashboardPress(t, model, textKey(string(r)))
+	}
+	model.focus = 3
+	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
+	if command != nil || model.screen != dashboardCreate {
+		t.Fatalf("unchecked dirty create left form: screen=%d command=%v", model.screen, command)
+	}
+	if _, found := model.Intent(); found {
+		t.Fatal("unchecked dirty create emitted an intent")
+	}
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "Enable Include local changes to create from a dirty checkout.") {
+		t.Fatalf("unchecked dirty create omitted guidance:\n%s", view)
+	}
+}
 func TestDashboardVSCodeAttachOnlyForRunningWorkspace(t *testing.T) {
 	data := dashboardFixture("running")
 	data.Workspaces = []DashboardWorkspace{{Name: "running", State: "running"}, {Name: "stopped", State: "stopped"}}
 	model := NewDashboardModel(data)
-	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "[v] Attach with VS Code (experimental)") {
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "[v] Open in VS Code (experimental)") {
 		t.Fatalf("running actions omit VS Code attach: %s", view)
 	}
 	updated, cmd := model.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
@@ -216,7 +307,7 @@ func TestDashboardVSCodeAttachOnlyForRunningWorkspace(t *testing.T) {
 	}
 	model = NewDashboardModel(data)
 	model.selected = 1
-	if view := ansi.Strip(model.View().Content); strings.Contains(view, "[v] Attach with VS Code (experimental)") {
+	if view := ansi.Strip(model.View().Content); strings.Contains(view, "[v] Open in VS Code (experimental)") {
 		t.Fatalf("stopped actions expose VS Code attach: %s", view)
 	}
 }
@@ -233,6 +324,7 @@ func TestCreateFormSelectsOnlyApprovedDefaultAgents(t *testing.T) {
 		t.Fatalf("approved agent selector did not move to Codex:\n%s", view)
 	}
 	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
+	model, _ = dashboardPress(t, model, specialKey(tea.KeyTab))
 	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
 	intent, found := model.Intent()
 	if command == nil || !found || intent.Agent != "codex" {
@@ -246,7 +338,7 @@ func TestCreateFormValidatesNameAndCancellationIsSideEffectFree(t *testing.T) {
 	for _, r := range "Bad-" {
 		model, _ = dashboardPress(t, model, textKey(string(r)))
 	}
-	model.focus = 2
+	model.focus = 3
 	model, command := dashboardPress(t, model, specialKey(tea.KeyEnter))
 	if command != nil {
 		t.Fatal("invalid name exited")
@@ -271,8 +363,15 @@ func TestAgentFormContainsOnlyAgentAndSessionBrowser(t *testing.T) {
 	data.Workspaces[0].DefaultAgent = "codex"
 	model := NewDashboardModel(data)
 	model, _ = dashboardPress(t, model, textKey("a"))
-	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Open agent", "Agent", "Codex", "Enable isolated browser for this session only"} {
+	var views strings.Builder
+	for focus := range agentFormFocusCount {
+		model.focus = focus
+		views.WriteString(ansi.Strip(model.View().Content))
+		views.WriteByte('\n')
+	}
+	model.focus = 0
+	view := views.String()
+	for _, expected := range []string{"Open coding assistant", "Coding assistant", "Codex", "Isolated browser", "assistant session"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("agent form omitted %q:\n%s", expected, view)
 		}
@@ -425,6 +524,70 @@ func TestDashboardAWSUnavailableGuidanceIsSafeAndCancellationHasNoIntent(t *test
 	}
 }
 
+func TestDashboardScreensFitTerminalAndUseResponsiveLayouts(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	data := dashboardFixture("running")
+	data.AWSCapability = "host-default"
+	data.Workspaces = []DashboardWorkspace{
+		{Name: "feature-a", State: "running", AWSEnabled: true, AWSHostAvailability: "available", AWSMirrorHealth: "current"},
+		{Name: "feature-b", State: "stopped", AWSHostAvailability: "available", AWSMirrorHealth: "current"},
+		{Name: "tests", State: "needs_resolution", AWSHostAvailability: "available", AWSMirrorHealth: "current"},
+	}
+	screens := []struct {
+		name   string
+		screen dashboardScreen
+	}{
+		{name: "home", screen: dashboardHome},
+		{name: "create", screen: dashboardCreate},
+		{name: "snapshot review", screen: dashboardCreateSnapshotReview},
+		{name: "agent", screen: dashboardAgent},
+		{name: "Git", screen: dashboardGit},
+		{name: "remove", screen: dashboardRemove},
+		{name: "AWS", screen: dashboardAWS},
+	}
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 40, Height: 18},
+		{Width: 40, Height: 40},
+		{Width: 60, Height: 28},
+		{Width: 80, Height: 24},
+		{Width: 80, Height: 30},
+		{Width: 128, Height: 40},
+	} {
+		for _, screen := range screens {
+			t.Run(fmt.Sprintf("%s/%dx%d", screen.name, size.Width, size.Height), func(t *testing.T) {
+				model := NewDashboardModel(data)
+				model.screen = screen.screen
+				model.name = "feature-new"
+				model.Update(size)
+				view := ansi.Strip(model.View().Content)
+				assertLinesFit(t, view, size.Width)
+				if height := len(strings.Split(strings.TrimRight(view, "\n"), "\n")); height > size.Height {
+					t.Fatalf("%s uses %d lines in a %dx%d terminal:\n%s", screen.name, height, size.Width, size.Height, view)
+				}
+			})
+		}
+	}
+
+	stacked := NewDashboardModel(dashboardFixture("running"))
+	stacked.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	if view := ansi.Strip(stacked.View().Content); strings.Count(view, "╭") < 3 {
+		t.Fatalf("medium dashboard did not render stacked bordered panels:\n%s", view)
+	}
+
+	wide := NewDashboardModel(data)
+	wide.Update(tea.WindowSizeMsg{Width: 128, Height: 40})
+	foundMasterDetailRow := false
+	for _, line := range strings.Split(ansi.Strip(wide.View().Content), "\n") {
+		if strings.Contains(line, "Workspaces") && strings.Contains(line, "Selected workspace") {
+			foundMasterDetailRow = true
+			break
+		}
+	}
+	if !foundMasterDetailRow {
+		t.Fatalf("wide dashboard did not render workspace list and selected details side by side:\n%s", wide.View().Content)
+	}
+}
+
 func TestDashboardSanitizesBoundsNoColorAndResizes(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	hostile := "branch\x1b]52;c;secret\a\u202espoof"
@@ -527,7 +690,7 @@ func TestRunnerForceSetupApprovesExistingConfiguration(t *testing.T) {
 
 func TestAccessibleCreateFormEmitsReviewedWorkspaceIntent(t *testing.T) {
 	var output bytes.Buffer
-	runner := &Runner{Input: strings.NewReader("cfeature-new\t\t\n"), Output: &output}
+	runner := &Runner{Input: strings.NewReader("cfeature-new\t\t\t\n"), Output: &output}
 	final, err := runner.runAccessibleAction(NewDashboardModel(dashboardFixture("running")))
 	if err != nil {
 		t.Fatal(err)
@@ -548,4 +711,54 @@ func TestAccessibleCreateFormEmitsReviewedWorkspaceIntent(t *testing.T) {
 		}
 	}
 	assertTerminalSafe(t, output.String())
+}
+
+func TestAccessibleDirtySnapshotCreateRequiresReview(t *testing.T) {
+	data := dashboardFixture("running")
+	data.Clean = false
+	var output bytes.Buffer
+	runner := &Runner{Input: strings.NewReader("cdirty-work\t\t \t\ny"), Output: &output}
+	final, err := runner.runAccessibleAction(NewDashboardModel(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, found := final.(*DashboardModel).Intent()
+	want := Intent{
+		Action: "workspace-create", Root: data.Root, Workspace: "dirty-work",
+		SourceBranch: data.Branch, SourceRevision: data.Revision,
+		Snapshot: true, Agent: "omp", Open: true,
+	}
+	if !found || intent != want {
+		t.Fatalf("accessible snapshot intent = %#v, found=%t; want %#v", intent, found, want)
+	}
+	normalized := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(output.String()), "│", " ")), " ")
+	for _, expected := range []string{
+		"Review source snapshot",
+		"Includes final tracked file content and nonignored untracked files.",
+		"Your branch, HEAD, index, worktree, and durable refs are not changed.",
+	} {
+		if !strings.Contains(normalized, expected) {
+			t.Fatalf("accessible snapshot output omitted %q: %q", expected, normalized)
+		}
+	}
+	assertTerminalSafe(t, output.String())
+}
+
+func TestSnapshotReviewRespectsSmallTerminalWidths(t *testing.T) {
+	for _, width := range []int{20, 40} {
+		model := NewDashboardModel(dashboardFixture("running"))
+		model.screen = dashboardCreateSnapshotReview
+		model.name = "dirty-work"
+		model.snapshot = true
+		model.Update(tea.WindowSizeMsg{Width: width, Height: 16})
+		view := ansi.Strip(model.View().Content)
+		for _, line := range strings.Split(view, "\n") {
+			if terminal.Width(line) > width {
+				t.Fatalf("width %d snapshot review overflow: %q", width, line)
+			}
+		}
+		if len(view) > 16*1024 {
+			t.Fatalf("width %d snapshot review exceeded output bound: %d", width, len(view))
+		}
+	}
 }

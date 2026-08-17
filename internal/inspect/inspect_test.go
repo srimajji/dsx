@@ -12,6 +12,8 @@ import (
 
 func TestInspectCompositeWorkspaceStableRelativeFacts(t *testing.T) {
 	root := copyFixture(t, "composite")
+	writeTestFile(t, root, ".git", "gitdir: /nonexistent/project-root\n")
+	writeTestFile(t, root, "apps/api/.git", "gitdir: /nonexistent/api-root\n")
 	before := snapshotTree(t, root)
 
 	first, err := Inspect(root)
