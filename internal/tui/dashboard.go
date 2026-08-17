@@ -488,10 +488,32 @@ func (model *DashboardModel) renderHome(theme visualTheme) string {
 		columns := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 		return theme.panel("Local checkout", source, width, model.height, false) + tuiGap(model.height) + columns
 	}
+
 	workspaceWidth := theme.panelBodyWidth(width, model.height)
-	return theme.panel("Local checkout", source, width, model.height, false) + tuiGap(model.height) +
-		theme.panel("Workspaces", model.renderWorkspaceList(theme, workspaceWidth), width, model.height, len(model.data.Workspaces) != 0) + tuiGap(model.height) +
-		theme.panel("Selected workspace", model.renderSelectedWorkspace(theme, workspaceWidth), width, model.height, true)
+	gap := tuiGap(model.height)
+	sourcePanel := theme.panel("Local checkout", source, width, model.height, false)
+	workspaceBody := wrapTUIText(model.renderWorkspaceList(theme, workspaceWidth), workspaceWidth)
+	selectedPanel := theme.panel("Selected workspace", model.renderSelectedWorkspace(theme, workspaceWidth), width, model.height, true)
+	stackedHeight := max(1, model.height-lipgloss.Height(theme.header("Workspaces", friendlyProjectName(model.data.Root), width))-lipgloss.Height(gap))
+	for lineBudget := len(strings.Split(workspaceBody, "\n")); lineBudget >= 1; lineBudget-- {
+		workspacePanel := theme.panel("Workspaces", truncateDashboardLines(theme, workspaceBody, lineBudget), width, model.height, len(model.data.Workspaces) != 0)
+		stacked := sourcePanel + gap + workspacePanel + gap + selectedPanel
+		if lipgloss.Height(stacked) <= stackedHeight {
+			return stacked
+		}
+	}
+	return model.renderCompactHome(theme, width)
+}
+
+func truncateDashboardLines(theme visualTheme, content string, limit int) string {
+	lines := strings.Split(content, "\n")
+	if limit <= 0 || len(lines) <= limit {
+		return content
+	}
+	if limit == 1 {
+		return theme.muted.Render("…")
+	}
+	return strings.Join(append(lines[:limit-1], theme.muted.Render("…")), "\n")
 }
 
 func (model *DashboardModel) renderCompactHome(theme visualTheme, width int) string {

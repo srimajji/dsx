@@ -524,12 +524,15 @@ func TestDashboardAWSUnavailableGuidanceIsSafeAndCancellationHasNoIntent(t *test
 	}
 }
 
-func TestDashboardScreensFitTerminalAndUseWideMasterDetail(t *testing.T) {
+func TestDashboardScreensFitTerminalAndUseResponsiveLayouts(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	data := dashboardFixture("running")
 	data.AWSCapability = "host-default"
-	data.Workspaces[0].AWSHostAvailability = "available"
-	data.Workspaces[0].AWSMirrorHealth = "current"
+	data.Workspaces = []DashboardWorkspace{
+		{Name: "feature-a", State: "running", AWSEnabled: true, AWSHostAvailability: "available", AWSMirrorHealth: "current"},
+		{Name: "feature-b", State: "stopped", AWSHostAvailability: "available", AWSMirrorHealth: "current"},
+		{Name: "tests", State: "needs_resolution", AWSHostAvailability: "available", AWSMirrorHealth: "current"},
+	}
 	screens := []struct {
 		name   string
 		screen dashboardScreen
@@ -544,7 +547,10 @@ func TestDashboardScreensFitTerminalAndUseWideMasterDetail(t *testing.T) {
 	}
 	for _, size := range []tea.WindowSizeMsg{
 		{Width: 40, Height: 18},
+		{Width: 40, Height: 40},
+		{Width: 60, Height: 28},
 		{Width: 80, Height: 24},
+		{Width: 80, Height: 30},
 		{Width: 128, Height: 40},
 	} {
 		for _, screen := range screens {
@@ -560,6 +566,12 @@ func TestDashboardScreensFitTerminalAndUseWideMasterDetail(t *testing.T) {
 				}
 			})
 		}
+	}
+
+	stacked := NewDashboardModel(dashboardFixture("running"))
+	stacked.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	if view := ansi.Strip(stacked.View().Content); strings.Count(view, "╭") < 3 {
+		t.Fatalf("medium dashboard did not render stacked bordered panels:\n%s", view)
 	}
 
 	wide := NewDashboardModel(data)
