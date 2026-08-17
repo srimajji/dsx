@@ -173,6 +173,26 @@ func TestWorkspaceUpdatePropagatesSnapshotAndRecordedProvenance(t *testing.T) {
 	}
 }
 
+func TestWorkspaceUpdateRejectsOrdinaryIngressAfterSnapshot(t *testing.T) {
+	fixture := newWorkspaceFixture(t)
+	if _, err := fixture.service.Create(context.Background(), WorkspaceCreateRequest{
+		Root: fixture.root, Workspace: "update-snapshot", Snapshot: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := fixture.service.Update(context.Background(), WorkspaceUpdateRequest{
+		Root: fixture.root, Workspace: "update-snapshot",
+	})
+	if model.ErrorCodeOf(err) != model.CodeConflict ||
+		!strings.Contains(err.Error(), "rerun the update with --snapshot") {
+		t.Fatalf("ordinary update error = %v, want actionable snapshot conflict", err)
+	}
+	if len(fixture.git.updateRequests) != 0 {
+		t.Fatalf("ordinary update prepared lossy source requests: %#v", fixture.git.updateRequests)
+	}
+}
+
 func TestSecureCopiedWorkspaceFileUsesNonInteractiveSudoForPrivateOwnership(t *testing.T) {
 	fixture := newWorkspaceFixture(t)
 	guest := "/tmp/dsx-update-run/source-0.bundle"

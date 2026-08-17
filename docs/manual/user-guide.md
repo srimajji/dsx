@@ -366,6 +366,8 @@ DSX transfers the latest committed source, verifies it, records a backup ref, an
 
 Snapshot update is an explicit CLI operation. It uses the same final-worktree inclusion, ignored-file exclusion, synthetic-parent, bounded-input, race-revalidation, cleanup, and host non-mutation contracts as snapshot creation. DSX persists the new synthetic source plus its real host `HEAD` and tree, then rebases only workspace-result commits from the previous recorded source onto the new snapshot. The TUI intentionally keeps update clean-only and points dirty users to this command.
 
+A workspace whose current source is a snapshot must continue using `--snapshot` for updates. An ordinary update is rejected with guidance rather than silently replacing the captured baseline with committed-only content. To return to ordinary committed ingress, first preserve the workspace result, remove the workspace, and recreate it from a clean committed checkout.
+
 On conflict the manifest durably records the requested source kind and revision, the state becomes `needs_resolution`, and the valid Git rebase state is preserved:
 
 ```console

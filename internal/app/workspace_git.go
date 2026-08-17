@@ -45,6 +45,17 @@ func (service *WorkspaceService) Update(ctx context.Context, request WorkspaceUp
 	if manifest.State != model.StateRunning && manifest.State != model.StateStopped {
 		return result, model.NewError(model.CodeConflict, "workspace is not ready to update", nil)
 	}
+	if !request.Snapshot {
+		for _, record := range manifest.Git {
+			if record.SourceSnapshot {
+				return result, model.NewError(
+					model.CodeConflict,
+					"workspace uses a snapshot source; rerun the update with --snapshot to preserve its captured baseline",
+					nil,
+				)
+			}
+		}
+	}
 	artifacts := make([]gitx.SourceArtifact, 0, len(manifest.Git))
 	defer func() { returnErr = errors.Join(returnErr, service.removeSourceArtifacts(artifacts)) }()
 	for _, record := range manifest.Git {

@@ -288,6 +288,8 @@ $ dsx workspace update feature-a --snapshot
 
 Snapshot update uses the same inclusion, exclusion, parent, and host non-mutation rules as snapshot creation. It records the new synthetic source and its real host `HEAD`, then rebases workspace-only commits onto that synthetic commit. DSX never stashes work, merges unrelated branches, or attempts semantic conflict resolution.
 
+After a workspace is created or updated with `--snapshot`, keep using `--snapshot` for subsequent updates. DSX rejects an ordinary update because switching directly to committed-only ingress would discard captured baseline content. Preserve the workspace result, remove the workspace, and recreate it from a clean committed checkout to return to ordinary ingress.
+
 If a conflict occurs, the workspace becomes **Needs resolution** and remains openable:
 
 ```console
