@@ -8,38 +8,45 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # Ordinary CI must never opt into even the read-only installed-runtime probe.
 env:
   DSX_APPLE_CONTAINER: ""
 
 jobs:
   unit:
-    runs-on: ubuntu-24.04
+    # DSX's host packages target Darwin; Linux-native guest coverage is separate.
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
           check-latest: false
           cache: true
       - name: Unit tests
         run: go test ./...
+      - name: Build Darwin ARM64 host
+        run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o /tmp/dsx-darwin-arm64 ./cmd/dsx
       - name: Cross-compile Linux ARM64 guest helper (not executed)
         run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/dsx-guest-linux-arm64 ./cmd/dsx-guest
       - name: Guest import closure
         run: go test ./tests/contract -run '^TestGuestImportClosure$'
 
   host-race:
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
           check-latest: false
@@ -52,10 +59,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
           check-latest: false
@@ -91,27 +98,13 @@ jobs:
           - package: ./internal/hostopen
             target: FuzzCallbackValidation
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.5
           check-latest: false
           cache: true
       - name: Finite fuzz smoke
         run: go test "${{ matrix.package }}" -run '^$' -fuzz "^${{ matrix.target }}$" -fuzztime=10s
-
-  darwin-build:
-    runs-on: macos-15
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: 1.26.5
-          check-latest: false
-          cache: true
-      - run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath ./cmd/dsx
