@@ -19,7 +19,7 @@ This comparison extends the [2026-08-13 landscape table](./research-2026-08-13-g
 | Isolation unit | Docker/OrbStack container, shared Linux kernel | Apple `container` microVM per workspace |
 | Source ingress (git) | `git worktree add` executed inside the container against the host repo's `.git/`, bind-mounted read-write at its identical absolute path | Verified mode-0600 Git bundle into a guest-owned private repository |
 | Uncommitted state | Host `git stash create` SHA replayed in-box, plus tar-piped untracked files (gitignore-respecting) | Not supported yet; identical mechanism proposed as POST-MVP-009 |
-| No-git projects | `tar` pipe from the host workspace, optionally from an APFS `cp -c` clone (`--host-snapshot`) | Not supported; shadow-repo idea parked (memory/projects/dsx.md) |
+| No-git projects | `tar` pipe from the host workspace, optionally from an APFS `cp -c` clone (`--host-snapshot`) | Not supported; shadow-repo idea parked, no backlog entry yet |
 | Cloud ingress | Clone-and-tar with depth heuristics; `git bundle` was evaluated and rejected for shallow seeding | Full reachable bundle, no shallow |
 | Result egress | `agentbox download` (gitignore-aware rsync back), or relay-mediated push: `git push` runs on the host with host credentials | Committed result bundle → `refs/remotes/dsx/<ws>` → guarded apply |
 | Credentials | Never in the box for git push (host relay); shared `~/.claude` volume mounted into every box for harness identity | Isolated per-workspace copies from a canonical DSX store |
